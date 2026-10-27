@@ -19,3 +19,9 @@ class WorkspaceService:
 
     def list_workspaces(self) -> list[Workspace]:
         return list(self._workspaces)
+
+    def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+        return next(
+            (workspace for workspace in self._workspaces if workspace.id == workspace_id),
+            None,
+        )
