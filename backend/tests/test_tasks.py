@@ -62,7 +62,13 @@ def test_missing_workspace_returns_404(client: TestClient) -> None:
     response = client.post("/tasks", json=task_payload(str(uuid4())))
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Workspace not found"}
+    assert response.json() == {
+        "error": {
+            "code": "WORKSPACE_NOT_FOUND",
+            "message": "Workspace not found",
+            "details": [],
+        }
+    }
 
 
 def test_invalid_workspace_id_returns_422(client: TestClient) -> None:

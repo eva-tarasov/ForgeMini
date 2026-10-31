@@ -1,6 +1,7 @@
 from typing import Annotated
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
+from app.api.errors import ApiError
 from app.schemas.task import TaskCreate, TaskResponse
 from app.services.tasks import TaskService, WorkspaceNotFoundError
 
@@ -25,7 +26,7 @@ def create_task(
             acceptance_criteria=payload.acceptance_criteria,
         )
     except WorkspaceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Workspace not found") from exc
+        raise ApiError(404, "WORKSPACE_NOT_FOUND", "Workspace not found") from exc
     return TaskResponse.model_validate(task, from_attributes=True)
 
 
@@ -37,5 +38,5 @@ def get_task(
 ) -> TaskResponse:
     task = service.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise ApiError(404, "TASK_NOT_FOUND", "Task not found")
     return TaskResponse.model_validate(task, from_attributes=True)
