@@ -33,6 +33,46 @@ curl -i http://127.0.0.1:8000/workspaces
 
 Workspace хранятся только в памяти запущенного приложения и исчезают после его перезапуска.
 
+## Локальный PostgreSQL
+
+Для PostgreSQL 17 нужен Docker с Compose. Из корня репозитория создайте локальный файл настроек и замените шаблонный пароль своим значением. Файл `.env` игнорируется Git; `.env.example` содержит только шаблон.
+
+```bash
+cp .env.example .env
+# Отредактируйте POSTGRES_PASSWORD в .env перед запуском.
+docker compose config --quiet
+docker compose up -d --wait
+docker compose ps
+```
+
+База доступна только на `127.0.0.1:55432` (или на порту из `POSTGRES_PORT` в `.env`). Для проверки SQL используйте `psql` внутри контейнера; дополнительная установка на хосте не нужна:
+
+```bash
+docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "SELECT current_database(), 1 AS ok;"'
+```
+
+Проверка сохранности данных при пересоздании контейнера:
+
+```bash
+docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
+CREATE TABLE IF NOT EXISTS forge_persistence_check (id integer PRIMARY KEY, marker text NOT NULL);
+INSERT INTO forge_persistence_check (id, marker) VALUES (1, 'survived_restart')
+ON CONFLICT (id) DO UPDATE SET marker = EXCLUDED.marker;
+SELECT marker FROM forge_persistence_check WHERE id = 1;
+SQL
+docker compose down
+docker compose up -d --wait
+docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "SELECT marker FROM forge_persistence_check WHERE id = 1;"'
+```
+
+Последний `SELECT` должен вернуть `survived_restart`. Команда `docker compose down` удаляет контейнер и сеть, но сохраняет named volume `postgres_data` с данными. После проверки остановите сервис:
+
+```bash
+docker compose down
+```
+
+PostgreSQL пока не подключён к FastAPI: Workspace и Task по-прежнему хранятся в памяти. Запуск API из раздела выше не меняется.
+
 ## Ошибки API
 
 Предусмотренные ошибки возвращаются в едином формате:
