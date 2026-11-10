@@ -288,7 +288,7 @@ GET  /tasks/{task_id}
 
 # WEEK 2 — Persistence & Data Model
 
-**Status:** in progress — начальная схема принята; PostgreSQL-репозитории и интеграция сервисов в работе
+**Status:** in progress — PostgreSQL-репозитории приняты; execution data contracts ожидают финального review и merge
 
 **Оценка:** 24–28 часов  
 **Codex:** LEARNING -> ENGINEERING
@@ -302,8 +302,8 @@ GET  /tasks/{task_id}
 - [x] 01. PostgreSQL + Docker Compose: локальный DB instance, конфигурация, healthcheck, named volume, проверка persistence на уровне БД. Evidence: [PR #5](https://github.com/eva-tarasov/myFirstForge/pull/5), локальная проверка persistence сообщена пользователем; в текущем сеансе не повторялась.
 - [x] 02. SQLAlchemy 2.x async: engine/session и typed configuration. Evidence: PR #6 merged в main, squash `8622798`; 57 passed, 2 skipped, 1 warning; 2 PostgreSQL integration tests passed; `git diff --check` проверен пользователем. BL-06 остаётся открытым.
 - [x] 03. Initial data model + Alembic. Evidence: PR #7 merged в main, squash `0286c15`; 59 passed, 4 skipped, 1 warning; schema integration 2 passed; Alembic upgrade/current/check/repeated upgrade PASS; `git diff --check` PASS.
-- [ ] 04. Repository + service boundaries: миграция Workspace/Task с in-memory на PostgreSQL. В работе.
-- [ ] 05. AgentRun/AgentEvent/ToolCall/Approval/Artifact data contracts и constraints по roadmap, без исполнения агента.
+- [x] 04. Repository + service boundaries. Evidence: PR #8 merged, squash `24fa648`; 63 passed, 5 skipped, 1 warning; PostgreSQL integration 1 passed; Alembic upgrade/current/check/repeated upgrade и Git diff --check PASS.
+- [ ] 05. AgentRun/AgentEvent/ToolCall/Approval/Artifact data contracts. IN PROGRESS: ORM-модели, revision `ecb758eac83b` и тесты реализованы; DB verification завершена, PR #9 ожидает финального review и merge. Evidence: 72 passed, 6 skipped, 1 warning; Alembic upgrade/current/check/repeated upgrade PASS; PostgreSQL integration сообщён пользователем как успешный, в прогоне Codex 05B — 1 passed; Git diff --check PASS. Исполнение агента не реализовано.
 - [ ] 06. Persisted state transitions, transaction boundaries и минимальная idempotency-политика.
 - [ ] 07. Integration/restart/migration verification, documentation, backlog review и Week 2 exit criteria.
 

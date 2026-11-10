@@ -125,6 +125,33 @@ FORGE_TEST_SCHEMA_DB="$TEST_DB" python -m pytest -q tests/test_schema_integratio
 
 Тесты схемы запускаются только при заданном `FORGE_TEST_SCHEMA_DB` с префиксом `forge_task03_` и откатывают свои строки. Тестовая база остаётся на месте; её удаление требует отдельного решения. `alembic check` дополняет, а не заменяет проверки ограничений в PostgreSQL.
 
+## Данные исполнения агента
+
+Task описывает намерение, AgentRun — отдельную попытку исполнения: один Task может иметь несколько AgentRun. У AgentRun есть AgentEvent для структурированных событий, ToolCall для записи вызовов инструментов и Artifact со ссылкой на результат. Approval связан с ToolCall; для одного вызова допускается несколько согласований.
+
+Связи: `Task → AgentRun → AgentEvent / ToolCall / Artifact`, а также `ToolCall → Approval`. Внешние ключи используют `ON DELETE RESTRICT`. Номера попыток уникальны в пределах Task, номера событий — в пределах AgentRun; оба положительны. CHECK ограничивает значения статусов и запрещает пустые обязательные строки. Время хранится с часовым поясом, payload события — в JSONB. Проверки значений статуса не обеспечивают допустимость переходов. Исполнение агента, retry, resume и переходы состояний пока не реализованы.
+
+Для проверки Task 05 создайте отдельную пустую базу с префиксом `forge_task05_`. Из корня репозитория при запущенном Compose и установленных зависимостях выполните:
+
+```bash
+TEST_DB=forge_task05_$(date +%Y%m%d_%H%M%S)
+if docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB"; then
+  (
+    cd backend || exit 1
+    export POSTGRES_DB="$TEST_DB" POSTGRES_HOST=127.0.0.1
+    .venv/bin/python -m alembic upgrade head &&
+    .venv/bin/python -m alembic current &&
+    .venv/bin/python -m alembic check &&
+    .venv/bin/python -m alembic upgrade head &&
+    FORGE_TASK05_TEST_DB="$TEST_DB" .venv/bin/python -m pytest -q tests/test_execution_schema_integration.py
+  )
+else
+  printf 'База не создана; выберите другое имя и повторите.\n' >&2
+fi
+```
+
+Тест требует совпадения `POSTGRES_DB` и `FORGE_TASK05_TEST_DB`, проверяет префикс и откатывает тестовые записи. Созданная база остаётся на месте.
+
 ## Ошибки API
 
 Предусмотренные ошибки возвращаются в едином формате:
