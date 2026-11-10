@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from app.main import create_app
+from fake_app import create_test_app as create_app
 
 
 @pytest.fixture

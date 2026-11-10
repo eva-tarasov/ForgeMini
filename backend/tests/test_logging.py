@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.logging import JsonFormatter
-from app.main import create_app
+from fake_app import create_test_app as create_app
 
 
 class CaptureHandler(logging.Handler):

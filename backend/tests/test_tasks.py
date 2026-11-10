@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from fake_app import create_test_app as create_app
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ def test_multiple_tasks_can_share_workspace(client: TestClient, workspace_id: st
     assert first.json()["workspace_id"] == second.json()["workspace_id"] == workspace_id
 
 
-def test_task_storage_is_isolated_by_app(client: TestClient, workspace_id: str) -> None:
+def test_task_storage_is_isolated_by_fake_repository(client: TestClient, workspace_id: str) -> None:
     created = client.post("/tasks", json=task_payload(workspace_id)).json()
 
     with TestClient(create_app()) as other_client:

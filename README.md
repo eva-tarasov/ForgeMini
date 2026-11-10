@@ -3,6 +3,7 @@
 Минимальный FastAPI backend для проекта Forge. Требуется Python 3.11 или новее.
 
 Документация: [архитектура](docs/ARCHITECTURE.md), [учебное руководство](docs/LEARNING_GUIDE.md), [ADR-001](docs/adr/ADR-001.md), [backlog](backlog.md).
+Документ архитектуры описывает состояние Week 1; актуальный запуск PostgreSQL и API приведён ниже.
 
 ## Установка
 
@@ -16,7 +17,13 @@ python -m pip install -e ".[dev]"
 
 ## Запуск
 
+Сначала запустите PostgreSQL из корня репозитория, затем примените миграции из `backend` и запустите API:
+
 ```bash
+# Из корня репозитория, после настройки .env:
+docker compose up -d --wait
+cd backend
+alembic upgrade head
 python -m uvicorn app.main:app --reload
 ```
 
@@ -31,14 +38,14 @@ curl -i -X POST http://127.0.0.1:8000/workspaces \
 curl -i http://127.0.0.1:8000/workspaces
 ```
 
-Workspace хранятся только в памяти запущенного приложения и исчезают после его перезапуска.
+Workspace и Task хранятся в PostgreSQL и доступны после перезапуска приложения. `GET /workspaces` возвращает записи в порядке UUID по возрастанию.
 
 ## Локальный PostgreSQL
 
 Для PostgreSQL 17 нужен Docker с Compose. Из корня репозитория создайте локальный файл настроек и замените шаблонный пароль своим значением. Файл `.env` игнорируется Git; `.env.example` содержит только шаблон.
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 # Отредактируйте POSTGRES_PASSWORD в .env перед запуском.
 docker compose config --quiet
 docker compose up -d --wait
@@ -71,7 +78,7 @@ docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGR
 docker compose down
 ```
 
-PostgreSQL пока не подключён к FastAPI: Workspace и Task по-прежнему хранятся в памяти. Запуск API из раздела выше не меняется.
+Для работы API PostgreSQL должен быть запущен, а миграции применены отдельно.
 
 ## Асинхронное подключение к PostgreSQL
 
@@ -79,7 +86,7 @@ PostgreSQL пока не подключён к FastAPI: Workspace и Task по-�
 
 Загрузчик `.env` интерполирует последовательности вида `${NAME}` даже в значениях в одинарных кавычках. Для буквального `${...}` в пароле задайте `POSTGRES_PASSWORD` через окружение и для Compose, и для приложения.
 
-`create_engine(settings)` создаёт `AsyncEngine` с драйвером asyncpg и проверкой соединений пула; само подключение открывается при первом обращении. URL собирается из отдельных полей, поэтому специальные символы пароля не ломают его разбор. `create_session_factory(engine)` создаёт фабрику с `expire_on_commit=False`. Для каждой конкурентной задачи нужна своя `AsyncSession`: её нельзя разделять между задачами. Владелец engine должен вызвать `await engine.dispose()` после завершения работы. Подключение пока не добавлено в lifecycle FastAPI.
+`create_engine(settings)` создаёт `AsyncEngine` с драйвером asyncpg и проверкой соединений пула; само подключение открывается при первом обращении. URL собирается из отдельных полей, поэтому специальные символы пароля не ломают его разбор. Lifespan FastAPI создаёт engine и фабрику с `expire_on_commit=False`, а при остановке освобождает engine. Для каждого запроса создаётся отдельная `AsyncSession`, закрываемая после запроса. Сервисы завершают commit до успешного ответа; при ошибке выполняется rollback.
 
 Session управляет работой с соединением и транзакцией: SQL-запрос может неявно начать транзакцию, а для сохранения будущих изменений понадобится явный `commit`. При выходе из контекста session закрывается; незавершённая транзакция откатывается.
 
@@ -139,3 +146,15 @@ Forge пишет одну JSON-строку в стандартный поток
 ```bash
 python -m pytest -q
 ```
+
+Для opt-in проверки репозиториев создайте отдельную пустую базу из корня репозитория. Если `createdb` завершится ошибкой, остановитесь и выберите другое имя:
+
+```bash
+TEST_DB=forge_task04_$(date +%Y%m%d_%H%M%S)
+docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB"
+cd backend
+POSTGRES_DB="$TEST_DB" alembic upgrade head
+FORGE_TASK04_TEST_DB="$TEST_DB" python -m pytest -q tests/test_repository_integration.py
+```
+
+Тесты принимают только имя с префиксом `forge_task04_` и удаляют только записи с собранными во время теста ID. База остаётся на месте.

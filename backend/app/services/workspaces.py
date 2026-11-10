@@ -1,27 +1,28 @@
-from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
 
-@dataclass(frozen=True, slots=True)
-class Workspace:
-    id: UUID
-    name: str
+from app.domain.workspace import Workspace
+from app.repositories.workspaces import WorkspaceRepository
 
 
 class WorkspaceService:
-    def __init__(self) -> None:
-        self._workspaces: list[Workspace] = []
+    def __init__(self, session: AsyncSession, repository: WorkspaceRepository) -> None:
+        self.session = session
+        self.repository = repository
 
-    def create_workspace(self, name: str) -> Workspace:
+    async def create_workspace(self, name: str) -> Workspace:
         workspace = Workspace(id=uuid4(), name=name)
-        self._workspaces.append(workspace)
+        try:
+            await self.repository.add(workspace)
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return workspace
 
-    def list_workspaces(self) -> list[Workspace]:
-        return list(self._workspaces)
+    async def list_workspaces(self) -> list[Workspace]:
+        return await self.repository.list()
 
-    def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-        return next(
-            (workspace for workspace in self._workspaces if workspace.id == workspace_id),
-            None,
-        )
+    async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+        return await self.repository.get(workspace_id)

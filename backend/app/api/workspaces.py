@@ -1,14 +1,17 @@
 from typing import Annotated
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import get_session
+from app.repositories.workspaces import WorkspaceRepository
 from app.schemas.workspace import WorkspaceCreate, WorkspaceResponse
 from app.services.workspaces import WorkspaceService
 
 router = APIRouter()
 
 
-def get_workspace_service(request: Request) -> WorkspaceService:
-    return request.app.state.workspace_service
+def get_workspace_service(session: Annotated[AsyncSession, Depends(get_session)]) -> WorkspaceService:
+    return WorkspaceService(session, WorkspaceRepository(session))
 
 
 @router.post(
@@ -16,19 +19,19 @@ def get_workspace_service(request: Request) -> WorkspaceService:
     response_model=WorkspaceResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_workspace(
+async def create_workspace(
     workspace: WorkspaceCreate,
     service: Annotated[WorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
-    created = service.create_workspace(workspace.name)
+    created = await service.create_workspace(workspace.name)
     return WorkspaceResponse(id=created.id, name=created.name)
 
 
 @router.get("/workspaces", response_model=list[WorkspaceResponse])
-def list_workspaces(
+async def list_workspaces(
     service: Annotated[WorkspaceService, Depends(get_workspace_service)],
 ) -> list[WorkspaceResponse]:
     return [
         WorkspaceResponse(id=workspace.id, name=workspace.name)
-        for workspace in service.list_workspaces()
+        for workspace in await service.list_workspaces()
     ]

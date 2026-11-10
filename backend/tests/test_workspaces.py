@@ -4,7 +4,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from fake_app import create_test_app as create_app
 
 
 @pytest.fixture
@@ -53,10 +53,10 @@ def test_workspaces_get_distinct_ids(client: TestClient) -> None:
     second = client.post("/workspaces", json={"name": "Second"}).json()
 
     assert first["id"] != second["id"]
-    assert client.get("/workspaces").json() == [first, second]
+    assert client.get("/workspaces").json() == sorted([first, second], key=lambda item: item["id"])
 
 
-def test_application_instances_have_separate_storage(client: TestClient) -> None:
+def test_separate_fake_repositories_are_isolated(client: TestClient) -> None:
     client.post("/workspaces", json={"name": "Only in first app"})
 
     with TestClient(create_app()) as other_client:
