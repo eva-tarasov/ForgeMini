@@ -91,6 +91,33 @@ FORGE_TEST_POSTGRES=1 python -m pytest -q tests/test_postgres_integration.py
 
 Тест закрывает session и освобождает engine после проверки. При изменении параметров в `.env` учитывайте, что переменные `POSTGRES_*` инициализируют пользователя и базу только при первом создании пустого каталога данных PostgreSQL.
 
+## Миграции PostgreSQL
+
+Из `backend` с установленными зависимостями и запущенным PostgreSQL:
+
+```bash
+alembic upgrade head
+alembic current
+alembic check
+```
+
+Alembic использует те же `Settings` и async engine, что и backend; пароль в `alembic.ini` не хранится. Перед запуском проверьте, что настройки указывают на нужную базу. Миграции не запускаются автоматически при старте FastAPI. Autogenerate исключает из кандидатов на удаление таблицы, отсутствующие в metadata, включая таблицы удалённых из кода моделей. Все сгенерированные изменения нужно проверять вручную; одноимённые таблицы считаются принадлежащими модели. Команда `downgrade` начальной revision удаляет `tasks` и `workspaces` с данными.
+
+Для проверки схемы создайте отдельную пустую базу из корня репозитория. Если `createdb` завершится ошибкой, остановитесь и выберите другое имя:
+
+```bash
+TEST_DB=forge_task03_$(date +%Y%m%d_%H%M%S)
+docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB"
+cd backend
+POSTGRES_DB="$TEST_DB" alembic upgrade head
+POSTGRES_DB="$TEST_DB" alembic upgrade head
+POSTGRES_DB="$TEST_DB" alembic current
+POSTGRES_DB="$TEST_DB" alembic check
+FORGE_TEST_SCHEMA_DB="$TEST_DB" python -m pytest -q tests/test_schema_integration.py
+```
+
+Тесты схемы запускаются только при заданном `FORGE_TEST_SCHEMA_DB` с префиксом `forge_task03_` и откатывают свои строки. Тестовая база остаётся на месте; её удаление требует отдельного решения. `alembic check` дополняет, а не заменяет проверки ограничений в PostgreSQL.
+
 ## Ошибки API
 
 Предусмотренные ошибки возвращаются в едином формате:

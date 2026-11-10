@@ -288,7 +288,7 @@ GET  /tasks/{task_id}
 
 # WEEK 2 — Persistence & Data Model
 
-**Status:** in progress — локальное окружение PostgreSQL добавлено; конфигурация async-подключения в работе
+**Status:** in progress — async-подключение добавлено; начальная схема и миграция в работе
 
 **Оценка:** 24–28 часов  
 **Codex:** LEARNING -> ENGINEERING
@@ -300,8 +300,8 @@ GET  /tasks/{task_id}
 ## Рабочие подшаги (детализация текущего roadmap, не новый scope)
 
 - [x] 01. PostgreSQL + Docker Compose: локальный DB instance, конфигурация, healthcheck, named volume, проверка persistence на уровне БД. Evidence: [PR #5](https://github.com/eva-tarasov/myFirstForge/pull/5), локальная проверка persistence сообщена пользователем; в текущем сеансе не повторялась.
-- [ ] 02. SQLAlchemy 2.x async: engine/session и typed configuration; объяснение connection/session/transaction. В работе.
-- [ ] 03. Initial data model + Alembic: миграции и модели, без преждевременного agent runtime.
+- [x] 02. SQLAlchemy 2.x async: engine/session и typed configuration. Evidence: PR #6 merged в main, squash `8622798`; 57 passed, 2 skipped, 1 warning; 2 PostgreSQL integration tests passed; `git diff --check` проверен пользователем. BL-06 остаётся открытым.
+- [ ] 03. Initial data model + Alembic: миграции и модели, без преждевременного agent runtime. В работе.
 - [ ] 04. Repository + service boundaries: миграция Workspace/Task с in-memory на PostgreSQL.
 - [ ] 05. AgentRun/AgentEvent/ToolCall/Approval/Artifact data contracts и constraints по roadmap, без исполнения агента.
 - [ ] 06. Persisted state transitions, transaction boundaries и минимальная idempotency-политика.
