@@ -121,6 +121,36 @@ def test_multiple_tasks_can_share_workspace(client: TestClient, workspace_id: st
     assert first.json()["workspace_id"] == second.json()["workspace_id"] == workspace_id
 
 
+def test_idempotent_http_replay_and_conflicts(client: TestClient, workspace_id: str) -> None:
+    headers = {"Idempotency-Key": str(uuid4())}
+    payload = task_payload(workspace_id)
+    first = client.post("/tasks", json=payload, headers=headers)
+    replay = client.post("/tasks", json={**payload, "goal": "Build API",
+                                        "acceptance_criteria": ["Returns 201", "Can be retrieved"]}, headers=headers)
+    assert first.status_code == replay.status_code == 201
+    assert first.json() == replay.json()
+    assert "idempotency_key" not in first.json()
+    for changes in ({"goal": "Different"}, {"acceptance_criteria": ["Different"]},
+                    {"acceptance_criteria": ["Can be retrieved", "Returns 201"]}):
+        response = client.post("/tasks", json={**payload, **changes}, headers=headers)
+        assert response.status_code == 409
+        assert response.json() == {"error": {"code": "IDEMPOTENCY_KEY_CONFLICT",
+                                             "message": "Idempotency key already used with different task data",
+                                             "details": []}}
+    other_workspace = client.post("/workspaces", json={"name": "other"}).json()["id"]
+    other = client.post("/tasks", json=task_payload(other_workspace), headers=headers)
+    assert other.status_code == 201 and other.json()["id"] != first.json()["id"]
+
+
+def test_idempotency_header_validation_and_missing_workspace(client: TestClient, workspace_id: str) -> None:
+    assert client.post("/tasks", json=task_payload(workspace_id),
+                       headers={"Idempotency-Key": "not-a-uuid"}).status_code == 422
+    response = client.post("/tasks", json=task_payload(str(uuid4())),
+                           headers={"Idempotency-Key": str(uuid4())})
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "WORKSPACE_NOT_FOUND"
+
+
 def test_task_storage_is_isolated_by_fake_repository(client: TestClient, workspace_id: str) -> None:
     created = client.post("/tasks", json=task_payload(workspace_id)).json()
 

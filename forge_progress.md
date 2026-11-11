@@ -288,10 +288,10 @@ GET  /tasks/{task_id}
 
 # WEEK 2 — Persistence & Data Model
 
-**Status:** in progress — PostgreSQL-репозитории приняты; execution data contracts ожидают финального review и merge
+**Status:** in progress — реализация и PostgreSQL-проверки Step 06 завершены по предоставленному отчёту. Впереди финальный review и merge PR #10.
 
 **Оценка:** 24–28 часов  
-**Codex:** LEARNING -> ENGINEERING
+**Codex:** LEARNING → ENGINEERING
 
 ## Цель
 
@@ -303,12 +303,36 @@ GET  /tasks/{task_id}
 - [x] 02. SQLAlchemy 2.x async: engine/session и typed configuration. Evidence: PR #6 merged в main, squash `8622798`; 57 passed, 2 skipped, 1 warning; 2 PostgreSQL integration tests passed; `git diff --check` проверен пользователем. BL-06 остаётся открытым.
 - [x] 03. Initial data model + Alembic. Evidence: PR #7 merged в main, squash `0286c15`; 59 passed, 4 skipped, 1 warning; schema integration 2 passed; Alembic upgrade/current/check/repeated upgrade PASS; `git diff --check` PASS.
 - [x] 04. Repository + service boundaries. Evidence: PR #8 merged, squash `24fa648`; 63 passed, 5 skipped, 1 warning; PostgreSQL integration 1 passed; Alembic upgrade/current/check/repeated upgrade и Git diff --check PASS.
-- [ ] 05. AgentRun/AgentEvent/ToolCall/Approval/Artifact data contracts. IN PROGRESS: ORM-модели, revision `ecb758eac83b` и тесты реализованы; DB verification завершена, PR #9 ожидает финального review и merge. Evidence: 72 passed, 6 skipped, 1 warning; Alembic upgrade/current/check/repeated upgrade PASS; PostgreSQL integration сообщён пользователем как успешный, в прогоне Codex 05B — 1 passed; Git diff --check PASS. Исполнение агента не реализовано.
-- [ ] 06. Persisted state transitions, transaction boundaries и минимальная idempotency-политика.
-- [ ] 07. Integration/restart/migration verification, documentation, backlog review и Week 2 exit criteria.
+- [x] 05. Data contracts для AgentRun, AgentEvent, ToolCall, Approval и Artifact. ORM-модели, revision `ecb758eac83b` и тесты в `main` после merge [PR #9](https://github.com/eva-tarasov/myFirstForge/pull/9), squash `e90ba4c`. Evidence Step 05: `72 passed, 6 skipped, 1 warning`, PostgreSQL integration `1 passed` в прогоне Codex 05B, Alembic upgrade/current/check/repeated upgrade и `git diff --check` — PASS.
+- [ ] 06. Persisted state transitions, transaction boundaries и идемпотентное создание Task. `in progress` до завершения review 06D и merge [PR #10](https://github.com/eva-tarasov/myFirstForge/pull/10).
+- [ ] 07. Integration/restart/migration verification, documentation, backlog review и Week 2 exit criteria (`not started`).
 
 **Примечание:** это ориентировочная разбивка; количество подшагов может быть скорректировано после review без смены Week 2 scope.
 
+## Фактический прогресс Step 06
+
+- [x] **06A** — доменный граф AgentRun запрещает недопустимые переходы и переоткрытие терминальных состояний.
+- [x] **06B1** — `AgentRunService` блокирует строку, сверяет ожидаемый статус и сохраняет новый статус и `AgentEvent` в одной транзакции.
+- [x] **06B2** — PostgreSQL-тесты проверяют сохранение переходов и событий, rollback, конкуренцию и отклонение запроса с устаревшим статусом.
+- [x] **06C1** — отдельный `TaskStatus`, `tasks.status` с default `queued` и CHECK, revision `2e3bf72ac910`.
+- [x] **06C2** — отдельный граф и сохранение переходов Task. `verifying → running` допускается для исправления. PostgreSQL-тесты проверяют блокировку, stale update и rollback.
+- [x] **06C3A** — nullable UUID `idempotency_key` и UNIQUE по `(workspace_id, idempotency_key)`, revision `496f3a2c5b81`.
+- [x] **06C3B** — `POST /tasks` принимает `Idempotency-Key`, при совпадении данных возвращает исходную Task, при конфликте отвечает `409`. При отмене создания сервис выполняет rollback и пробрасывает `CancelledError`.
+- [x] **06C3C** — PostgreSQL-тесты проверяют replay, конкурирующие INSERT с одинаковыми и разными данными, сохранение статуса и освобождение ключа после rollback.
+
+**Архитектурные решения.** ADR-001 остаётся основой. Task и AgentRun имеют отдельные графы. Сервис управляет commit и rollback, а репозиторий выполняет SQL. Блокировка строки и сравнение ожидаемого статуса защищают переходы. Уникальность ключа обеспечивает PostgreSQL, а отдельный SELECT после `ON CONFLICT DO NOTHING` опирается на новый snapshot при `READ COMMITTED`.
+
+**Verification evidence.** По предоставленному локальному отчёту для ревью `51fba9e` в PR #10 обычный pytest дал `241 passed, 31 skipped, 1 warning`, PostgreSQL suite — `25 passed`, в том числе `9 passed` для идемпотентности. Для revision `496f3a2c5b81` проверки Alembic `upgrade`, `current` и `check` прошли. Проверка ограничений идемпотентности в PostgreSQL также прошла. В 06D эти тесты и проверки БД не повторялись.
+
+**Технический долг и ограничения.** Пока нет agent runtime, исполнения инструментов, обработки approvals, оркестрации retry/resume и независимой верификации. Переход в `succeeded` заблокирован до появления evidence. Переходы доступны на уровне сервисов. Нумерация `AgentEvent` через `MAX(sequence) + 1` требует, чтобы все писатели событий удерживали блокировку родительского AgentRun.
+
+**Уроки и темы для объяснения.** Как `FOR UPDATE` и проверка ожидаемого статуса предотвращают stale update. Почему статус и событие должны фиксироваться вместе. Как UNIQUE, `ON CONFLICT` и новый snapshot позволяют распознать replay после конкурентного INSERT. Почему порядок критериев входит в сравнение payload.
+
+**Python Backend Deep Dive.** Границы транзакции в `AsyncSession`, `flush` и `commit`, rollback при `asyncio.CancelledError`, отдельная сессия на конкурентную операцию и синхронизация PostgreSQL-тестов через `asyncio.Event` и `pg_blocking_pids()`.
+
+**Hours spent.** Не сообщено.
+
+**Следующий шаг.** Финальный review 06D и merge PR #10, затем Step 07.
 
 ## Теория
 

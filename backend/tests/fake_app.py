@@ -32,11 +32,24 @@ class FakeWorkspaceRepository:
 class FakeTaskRepository:
     def __init__(self):
         self.values = {}
+        self.keys = {}
 
     async def add(self, task):
         self.values[task.id] = task
 
     async def get(self, task_id):
+        return self.values.get(task_id)
+
+    async def add_with_idempotency_key(self, task, key):
+        pair = (task.workspace_id, key)
+        if pair in self.keys:
+            return False
+        self.values[task.id] = task
+        self.keys[pair] = task.id
+        return True
+
+    async def get_by_idempotency_key(self, workspace_id, key):
+        task_id = self.keys.get((workspace_id, key))
         return self.values.get(task_id)
 
 
