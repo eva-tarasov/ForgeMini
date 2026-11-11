@@ -2,7 +2,7 @@
 
 Минимальный FastAPI backend для проекта Forge. Требуется Python 3.11 или новее.
 
-Документация: [архитектура](docs/ARCHITECTURE.md), [учебное руководство](docs/LEARNING_GUIDE.md), [ADR-001](docs/adr/ADR-001.md), [backlog](backlog.md).
+Документация: [архитектура Week 1](docs/ARCHITECTURE.md), [учебное руководство Week 1](docs/LEARNING_GUIDE.md), [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md), [ADR-001](docs/adr/ADR-001.md), [backlog](backlog.md).
 Документ архитектуры описывает состояние Week 1; актуальный запуск PostgreSQL и API приведён ниже.
 
 ## Установка

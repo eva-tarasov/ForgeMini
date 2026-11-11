@@ -37,3 +37,24 @@
 - Context / Evidence: локальный pytest воспроизводит `StarletteDeprecationWarning` о `httpx` и `starlette.testclient`.
 - Target milestone: не определён.
 - Acceptance criteria: совместимый путь обновления зависимостей выбран и проверен; тесты проходят без этого предупреждения.
+
+## BL-07 — Идемпотентность при редактировании Task
+- Type: architecture/reliability debt. Status: deferred.
+- Context / Evidence: при replay сервис сравнивает нормализованный `goal` и упорядоченные `acceptance_criteria` с текущими полями Task. Неизменяемый снимок исходного запроса или fingerprint пока не хранится. [TaskService](backend/app/services/tasks.py)
+- Risk: если эти поля станут редактируемыми, повтор исходного запроса после изменения может получить `409 IDEMPOTENCY_KEY_CONFLICT`.
+- Target milestone: до появления редактируемых `goal` или `acceptance_criteria`.
+- Acceptance criteria: определить, как сохранять исходную идентичность идемпотентного запроса. Проверить replay и конфликт с другим payload в PostgreSQL integration tests.
+
+## BL-08 — Сериализация нумерации AgentEvent
+- Type: concurrency/reliability debt. Status: deferred.
+- Context / Evidence: репозиторий вычисляет `COALESCE(MAX(sequence), 0) + 1` в пределах AgentRun. Текущий сервис переходов удерживает `SELECT FOR UPDATE` на родительской строке до конца транзакции. [AgentEventRepository](backend/app/repositories/agent_events.py) · [AgentRunRepository](backend/app/repositories/agent_runs.py) · [AgentRunService](backend/app/services/agent_runs.py)
+- Risk: новый независимый писатель без этой блокировки может выбрать тот же номер и получить ошибку уникальности.
+- Target milestone: до добавления новых путей записи AgentEvent.
+- Acceptance criteria: задокументировать и обеспечить единый контракт append. Все писатели используют блокировку родителя или эквивалентную защиту от гонки. Конкурентный append покрыт PostgreSQL integration tests.
+
+## BL-09 — Уровень изоляции транзакций при replay
+- Type: architecture/reliability consideration. Status: deferred.
+- Context / Evidence: после `ON CONFLICT DO NOTHING` репозиторий выполняет отдельный SELECT. При `READ COMMITTED` SELECT получает новый snapshot и может прочитать строку, зафиксированную конкурирующей транзакцией. [TaskRepository](backend/app/repositories/tasks.py)
+- Risk: смена уровня изоляции без пересмотра алгоритма может изменить результат replay, в том числе привести к ошибке сериализации.
+- Target milestone: до изменения уровня изоляции транзакций.
+- Acceptance criteria: зафиксировать требование `READ COMMITTED` для текущего алгоритма. Перед сменой уровня проверить на PostgreSQL конкурентное создание с одинаковым ключом и разными payload, а также сценарий rollback и повторного использования ключа.

@@ -1,5 +1,7 @@
 # Forge: архитектура Week 1
 
+> Исторический срез Week 1. Схема актуального запроса и устройство persistence описаны в [руководстве Week 2](LEARNING_GUIDE_WEEK2.md), а команды запуска — в [README](../README.md).
+
 ## Overview
 
 Forge задуман как agentic workspace для технических задач над Git-репозиториями. Сейчас реализован FastAPI backend: health, создание и список Workspace, создание и получение Task, единый формат ожидаемых ошибок, HTTP JSON-логи и тесты. Репозитории и агенты backend пока не обрабатывает.
