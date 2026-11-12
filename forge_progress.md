@@ -27,7 +27,7 @@
    - по возможности — небольшой ограниченный spike/benchmark по одинаковым acceptance criteria;
    - рекомендация: `keep current`, `defer`, `run spike`, `adopt`;
    - обновлённый ADR и `progress.md` **только после осознанного решения**.
-4. **Adopt** допустим, когда новая технология даёт существенное, подтверждённое преимущество для текущих требований, устраняет реальный blocker, либо закрывает критический security/reliability defect. «Популярно», «появилось в вакансии», «похоже на Forge» — недостаточные основания.
+4. **Adopt** допустим, когда новая технология даёт существенное, подтверждённое преимущество для текущих требований, устраняет реальный blocker, закрывает критический security/reliability defect либо осознанно расширяет утверждённую образовательную цель проекта с зафиксированными trade-offs. «Популярно», «появилось в вакансии», «похоже на Forge» — недостаточные основания.
 5. Решения по технологиям принимаются на **milestone, в котором возникает потребность**. До этого: исследование и заметка в `Decisions to revisit`, но не переписывание кода.
 6. Обязательные инварианты сохраняются при любом изменении стека: `Task ≠ AgentRun`, сервер — источник истины, permissions/approvals до side effects, независимая verification с evidence, terminal state не переоткрывается, audit trail, bounded retries/cost.
 
@@ -46,7 +46,7 @@
 
 ## 3. Technology decision gates
 
-- **Week 3 — Agent Runtime:** рассмотреть поддерживаемые варианты `OpenAI Agents SDK`, `LangChain create_agent` и минимальный прямой agent loop (как учебный baseline). Выбирать **один основной runtime**, а не ставить все пакеты сразу. Проверить tool calls, typed outputs, instrumentation, approvals integration, cost, тестируемость.
+- **Week 3 — Agent Runtime:** владелец утвердил LangChain + LangGraph как образовательное и архитектурное направление ([ADR-002](docs/adr/ADR-002.md)). Один основной production-minded runtime — собственный `StateGraph` за независимым Forge `AgentRunner`. `LangChain create_agent` — ограниченный учебный прототип, прямой loop — mental model, OpenAI Agents SDK отложен. Production-пригодность предстоит проверить на tool calls, structured output, instrumentation, approvals integration, cost и тестируемости.
 - **Week 7 — Durable Orchestration:** исходная кандидатура — **Temporal**. Сравнить с **LangGraph** на одинаковом сценарии `execute → approval pause → resume → verification → worker restart`. Проверить recovery semantics, безопасные side effects, checkpoint/replay, сложность deployment и соответствие нашему domain state. При необходимости возможно сочетание разных уровней, но **не подключать оба по умолчанию**.
 - **LangSmith / RAG / multi-agent / Deep Agents / Redis / другие фреймворки:** не добавлять без конкретной потребности текущего milestone и прохождения Architecture Change Gate.
 - Изменение реализации не должно уничтожать domain model и boundaries без отдельного ADR.
@@ -63,7 +63,7 @@
 
 | Decision | Planned gate | Current stance | Required evidence |
 |---|---|---|---|
-| OpenAI Agents SDK vs LangChain create_agent | Week 3 | no switch until comparison | minimal single-agent run, tools, structured output, tracing, tests |
+| Week 3 Agent Runtime | Week 3 | LangChain + собственный LangGraph StateGraph утверждены для обучения и реализации; [ADR-002](docs/adr/ADR-002.md). OpenAI Agents SDK отложен | contract, state mapping, safe tool, structured output, usage/cost, error and cancellation tests; production-пригодность ещё не доказана |
 | LangGraph vs Temporal | Week 7 | Temporal is starting candidate, not irreversible choice | restart/recovery, approval/resume, idempotent side effects, complexity |
 | Extra layers/microservices/multi-agent | When actual blocker appears | deferred | real operational or product need, benchmark/ADR |
 
@@ -288,7 +288,7 @@ GET  /tasks/{task_id}
 
 # WEEK 2 — Persistence & Data Model
 
-**Status:** in progress — инженерная реализация и технические проверки Week 2 завершены. Административное закрытие ожидает финального review и merge [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11). Самостоятельная учебная оценка отложена по просьбе пользователя.
+**Status:** complete — инженерная реализация и административное закрытие Week 2 завершены: [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11) объединён в `main` (squash `af98e57`). Отдельный learning checkpoint 07C3 остаётся незавершённым и отложен по решению владельца.
 
 **Оценка:** 24–28 часов  
 **Codex:** LEARNING → ENGINEERING
@@ -305,11 +305,11 @@ GET  /tasks/{task_id}
 - [x] 04. Repository + service boundaries. Evidence: PR #8 merged, squash `24fa648`; 63 passed, 5 skipped, 1 warning; PostgreSQL integration 1 passed; Alembic upgrade/current/check/repeated upgrade и Git diff --check PASS.
 - [x] 05. Data contracts для AgentRun, AgentEvent, ToolCall, Approval и Artifact. ORM-модели, revision `ecb758eac83b` и тесты в `main` после merge [PR #9](https://github.com/eva-tarasov/myFirstForge/pull/9), squash `e90ba4c`. Evidence Step 05: `72 passed, 6 skipped, 1 warning`, PostgreSQL integration `1 passed` в прогоне Codex 05B, Alembic upgrade/current/check/repeated upgrade и `git diff --check` — PASS.
 - [x] 06. Persisted state transitions, transaction boundaries и идемпотентное создание Task. Review и проверки завершены, [PR #10](https://github.com/eva-tarasov/myFirstForge/pull/10) объединён с `main` (squash `571f228`).
-- [ ] 07. Integration/restart/migration verification, documentation, backlog review и Week 2 exit criteria. Технические проверки завершены, документация ожидает merge [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11).
+- [x] 07. Integration/restart/migration verification, documentation, backlog review и инженерные Week 2 exit criteria. Технические проверки завершены по приведённому ниже историческому evidence; документация и обновление прогресса вошли в `main` через [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11). Отдельный learning checkpoint 07C3 открыт.
   - [x] **07A** — пользователь прочитал сохранённую Task через HTTP до и после перезапуска backend. Ответы совпали.
   - [x] **07B** — пользователь применил цепочку миграций к чистой PostgreSQL-базе. Достигнут `head`, `alembic check` и повторный upgrade прошли.
-  - [x] **07C1** — [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md) написано, прошло содержательный review и ожидает merge PR #11.
-  - [ ] **07C2** — финальное обновление прогресса и backlog подготовлено в ветке PR #11. Статус `in progress` до review.
+  - [x] **07C1** — [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md) прошло содержательный review и вошло в `main` через PR #11 (squash `af98e57`).
+  - [x] **07C2** — финальное обновление прогресса и backlog вошло в `main` через PR #11 (squash `af98e57`); файлы присутствуют в составе коммита.
   - [ ] **07C3** — вопросы и опорные ответы предоставлены. Самостоятельная устная и практическая проверка отложена по просьбе пользователя. Результат оценки отсутствует.
 
 **Примечание:** это ориентировочная разбивка; количество подшагов может быть скорректировано после review без смены Week 2 scope.
@@ -327,9 +327,9 @@ GET  /tasks/{task_id}
 
 ## Итоговый отчёт Week 2
 
-**Status.** `in progress` до merge PR #11. Инженерная реализация в `main`, технические exit checks завершены по локальным результатам пользователя. Самостоятельная оценка знаний остаётся учебным долгом.
+**Status.** `complete` для инженерной части Week 2: PR #11 merged в `main` (`af98e57`), технические exit checks завершены по историческим локальным результатам пользователя. Самостоятельная оценка знаний 07C3 остаётся открытым learning checkpoint.
 
-**Completed.** PR #5–10 добавили PostgreSQL и Compose, async SQLAlchemy и Alembic, persistent Workspace и Task, модели execution, переходы Task и AgentRun, атомарное сохранение статуса AgentRun и события, идемпотентное создание Task. Проверки перезапуска и миграций с нуля завершены. Гайд Week 2 прошёл содержательный review в PR #11.
+**Completed.** PR #5–10 добавили PostgreSQL и Compose, async SQLAlchemy и Alembic, persistent Workspace и Task, модели execution, переходы Task и AgentRun, атомарное сохранение статуса AgentRun и события, идемпотентное создание Task. Проверки перезапуска и миграций с нуля завершены. Гайд Week 2 и обновление progress/backlog вошли в `main` через PR #11.
 
 **Architecture decisions.** ADR-001 и modular monolith остаются основой. Task и AgentRun имеют отдельные графы. Сервис управляет commit и rollback, репозиторий выполняет SQL. `FOR UPDATE` и проверка ожидаемого статуса защищают переходы. PostgreSQL обеспечивает уникальность пары Workspace и UUID-ключа, а отдельный SELECT после `ON CONFLICT DO NOTHING` опирается на новый snapshot при `READ COMMITTED`.
 
@@ -354,7 +354,7 @@ GET  /tasks/{task_id}
 
 **Hours spent.** Не сообщено.
 
-**Next step.** Завершить review 07C2 и объединить PR #11. После merge начать Week 3 с Agent Runtime Technology Decision Gate. Сравнить минимальный прямой agent loop как учебный baseline, OpenAI Agents SDK и LangChain `create_agent`. Week 3 остаётся `not started`, выбор SDK предстоит сделать на этом gate.
+**Next step.** Review [ADR-002](docs/adr/ADR-002.md) и обновлённого progress для Week 3 Step 01; после согласования — Step 02 LangChain Model Foundation. Учебная оценка 07C3 остаётся отложенной.
 
 ## Теория
 
@@ -415,13 +415,28 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** not started  
-**Оценка:** 24–30 часов  
+**Status:** in progress — Step 01 подготовлен, ожидает review владельца
+
+**Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
+
 **Codex:** LEARNING MODE
 
 ## Цель
 
 Добавить первый настоящий single-agent runtime.
+
+## Рабочие шаги
+
+- [ ] 01. Architecture Decision & Theory — документация подготовлена, ожидает review; [ADR-002](docs/adr/ADR-002.md). Не DONE до принятия владельцем.
+- [ ] 02. LangChain Model Foundation — not started.
+- [ ] 03. LangChain create_agent — not started; ограниченный учебный прототип.
+- [ ] 04. LangGraph Fundamentals — not started.
+- [ ] 05. Custom Single-Agent Graph — not started.
+- [ ] 06. AgentRunner & AgentService — not started.
+- [ ] 07. Persistence & Agent Events — not started.
+- [ ] 08. Reliability & Execution Limits — not started.
+- [ ] 09. Usage, Cost & Observability — not started.
+- [ ] 10. Integration & Week 3 Review — not started.
 
 ## Теория
 
@@ -437,13 +452,13 @@ cancelled
 
 ## Реализация
 
-Перед подключением основной SDK пройти **Week 3 Technology Decision Gate** из раздела Project Governance; не менять domain model ради фреймворка.
+**Week 3 Technology Decision Gate** пройден решением владельца: LangChain + собственный LangGraph `StateGraph` ([ADR-002](docs/adr/ADR-002.md)). Это направление ещё не подтверждено тестами; domain model не менять ради фреймворка.
 
 Добавить:
 
 - AgentRunner abstraction;
 - AgentService;
-- актуальный поддерживаемый OpenAI agent stack;
+- LangChain model abstractions и собственный LangGraph `StateGraph` за контрактом `AgentRunner`; OpenAI — первый предполагаемый model provider;
 - AgentRun lifecycle;
 - AgentEvent persistence;
 - structured final result;
@@ -451,6 +466,8 @@ cancelled
 - tracing;
 - usage/cost capture;
 - fake/mock model tests where practical.
+
+В Week 3 допустим только безопасный fixture/read-only tool; полноценный Tool System относится к Week 4. Успешное исполнение графа переводит `AgentRun` лишь к `verifying`; `succeeded` требует независимого verification evidence.
 
 Пример final result:
 
