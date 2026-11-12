@@ -417,7 +417,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 01 подготовлен, ожидает review владельца
+**Status:** in progress — Step 01 принят, Step 02A подготовлен и ожидает review владельца
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -429,8 +429,10 @@ cancelled
 
 ## Рабочие шаги
 
-- [ ] 01. Architecture Decision & Theory — документация подготовлена, ожидает review; [ADR-002](docs/adr/ADR-002.md). Не DONE до принятия владельцем.
-- [ ] 02. LangChain Model Foundation — not started.
+- [x] 01. Architecture Decision & Theory — DONE. [ADR-002](docs/adr/ADR-002.md) принят владельцем; commits `af26d519` и `9ab4b07` проверены.
+- [ ] 02. LangChain Model Foundation — in progress.
+  - [ ] 02A. Model foundation — реализация подготовлена, ожидает review.
+  - [ ] 02B. Structured output — not started.
 - [ ] 03. LangChain create_agent — not started; ограниченный учебный прототип.
 - [ ] 04. LangGraph Fundamentals — not started.
 - [ ] 05. Custom Single-Agent Graph — not started.
