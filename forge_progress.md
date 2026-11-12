@@ -27,7 +27,7 @@
    - по возможности — небольшой ограниченный spike/benchmark по одинаковым acceptance criteria;
    - рекомендация: `keep current`, `defer`, `run spike`, `adopt`;
    - обновлённый ADR и `progress.md` **только после осознанного решения**.
-4. **Adopt** допустим, когда новая технология даёт существенное, подтверждённое преимущество для текущих требований, устраняет реальный blocker, закрывает критический security/reliability defect либо осознанно расширяет утверждённую образовательную цель проекта с зафиксированными trade-offs. «Популярно», «появилось в вакансии», «похоже на Forge» — недостаточные основания.
+4. **Adopt** допустим, когда новая технология даёт существенное, подтверждённое преимущество для текущих требований, устраняет реальный blocker, либо закрывает критический security/reliability defect. «Популярно», «появилось в вакансии», «похоже на Forge» — недостаточные основания.
 5. Решения по технологиям принимаются на **milestone, в котором возникает потребность**. До этого: исследование и заметка в `Decisions to revisit`, но не переписывание кода.
 6. Обязательные инварианты сохраняются при любом изменении стека: `Task ≠ AgentRun`, сервер — источник истины, permissions/approvals до side effects, независимая verification с evidence, terminal state не переоткрывается, audit trail, bounded retries/cost.
 
@@ -47,6 +47,8 @@
 ## 3. Technology decision gates
 
 - **Week 3 — Agent Runtime:** владелец утвердил LangChain + LangGraph как образовательное и архитектурное направление ([ADR-002](docs/adr/ADR-002.md)). Один основной production-minded runtime — собственный `StateGraph` за независимым Forge `AgentRunner`. `LangChain create_agent` — ограниченный учебный прототип, прямой loop — mental model, OpenAI Agents SDK отложен. Production-пригодность предстоит проверить на tool calls, structured output, instrumentation, approvals integration, cost и тестируемости.
+
+  Для Week 3 владелец явно утвердил LangChain и LangGraph по образовательным причинам, изложенным в ADR-002. Это решение относится к текущему milestone и не изменяет общие критерии Architecture Change Gate. Production-пригодность выбранной реализации должна быть подтверждена последующими проверками.
 - **Week 7 — Durable Orchestration:** исходная кандидатура — **Temporal**. Сравнить с **LangGraph** на одинаковом сценарии `execute → approval pause → resume → verification → worker restart`. Проверить recovery semantics, безопасные side effects, checkpoint/replay, сложность deployment и соответствие нашему domain state. При необходимости возможно сочетание разных уровней, но **не подключать оба по умолчанию**.
 - **LangSmith / RAG / multi-agent / Deep Agents / Redis / другие фреймворки:** не добавлять без конкретной потребности текущего milestone и прохождения Architecture Change Gate.
 - Изменение реализации не должно уничтожать domain model и boundaries без отдельного ADR.
@@ -288,7 +290,7 @@ GET  /tasks/{task_id}
 
 # WEEK 2 — Persistence & Data Model
 
-**Status:** complete — инженерная реализация и административное закрытие Week 2 завершены: [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11) объединён в `main` (squash `af98e57`). Отдельный learning checkpoint 07C3 остаётся незавершённым и отложен по решению владельца.
+**Status:** done — инженерная реализация и административное закрытие Week 2 завершены: [PR #11](https://github.com/eva-tarasov/myFirstForge/pull/11) объединён в `main` (squash `af98e57`). Отдельный learning checkpoint 07C3 остаётся незавершённым и отложен по решению владельца.
 
 **Оценка:** 24–28 часов  
 **Codex:** LEARNING → ENGINEERING
@@ -327,7 +329,7 @@ GET  /tasks/{task_id}
 
 ## Итоговый отчёт Week 2
 
-**Status.** `complete` для инженерной части Week 2: PR #11 merged в `main` (`af98e57`), технические exit checks завершены по историческим локальным результатам пользователя. Самостоятельная оценка знаний 07C3 остаётся открытым learning checkpoint.
+**Status.** `done` для инженерной части Week 2: PR #11 merged в `main` (`af98e57`), технические exit checks завершены по историческим локальным результатам пользователя. Самостоятельная оценка знаний 07C3 остаётся открытым learning checkpoint.
 
 **Completed.** PR #5–10 добавили PostgreSQL и Compose, async SQLAlchemy и Alembic, persistent Workspace и Task, модели execution, переходы Task и AgentRun, атомарное сохранение статуса AgentRun и события, идемпотентное создание Task. Проверки перезапуска и миграций с нуля завершены. Гайд Week 2 и обновление progress/backlog вошли в `main` через PR #11.
 
