@@ -56,6 +56,7 @@
 ## 4. Weekly execution and status
 
 - Для каждой недели: `design/theory → one scoped implementation task → tests/verification → diff review → explanation → progress update`.
+- Codex выполняет routine unit/regression tests, dependency checks и обычные integration checks текущего scope. Владелец вручную запускает выбранные преподавателем критические учебные сценарии и существенные проверки lifecycle/security/failure modes. Результаты всех проверок фиксируются как evidence. Не требовать повторного ручного прогона всех routine tests без необходимости.
 - Статусы `not started / in progress / blocked / done` менять **по фактическому evidence**, не по календарю и не по отчёту агента без проверки.
 - Если встречена интересная новая технология — внести её в **Decisions to revisit**, не прерывая текущую неделю.
 - При отклонении от roadmap указывать: `why`, `trade-off`, `ADR`, `migration cost`, `effect on exit criteria`.
@@ -417,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 01 принят, Step 02A подготовлен и ожидает review владельца
+**Status:** in progress — Step 02A принят, Step 02B подготовлен и ожидает review владельца
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -431,8 +432,8 @@ cancelled
 
 - [x] 01. Architecture Decision & Theory — DONE. [ADR-002](docs/adr/ADR-002.md) принят владельцем; commits `af26d519` и `9ab4b07` проверены.
 - [ ] 02. LangChain Model Foundation — in progress.
-  - [ ] 02A. Model foundation — реализация подготовлена, ожидает review.
-  - [ ] 02B. Structured output — not started.
+  - [x] 02A. Model foundation — DONE. [PR #12](https://github.com/eva-tarasov/myFirstForge/pull/12) merged в `main` (`9efde8f`). Историческое evidence: `pip check` PASS, model tests `18 passed`, полный pytest `259 passed, 31 skipped`. В отдельном прогоне владелец сообщил `2 passed` для PostgreSQL connection smoke, остальные 29 PostgreSQL integration tests не выполнялись.
+  - [ ] 02B. Structured output — in progress. Реализация подготовлена, ожидает review и учебной проверки.
 - [ ] 03. LangChain create_agent — not started; ограниченный учебный прототип.
 - [ ] 04. LangGraph Fundamentals — not started.
 - [ ] 05. Custom Single-Agent Graph — not started.
