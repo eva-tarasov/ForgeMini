@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import socket
 import subprocess
 import sys
 from unittest.mock import AsyncMock, create_autospec, patch
@@ -14,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import Runnable
 from langchain_core.tracers.langchain import LangChainTracer
 from langchain_openai import ChatOpenAI
-from langsmith import tracing_context
+from model_test_support import TRACING_OFF, offline_model_tests
 from pydantic import ValidationError
 
 from app.agent_runtime import model as model_layer
@@ -33,37 +32,6 @@ from app.agent_runtime.tool_calling_demo import (
     read_fixture,
     run_tool_calling_demo,
 )
-
-
-TRACING_OFF = dict.fromkeys(
-    (
-        "LANGSMITH_TRACING",
-        "LANGCHAIN_TRACING",
-        "LANGSMITH_TRACING_V2",
-        "LANGCHAIN_TRACING_V2",
-        "LANGCHAIN_HANDLER",
-    ),
-    "false",
-)
-
-
-@pytest.fixture(autouse=True)
-def offline_model_tests(monkeypatch, request):
-    for name, value in getattr(request, "param", {}).items():
-        monkeypatch.setenv(name, value)
-    for name, value in TRACING_OFF.items():
-        monkeypatch.setenv(name, value)
-
-    def reject_network(*args, **kwargs):
-        pytest.fail("Model tests must not connect to the network")
-
-    monkeypatch.setattr(socket, "getaddrinfo", reject_network)
-    monkeypatch.setattr(socket.socket, "connect", reject_network)
-    monkeypatch.setattr(socket.socket, "connect_ex", reject_network)
-
-    # LangSmith can cache environment lookups before this fixture runs.
-    with tracing_context(enabled=False, parent=False):
-        yield
 
 
 @pytest.mark.parametrize(
