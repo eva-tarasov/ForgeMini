@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 02A принят, Step 02B подготовлен и ожидает review владельца
+**Status:** in progress — Step 02 принят, Step 03A подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -431,10 +431,12 @@ cancelled
 ## Рабочие шаги
 
 - [x] 01. Architecture Decision & Theory — DONE. [ADR-002](docs/adr/ADR-002.md) принят владельцем; commits `af26d519` и `9ab4b07` проверены.
-- [ ] 02. LangChain Model Foundation — in progress.
+- [x] 02. LangChain Model Foundation — DONE.
   - [x] 02A. Model foundation — DONE. [PR #12](https://github.com/eva-tarasov/myFirstForge/pull/12) merged в `main` (`9efde8f`). Историческое evidence: `pip check` PASS, model tests `18 passed`, полный pytest `259 passed, 31 skipped`. В отдельном прогоне владелец сообщил `2 passed` для PostgreSQL connection smoke, остальные 29 PostgreSQL integration tests не выполнялись.
-  - [ ] 02B. Structured output — in progress. Реализация подготовлена, ожидает review и учебной проверки.
-- [ ] 03. LangChain create_agent — not started; ограниченный учебный прототип.
+  - [x] 02B. Structured output — DONE. [PR #13](https://github.com/eva-tarasov/myFirstForge/pull/13) merged в `main` (`8830d5e`). Историческое evidence: `pip check` PASS, model tests `43 passed`, полный pytest `284 passed, 31 skipped`, пять критических ручных учебных проверок PASS по отчёту владельца. PostgreSQL integration tests не запускались.
+- [ ] 03. Tool Calling & LangChain create_agent — in progress.
+  - [ ] 03A. Tool Calling Foundation — реализация подготовлена, ожидает review и учебной проверки.
+  - [ ] 03B. LangChain create_agent — not started; ограниченный учебный прототип.
 - [ ] 04. LangGraph Fundamentals — not started.
 - [ ] 05. Custom Single-Agent Graph — not started.
 - [ ] 06. AgentRunner & AgentService — not started.

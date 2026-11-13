@@ -4,13 +4,13 @@ import os
 import socket
 import subprocess
 import sys
-from unittest.mock import create_autospec, patch
+from unittest.mock import AsyncMock, create_autospec, patch
 
 import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tracers.langchain import LangChainTracer
 from langchain_openai import ChatOpenAI
@@ -25,6 +25,13 @@ from app.agent_runtime.structured_output import (
     TaskAnalysisResult,
     create_structured_task_model,
     invoke_structured_task_model,
+)
+from app.agent_runtime.tool_calling_demo import (
+    FixtureInput,
+    ToolCallingDemoError,
+    create_tool_calling_model,
+    read_fixture,
+    run_tool_calling_demo,
 )
 
 
@@ -448,3 +455,329 @@ def test_structured_output_openai_mock_transport(analysis_payload, refusal):
     schema = response_format["json_schema"]["schema"]
     assert set(schema["properties"]) == set(schema["required"]) == set(analysis_payload)
     assert schema["additionalProperties"] is False
+
+
+TASK_SERVICE_FIXTURE = (
+    "Training fixture (synthetic): an idempotency key is scoped to its workspace. "
+    "The same key may be used in a different workspace."
+)
+
+
+def _fixture_call(name="read_fixture", call_id="call_fixture", **args):
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
+
+
+def _run_tool_demo(model):
+    return asyncio.run(run_tool_calling_demo(model, goal="Цель", acceptance_criteria=("Критерий",)))
+
+
+@pytest.fixture
+def fixture_execution(monkeypatch):
+    execution = AsyncMock(wraps=read_fixture.coroutine)
+    monkeypatch.setattr(read_fixture, "coroutine", execution)
+    return execution
+
+
+def test_fixture_input_schema():
+    schema = FixtureInput.model_json_schema()
+
+    assert schema["required"] == ["component"]
+    assert set(schema["properties"]) == {"component"}
+    assert set(schema["properties"]["component"]["enum"]) == {"task_service", "agent_run_service"}
+    assert schema["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    "component,expected",
+    [
+        ("task_service", TASK_SERVICE_FIXTURE),
+        (
+            "agent_run_service",
+            "Training fixture (synthetic): a transition checks the expected current status "
+            "against the stored status before changing it.",
+        ),
+    ],
+)
+def test_read_fixture_returns_training_data(component, expected):
+    assert asyncio.run(read_fixture.ainvoke({"component": component})) == expected
+
+
+def test_tool_calling_model_binds_the_existing_client_without_inference():
+    model = create_autospec(ChatOpenAI, instance=True)
+
+    assert create_tool_calling_model(model) is model.bind_tools.return_value
+    model.bind_tools.assert_called_once_with([read_fixture], parallel_tool_calls=False)
+    model.ainvoke.assert_not_awaited()
+    model.invoke.assert_not_called()
+
+
+def test_tool_calling_demo_returns_after_first_reply_without_tool_calls(fixture_execution):
+    model = create_autospec(Runnable, instance=True)
+    first = AIMessage(content="No fixture needed")
+    model.ainvoke.return_value = first
+
+    history = _run_tool_demo(model)
+
+    assert [type(message) for message in history] == [SystemMessage, HumanMessage, AIMessage]
+    assert history[-1] is first
+    assert "predefined training fixtures" in history[0].content
+    assert history[1] == model_layer.build_task_messages("Цель", ("Критерий",))[1]
+    model.ainvoke.assert_awaited_once()
+    fixture_execution.assert_not_awaited()
+
+
+def test_tool_calling_demo_returns_both_replies_and_correlated_fixture(fixture_execution):
+    first = AIMessage(
+        content="",
+        tool_calls=[_fixture_call(component="task_service")],
+        usage_metadata={"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+    )
+    final = AIMessage(content="Fixture considered", response_metadata={"finish_reason": "stop"})
+    replies = iter([first, final])
+    snapshots = []
+
+    async def respond(messages):
+        snapshots.append(list(messages))
+        return next(replies)
+
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.side_effect = respond
+
+    history = _run_tool_demo(model)
+
+    assert [type(message) for message in history] == [
+        SystemMessage, HumanMessage, AIMessage, ToolMessage, AIMessage
+    ]
+    assert snapshots == [history[:2], history[:4]]
+    assert history[2] is first
+    assert history[4] is final
+    assert history[3].tool_call_id == "call_fixture"
+    assert history[3].status == "success"
+    assert history[3].content == TASK_SERVICE_FIXTURE
+    assert model.ainvoke.await_count == 2
+    fixture_execution.assert_awaited_once_with(component="task_service")
+
+
+@pytest.mark.parametrize(
+    "reply,reason",
+    [
+        (HumanMessage(content="unexpected message type"), "invalid_model_message"),
+        (
+            AIMessage(content="", invalid_tool_calls=[{"args": "{", "name": "read_fixture"}]),
+            "invalid_tool_call",
+        ),
+        (AIMessage(content="", tool_calls=[_fixture_call(name="unknown")]), "unknown_tool"),
+        (AIMessage(content="", tool_calls=[_fixture_call(call_id=None)]), "invalid_tool_call_id"),
+        (AIMessage(content="", tool_calls=[_fixture_call(call_id=" ")]), "invalid_tool_call_id"),
+        (
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _fixture_call(component="task_service"),
+                    _fixture_call(call_id="call_other", component="agent_run_service"),
+                ],
+            ),
+            "tool_budget_exceeded",
+        ),
+    ],
+    ids=["wrong-message", "invalid-tool-call", "unknown-tool", "missing-id", "blank-id", "batch"],
+)
+def test_tool_calling_demo_rejects_invalid_first_reply(reply, reason, fixture_execution):
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.return_value = reply
+
+    with pytest.raises(ToolCallingDemoError, match=f"^{reason}$"):
+        _run_tool_demo(model)
+
+    model.ainvoke.assert_awaited_once()
+    fixture_execution.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "args,error_type",
+    [
+        ({"component": "unknown"}, "literal_error"),
+        ({"component": "task_service", "extra": "unexpected"}, "extra_forbidden"),
+    ],
+    ids=["unknown-component", "extra-argument"],
+)
+def test_tool_calling_demo_rejects_invalid_fixture(args, error_type, fixture_execution):
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.return_value = AIMessage(content="", tool_calls=[_fixture_call(**args)])
+
+    with pytest.raises(ValidationError) as exc:
+        _run_tool_demo(model)
+
+    assert exc.value.errors(include_input=False)[0]["type"] == error_type
+    model.ainvoke.assert_awaited_once()
+    fixture_execution.assert_not_awaited()
+
+
+def test_tool_calling_demo_rejects_second_tool_call(fixture_execution):
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.side_effect = [
+        AIMessage(content="", tool_calls=[_fixture_call(component="task_service")]),
+        AIMessage(
+            content="",
+            tool_calls=[_fixture_call(call_id="call_other", component="agent_run_service")],
+        ),
+    ]
+
+    with pytest.raises(ToolCallingDemoError, match="^tool_budget_exceeded$"):
+        _run_tool_demo(model)
+
+    assert model.ainvoke.await_count == 2
+    fixture_execution.assert_awaited_once_with(component="task_service")
+
+
+@pytest.mark.parametrize("call_number", [1, 2])
+def test_tool_calling_demo_propagates_provider_timeout(call_number, fixture_execution):
+    model = create_autospec(Runnable, instance=True)
+    error = TimeoutError("synthetic provider timeout")
+    first = AIMessage(content="", tool_calls=[_fixture_call(component="task_service")])
+    model.ainvoke.side_effect = [error] if call_number == 1 else [first, error]
+
+    with pytest.raises(TimeoutError) as exc:
+        _run_tool_demo(model)
+
+    assert exc.value is error
+    assert model.ainvoke.await_count == call_number
+    assert fixture_execution.await_count == call_number - 1
+
+
+@pytest.mark.parametrize(
+    "tool_reply,reason",
+    [
+        ("unexpected result", "invalid_tool_message"),
+        (ToolMessage(content="fixture", tool_call_id="other"), "tool_call_id_mismatch"),
+        (
+            ToolMessage(content="failure", tool_call_id="call_fixture", status="error"),
+            "tool_execution_failed",
+        ),
+    ],
+    ids=["wrong-message", "wrong-id", "failed-status"],
+)
+def test_tool_calling_demo_rejects_invalid_tool_result(tool_reply, reason):
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.return_value = AIMessage(content="", tool_calls=[_fixture_call(component="task_service")])
+
+    with patch.object(type(read_fixture), "ainvoke", return_value=tool_reply) as invoke_tool:
+        with pytest.raises(ToolCallingDemoError, match=f"^{reason}$"):
+            _run_tool_demo(model)
+
+    invoke_tool.assert_awaited_once_with(_fixture_call(component="task_service"))
+    model.ainvoke.assert_awaited_once()
+
+
+def test_tool_calling_demo_openai_mock_transport(fixture_execution):
+    call_id = "call_training_fixture"
+    arguments = {"component": "task_service"}
+    requests = []
+    replies = iter(
+        [
+            (
+                "tool_calls",
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": "read_fixture", "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                },
+                {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+            ),
+            (
+                "stop",
+                {"role": "assistant", "content": "The training fixture scopes the key to a workspace."},
+                {"prompt_tokens": 24, "completion_tokens": 10, "total_tokens": 34},
+            ),
+        ]
+    )
+
+    def respond(request):
+        assert request.method == "POST"
+        assert request.url == httpx.URL("https://forge-test.invalid/v1/chat/completions")
+        requests.append(json.loads(request.content))
+        finish_reason, message, usage = next(replies)
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl-fixture-{len(requests)}",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o-mini",
+                "choices": [{"index": 0, "finish_reason": finish_reason, "message": message}],
+                "usage": usage,
+            },
+        )
+
+    async def invoke():
+        transport = httpx.MockTransport(respond)
+        with httpx.Client(transport=transport, trust_env=False) as sync_client:
+            async with httpx.AsyncClient(transport=transport, trust_env=False) as async_client:
+                model = ChatOpenAI(
+                    model="gpt-4o-mini",
+                    api_key="synthetic-openai-key",
+                    base_url="https://forge-test.invalid/v1",
+                    openai_proxy="",
+                    use_responses_api=False,
+                    max_retries=0,
+                    http_client=sync_client,
+                    http_async_client=async_client,
+                )
+                return await run_tool_calling_demo(
+                    create_tool_calling_model(model),
+                    goal="Цель",
+                    acceptance_criteria=("Критерий",),
+                )
+
+    history = asyncio.run(invoke())
+
+    assert len(requests) == 2
+    fixture_execution.assert_awaited_once_with(component="task_service")
+    assert [type(message) for message in history] == [
+        SystemMessage, HumanMessage, AIMessage, ToolMessage, AIMessage
+    ]
+    first, second = requests
+    assert [message["role"] for message in first["messages"]] == ["system", "user"]
+    assert "predefined training fixtures" in first["messages"][0]["content"]
+    assert json.loads(first["messages"][1]["content"]) == {
+        "goal": "Цель",
+        "acceptance_criteria": ["Критерий"],
+    }
+    assert first["parallel_tool_calls"] is False
+    (tool_definition,) = first["tools"]
+    assert tool_definition["type"] == "function"
+    assert tool_definition["function"]["name"] == "read_fixture"
+    parameters = tool_definition["function"]["parameters"]
+    assert parameters["required"] == ["component"]
+    assert set(parameters["properties"]) == {"component"}
+    assert set(parameters["properties"]["component"]["enum"]) == {"task_service", "agent_run_service"}
+
+    assert [message["role"] for message in second["messages"]] == ["system", "user", "assistant", "tool"]
+    assert second["messages"][:2] == first["messages"]
+    (assistant_call,) = second["messages"][2]["tool_calls"]
+    assert assistant_call["id"] == call_id
+    assert assistant_call["type"] == "function"
+    assert assistant_call["function"]["name"] == "read_fixture"
+    assert json.loads(assistant_call["function"]["arguments"]) == arguments
+    assert second["messages"][3] == {
+        "role": "tool", "tool_call_id": call_id, "content": TASK_SERVICE_FIXTURE
+    }
+
+    assert history[2].tool_calls == [_fixture_call(call_id=call_id, **arguments)]
+    assert history[3].tool_call_id == call_id
+    assert history[4].content == "The training fixture scopes the key to a workspace."
+    assert history[4].tool_calls == []
+    for message, finish_reason, expected_usage in (
+        (history[2], "tool_calls", (12, 8, 20)),
+        (history[4], "stop", (24, 10, 34)),
+    ):
+        assert message.response_metadata["finish_reason"] == finish_reason
+        usage = message.usage_metadata
+        assert usage is not None
+        assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == expected_usage
