@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 03A принят, Step 03B подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 03 принят, Step 04A подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -434,10 +434,12 @@ cancelled
 - [x] 02. LangChain Model Foundation — DONE.
   - [x] 02A. Model foundation — DONE. [PR #12](https://github.com/eva-tarasov/myFirstForge/pull/12) merged в `main` (`9efde8f`). Историческое evidence: `pip check` PASS, model tests `18 passed`, полный pytest `259 passed, 31 skipped`. В отдельном прогоне владелец сообщил `2 passed` для PostgreSQL connection smoke, остальные 29 PostgreSQL integration tests не выполнялись.
   - [x] 02B. Structured output — DONE. [PR #13](https://github.com/eva-tarasov/myFirstForge/pull/13) merged в `main` (`8830d5e`). Историческое evidence: `pip check` PASS, model tests `43 passed`, полный pytest `284 passed, 31 skipped`, пять критических ручных учебных проверок PASS по отчёту владельца. PostgreSQL integration tests не запускались.
-- [ ] 03. Tool Calling & LangChain create_agent — in progress.
+- [x] 03. Tool Calling & LangChain create_agent — DONE.
   - [x] 03A. Tool Calling Foundation — DONE. [PR #14](https://github.com/eva-tarasov/myFirstForge/pull/14) merged в `main` (`4d80293`). Историческое evidence: `pip check` PASS, model tests `64 passed`, полный pytest `305 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL integration tests не запускались.
-  - [ ] 03B. LangChain create_agent — in progress. Учебный прототип подготовлен, ожидает review и учебной проверки. Dev dependency: `langchain==1.4.10`. Установлены транзитивные `langgraph==1.2.21`, `langgraph-checkpoint==4.3.1`, `langgraph-prebuilt==1.1.1`, `langgraph-sdk==0.4.14` и `ormsgpack==1.13.1`. Версии существующих пакетов сохранены. Собственный `StateGraph` Forge запланирован на последующий шаг.
-- [ ] 04. LangGraph Fundamentals — not started.
+  - [x] 03B. LangChain create_agent — DONE. [PR #15](https://github.com/eva-tarasov/myFirstForge/pull/15) merged в `main` (`e2bad56`). Историческое evidence: `pip check` PASS, сохранены версии всех 57 ранее установленных non-editable пакетов, model/agent tests `80 passed`, полный pytest `321 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL connection smoke NOT RUN: сервис недоступен. Dev dependency: `langchain==1.4.10`. В 03B транзитивно установлены `langgraph==1.2.21`, `langgraph-checkpoint==4.3.1`, `langgraph-prebuilt==1.1.1`, `langgraph-sdk==0.4.14` и `ormsgpack==1.13.1`.
+- [ ] 04. LangGraph Fundamentals — in progress.
+  - [ ] 04A. StateGraph Foundation — реализация подготовлена, ожидает review и учебной проверки. `langgraph==1.2.21` объявлен прямой зависимостью Forge без изменения установленных версий.
+  - [ ] 04B. Reducers, Messages & Cyclic Execution — not started.
 - [ ] 05. Custom Single-Agent Graph — not started.
 - [ ] 06. AgentRunner & AgentService — not started.
 - [ ] 07. Persistence & Agent Events — not started.
