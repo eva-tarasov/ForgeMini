@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 04 принят, Step 05A подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 05A принят, Step 05B подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -441,8 +441,8 @@ cancelled
   - [x] 04A. StateGraph Foundation — DONE. [PR #16](https://github.com/eva-tarasov/myFirstForge/pull/16) merged в `main` (`dec5580`). Историческое evidence: Python `3.13.0`, `pip check` PASS, graph tests `9 passed`, полный pytest `330 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. `langgraph==1.2.21` объявлен прямой зависимостью, версии всех 63 non-editable пакетов сохранены. PostgreSQL integration tests не запускались.
   - [x] 04B. Reducers, Messages & Cyclic Execution — DONE. [PR #17](https://github.com/eva-tarasov/myFirstForge/pull/17) merged в `main` (`6a44ff0`). Историческое evidence: `pip check` PASS, graph cycle tests `7 passed`, полный pytest `337 passed, 31 skipped`, три ручных учебных случая PASS по отчёту владельца. Версии зависимостей сохранены. PostgreSQL integration NOT RUN.
 - [ ] 05. Custom Single-Agent Graph — in progress.
-  - [ ] 05A. Custom Model/Tool Graph — реализация подготовлена, ожидает review и учебной проверки. Граф использует общий `read_fixture` из `fixture_tools.py` и ограничивает запуск двумя вызовами модели и одним исполнением fixture. Узел tool проверяет бюджет следующего model call и весь batch до исполнения. Новые сообщения добавляются с уникальными ID. Checkpointer отключён.
-  - [ ] 05B. Structured Finalization — not started.
+  - [x] 05A. Custom Model/Tool Graph — DONE. [PR #18](https://github.com/eva-tarasov/myFirstForge/pull/18) merged в `main` (`2aef2db`). Историческое evidence: `pip check` PASS, graph tests `34 passed`, предыдущие model/tool demo tests `69 passed`, полный pytest `371 passed, 31 skipped`, три начальных ручных учебных сценария PASS и проверка исправления `6 passed, 5 deselected` по отчёту владельца. PostgreSQL integration NOT RUN, версии зависимостей сохранены. Граф использует общий `read_fixture`, проверяет бюджеты перед исполнением и добавляет сообщения с уникальными ID. Checkpointer отключён.
+  - [ ] 05B. Structured Finalization — реализация подготовлена, ожидает review и учебной проверки. Узел `finalize` получает `TaskAnalysis` и формирует `AgentFinalResult` с runtime observations и статусом `ready_for_verification` или `blocked`. Observations содержат фактические синтетические ответы fixture. Независимая verification остаётся отдельным этапом. Бюджет: до двух исследовательских вызовов модели, одно исполнение fixture и один вызов финализатора.
 - [ ] 06. AgentRunner & AgentService — not started.
 - [ ] 07. Persistence & Agent Events — not started.
 - [ ] 08. Reliability & Execution Limits — not started.

@@ -1,7 +1,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict
@@ -42,7 +42,15 @@ def create_structured_task_model(model: ChatOpenAI) -> Runnable:
 async def invoke_structured_task_model(
     model: Runnable, *, goal: str, acceptance_criteria: Sequence[str]
 ) -> TaskAnalysisResult:
-    result = await model.ainvoke(build_task_messages(goal, acceptance_criteria))
+    return await invoke_structured_analysis(
+        model, messages=build_task_messages(goal, acceptance_criteria)
+    )
+
+
+async def invoke_structured_analysis(
+    model: Runnable, *, messages: Sequence[BaseMessage]
+) -> TaskAnalysisResult:
+    result = await model.ainvoke(list(messages))
     if not isinstance(result, Mapping) or not {"raw", "parsed", "parsing_error"}.issubset(result):
         raise StructuredOutputError("invalid_envelope")
 

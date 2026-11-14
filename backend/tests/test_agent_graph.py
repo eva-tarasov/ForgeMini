@@ -24,6 +24,7 @@ from app.agent_runtime.agent_graph import (
     run_agent_graph,
 )
 from app.agent_runtime.fixture_tools import create_tool_calling_model, read_fixture
+from app.agent_runtime.structured_output import TaskAnalysis
 
 
 GOAL = "Проверить область действия ключа"
@@ -66,8 +67,24 @@ def _tool_reply(*calls, message_id=None):
     return AIMessage(content="", id=message_id, tool_calls=list(calls))
 
 
-def _run(model):
-    graph = create_agent_graph(model)
+@pytest.fixture
+def structured_model():
+    model = create_autospec(Runnable, instance=True)
+    model.ainvoke.return_value = {
+        "raw": AIMessage(content=""),
+        "parsed": TaskAnalysis(
+            summary="Synthetic analysis",
+            relevant_components=[],
+            assumptions=[],
+            blocked_reason=None,
+        ),
+        "parsing_error": None,
+    }
+    return model
+
+
+def _run(model, structured_model):
+    graph = create_agent_graph(model, structured_model)
     return asyncio.run(run_agent_graph(graph, goal=GOAL, acceptance_criteria=CRITERIA))
 
 
@@ -78,8 +95,9 @@ def test_agent_graph_initialize_returns_only_new_messages_and_zero_deltas():
     update = initialize(inputs)
 
     assert inputs == before
-    assert set(update) == {"messages", "model_calls", "tool_calls"}
-    assert update["model_calls"] == update["tool_calls"] == 0
+    assert set(update) == {"messages", "model_calls", "tool_calls", "observations", "finalization_calls"}
+    assert update["model_calls"] == update["tool_calls"] == update["finalization_calls"] == 0
+    assert update["observations"] == []
     system, human = update["messages"]
     assert isinstance(system, SystemMessage)
     assert "synthetic training data" in system.content
@@ -88,39 +106,44 @@ def test_agent_graph_initialize_returns_only_new_messages_and_zero_deltas():
     assert json.loads(human.content) == before
 
 
-def test_agent_graph_factory_does_not_call_model():
+def test_agent_graph_factory_does_not_call_model(structured_model):
     model = _model()
 
-    create_agent_graph(model)
+    create_agent_graph(model, structured_model)
 
     model.ainvoke.assert_not_awaited()
     model.invoke.assert_not_called()
+    structured_model.ainvoke.assert_not_awaited()
 
 
-def test_agent_graph_without_tool_calls_preserves_provided_message(fixture_execution):
+def test_agent_graph_without_tool_calls_preserves_provided_message(fixture_execution, structured_model):
     reply = AIMessage(content="Direct response", id="assistant-direct", usage_metadata=USAGE)
     model = _model(reply)
 
-    result = _run(model)
+    result = _run(model, structured_model)
 
     assert (result["model_calls"], result["tool_calls"]) == (1, 0)
+    assert result["finalization_calls"] == 1
+    assert result["final_result"].observations == ()
     assert [type(message) for message in result["messages"]] == [SystemMessage, HumanMessage, AIMessage]
     assert result["messages"][-1] is reply
     assert result["messages"][-1].usage_metadata == USAGE
     assert (result["goal"], result["acceptance_criteria"]) == (GOAL, list(CRITERIA))
     model.ainvoke.assert_awaited_once()
+    structured_model.ainvoke.assert_awaited_once()
     fixture_execution.assert_not_awaited()
 
 
-def test_agent_graph_accepts_nonempty_text_block(fixture_execution):
+def test_agent_graph_accepts_nonempty_text_block(fixture_execution, structured_model):
     content = [{"type": "text", "text": "Valid analysis"}]
     response_metadata = {"finish_reason": "stop"}
     reply = AIMessage(content=content, response_metadata=response_metadata, usage_metadata=USAGE)
     model = _model(reply)
 
-    result = _run(model)
+    result = _run(model, structured_model)
 
     assert (result["model_calls"], result["tool_calls"]) == (1, 0)
+    assert result["finalization_calls"] == 1
     assert len(result["messages"]) == 3
     final = result["messages"][-1]
     assert isinstance(final, AIMessage)
@@ -186,27 +209,29 @@ def test_agent_graph_model_node_copies_missing_id_and_returns_delta():
         "blank-list-text", "empty-text-block", "reasoning-only", "blank-id",
     ],
 )
-def test_agent_graph_rejects_invalid_model_reply(reply, reason, fixture_execution):
+def test_agent_graph_rejects_invalid_model_reply(reply, reason, fixture_execution, structured_model):
     model = _model(reply)
 
     with pytest.raises(AgentGraphError) as exc:
-        _run(model)
+        _run(model, structured_model)
 
     assert exc.value.args == (reason,)
     model.ainvoke.assert_awaited_once()
     fixture_execution.assert_not_awaited()
+    structured_model.ainvoke.assert_not_awaited()
 
 
-def test_agent_graph_propagates_provider_exception(fixture_execution):
+def test_agent_graph_propagates_provider_exception(fixture_execution, structured_model):
     timeout = TimeoutError("Synthetic model timeout")
     model = _model(timeout)
 
     with pytest.raises(TimeoutError) as exc:
-        _run(model)
+        _run(model, structured_model)
 
     assert exc.value is timeout
     model.ainvoke.assert_awaited_once()
     fixture_execution.assert_not_awaited()
+    structured_model.ainvoke.assert_not_awaited()
 
 
 def test_agent_graph_checks_model_budget_before_invocation():
@@ -237,28 +262,30 @@ def test_agent_graph_checks_model_budget_before_invocation():
     ],
     ids=["unknown-tool", "missing-id", "blank-id", "invalid-component", "extra-argument", "batch"],
 )
-def test_agent_graph_rejects_invalid_tool_request(calls, reason, fixture_execution):
+def test_agent_graph_rejects_invalid_tool_request(calls, reason, fixture_execution, structured_model):
     model = _model(_tool_reply(*calls))
 
     with pytest.raises(AgentGraphError) as exc:
-        _run(model)
+        _run(model, structured_model)
 
     assert exc.value.args == (reason,)
     assert exc.value.__cause__ is None
     assert "synthetic-invalid-input" not in str(exc.value)
     model.ainvoke.assert_awaited_once()
     fixture_execution.assert_not_awaited()
+    structured_model.ainvoke.assert_not_awaited()
 
 
-def test_agent_graph_rejects_tool_budget_exceeded(fixture_execution):
+def test_agent_graph_rejects_tool_budget_exceeded(fixture_execution, structured_model):
     model = _model(_tool_reply(_request()), _tool_reply(_request(call_id="fixture-2")))
 
     with pytest.raises(AgentGraphError) as exc:
-        _run(model)
+        _run(model, structured_model)
 
     assert exc.value.args == ("tool_budget_exceeded",)
     assert model.ainvoke.await_count == 2
     fixture_execution.assert_awaited_once_with(component="task_service")
+    structured_model.ainvoke.assert_not_awaited()
 
 
 def test_agent_graph_rejects_tool_without_remaining_model_budget(fixture_execution):
@@ -286,19 +313,20 @@ def test_agent_graph_rejects_tool_without_remaining_model_budget(fixture_executi
     ],
     ids=["type", "correlation", "status", "duplicate-id"],
 )
-def test_agent_graph_rejects_invalid_tool_observation(observation, reason):
+def test_agent_graph_rejects_invalid_tool_observation(observation, reason, structured_model):
     model = _model(_tool_reply(_request(), message_id="assistant-request"))
 
     with patch.object(type(read_fixture), "ainvoke", return_value=observation) as execute:
         with pytest.raises(AgentGraphError) as exc:
-            _run(model)
+            _run(model, structured_model)
 
     assert exc.value.args == (reason,)
     execute.assert_awaited_once_with(_request())
     model.ainvoke.assert_awaited_once()
+    structured_model.ainvoke.assert_not_awaited()
 
 
-def test_agent_graph_rejects_duplicate_message_id(fixture_execution):
+def test_agent_graph_rejects_duplicate_message_id(fixture_execution, structured_model):
     first = _tool_reply(_request(), message_id="assistant-request")
     final = AIMessage(content="Would replace the tool request", id=first.id)
     model = create_autospec(Runnable, instance=True)
@@ -311,7 +339,7 @@ def test_agent_graph_rejects_duplicate_message_id(fixture_execution):
     model.ainvoke.side_effect = reply
 
     with pytest.raises(AgentGraphError) as exc:
-        _run(model)
+        _run(model, structured_model)
 
     assert exc.value.args == ("duplicate_message_id",)
     assert [len(history) for history in snapshots] == [2, 4]
@@ -320,9 +348,10 @@ def test_agent_graph_rejects_duplicate_message_id(fixture_execution):
     assert snapshots[1][3].tool_call_id == "fixture-1"
     fixture_execution.assert_awaited_once_with(component="task_service")
     assert model.ainvoke.await_count == 2
+    structured_model.ainvoke.assert_not_awaited()
 
 
-def test_agent_graph_independent_invocations_on_same_compiled_graph(fixture_execution):
+def test_agent_graph_independent_invocations_on_same_compiled_graph(fixture_execution, structured_model):
     async def reply(messages):
         if isinstance(messages[-1], ToolMessage):
             return AIMessage(content=json.loads(messages[1].content)["goal"])
@@ -330,7 +359,7 @@ def test_agent_graph_independent_invocations_on_same_compiled_graph(fixture_exec
 
     model = create_autospec(Runnable, instance=True)
     model.ainvoke.side_effect = reply
-    graph = create_agent_graph(model)
+    graph = create_agent_graph(model, structured_model)
 
     async def run_both():
         first = await run_agent_graph(graph, goal="Первая задача", acceptance_criteria=("Первый критерий",))
@@ -348,14 +377,15 @@ def test_agent_graph_independent_invocations_on_same_compiled_graph(fixture_exec
         (second, "Вторая задача", "Второй критерий"),
     ):
         assert (result["model_calls"], result["tool_calls"]) == (2, 1)
+        assert result["finalization_calls"] == 1
         assert len(result["messages"]) == 5
         assert json.loads(result["messages"][1].content) == {"goal": goal, "acceptance_criteria": [criterion]}
         assert result["messages"][-1].content == goal
         assert len({message.id for message in result["messages"]}) == 5
 
 
-def test_agent_graph_ainvoke_applies_recursion_limit_once(monkeypatch):
-    graph = create_agent_graph(_model(AIMessage(content="Direct response")))
+def test_agent_graph_ainvoke_applies_recursion_limit_once(monkeypatch, structured_model):
+    graph = create_agent_graph(_model(AIMessage(content="Direct response")), structured_model)
     invoke = AsyncMock(wraps=graph.ainvoke)
     monkeypatch.setattr(graph, "ainvoke", invoke)
     criteria = [*CRITERIA]
@@ -370,7 +400,8 @@ def test_agent_graph_ainvoke_applies_recursion_limit_once(monkeypatch):
     assert result["messages"][-1].content == "Direct response"
 
 
-def test_agent_graph_openai_mock_transport(fixture_execution):
+def test_agent_graph_openai_mock_transport(fixture_execution, structured_model):
+    # Exercise the two research requests here. The full provider test covers finalization too.
     call_id = "fixture-http-1"
     arguments = {"component": "task_service"}
     provider_call = {
@@ -426,7 +457,7 @@ def test_agent_graph_openai_mock_transport(fixture_execution):
                     http_client=sync_client,
                     http_async_client=async_client,
                 )
-                graph = create_agent_graph(create_tool_calling_model(model))
+                graph = create_agent_graph(create_tool_calling_model(model), structured_model)
                 return await run_agent_graph(graph, **inputs)
 
     result = asyncio.run(invoke())
@@ -434,6 +465,8 @@ def test_agent_graph_openai_mock_transport(fixture_execution):
     assert inputs == before
     assert {key: result[key] for key in inputs} == before
     assert (result["model_calls"], result["tool_calls"]) == (2, 1)
+    assert result["finalization_calls"] == 1
+    structured_model.ainvoke.assert_awaited_once()
     assert len(requests) == 2
     fixture_execution.assert_awaited_once_with(component="task_service")
     first, second = requests

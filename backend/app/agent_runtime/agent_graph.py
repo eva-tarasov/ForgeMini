@@ -1,6 +1,6 @@
 import operator
 from collections.abc import Sequence
-from typing import Annotated, Literal, TypeVar, TypedDict
+from typing import Annotated, Literal, NotRequired, TypeVar, TypedDict
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
@@ -11,12 +11,15 @@ from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
+from app.agent_runtime.agent_result import AgentFinalResult, FixtureObservation
+from app.agent_runtime.finalization import finalize_agent_result
 from app.agent_runtime.fixture_tools import FixtureInput, read_fixture
 from app.agent_runtime.model import build_task_messages
 
 
 MAX_MODEL_CALLS = 2
 MAX_TOOL_CALLS = 1
+MAX_FINALIZATION_CALLS = 1
 GRAPH_RECURSION_LIMIT = 16
 
 _SYSTEM_INSTRUCTIONS = (
@@ -38,6 +41,10 @@ class AgentGraphState(AgentGraphInput):
     messages: Annotated[list[AnyMessage], add_messages]
     model_calls: Annotated[int, operator.add]
     tool_calls: Annotated[int, operator.add]
+    observations: list[FixtureObservation]
+    finalization_calls: Annotated[int, operator.add]
+    final_result: NotRequired[AgentFinalResult]
+    finalization_raw: NotRequired[AIMessage]
 
 
 class AgentGraphError(RuntimeError):
@@ -61,10 +68,16 @@ def _prepare_message(
     return message
 
 
-def initialize(state: AgentGraphInput) -> dict[str, list[AnyMessage] | int]:
+def initialize(state: AgentGraphInput) -> dict[str, list[AnyMessage] | list[FixtureObservation] | int]:
     messages = build_task_messages(state["goal"], state["acceptance_criteria"])
     messages[0] = SystemMessage(content=_SYSTEM_INSTRUCTIONS)
-    return {"messages": messages, "model_calls": 0, "tool_calls": 0}
+    return {
+        "messages": messages,
+        "model_calls": 0,
+        "tool_calls": 0,
+        "observations": [],
+        "finalization_calls": 0,
+    }
 
 
 async def call_model(state: AgentGraphState, tool_model: Runnable) -> dict[str, list[AnyMessage] | int]:
@@ -91,7 +104,7 @@ def route_after_model(state: AgentGraphState) -> Literal["tool", "finish"]:
     return "tool" if isinstance(last, AIMessage) and last.tool_calls else "finish"
 
 
-async def call_tool(state: AgentGraphState) -> dict[str, list[AnyMessage] | int]:
+async def call_tool(state: AgentGraphState) -> dict[str, list[AnyMessage] | list[FixtureObservation] | int]:
     history = state["messages"]
     if not history or not isinstance(history[-1], AIMessage):
         raise AgentGraphError("invalid_tool_request")
@@ -124,28 +137,69 @@ async def call_tool(state: AgentGraphState) -> dict[str, list[AnyMessage] | int]
     if observation.status != "success":
         raise AgentGraphError("tool_execution_failed")
 
-    return {"messages": [_prepare_message(observation, history)], "tool_calls": 1}
+    checked = _prepare_message(observation, history)
+    if not isinstance(checked.content, str) or not checked.content.strip():
+        raise AgentGraphError("invalid_tool_content")
+    fixture_observation = FixtureObservation(
+        component=args.component, tool_call_id=call_id, content=checked.content
+    )
+    return {"messages": [checked], "tool_calls": 1, "observations": [fixture_observation]}
 
 
-def create_agent_graph(tool_model: Runnable) -> CompiledStateGraph:
+async def call_finalizer(
+    state: AgentGraphState, structured_model: Runnable
+) -> dict[str, AgentFinalResult | AIMessage | int]:
+    if state["finalization_calls"] >= MAX_FINALIZATION_CALLS:
+        raise AgentGraphError("finalization_budget_exceeded")
+    history = state["messages"]
+    if not history or not isinstance(history[-1], AIMessage):
+        raise AgentGraphError("invalid_finalization_history")
+    last = history[-1]
+    if last.tool_calls or last.invalid_tool_calls:
+        raise AgentGraphError("invalid_finalization_history")
+
+    finalized = await finalize_agent_result(
+        structured_model,
+        goal=state["goal"],
+        acceptance_criteria=state["acceptance_criteria"],
+        history=history,
+        observations=state["observations"],
+    )
+    return {"final_result": finalized.result, "finalization_raw": finalized.raw, "finalization_calls": 1}
+
+
+def create_agent_graph(tool_model: Runnable, structured_model: Runnable) -> CompiledStateGraph:
     async def model_node(state: AgentGraphState) -> dict[str, list[AnyMessage] | int]:
         return await call_model(state, tool_model)
+
+    async def finalize_node(state: AgentGraphState) -> dict[str, AgentFinalResult | AIMessage | int]:
+        return await call_finalizer(state, structured_model)
 
     builder = StateGraph(AgentGraphState, input_schema=AgentGraphInput)
     builder.add_node("initialize", initialize)
     builder.add_node("model", model_node)
     builder.add_node("tool", call_tool)
+    builder.add_node("finalize", finalize_node)
     builder.add_edge(START, "initialize")
     builder.add_edge("initialize", "model")
-    builder.add_conditional_edges("model", route_after_model, {"tool": "tool", "finish": END})
+    builder.add_conditional_edges("model", route_after_model, {"tool": "tool", "finish": "finalize"})
     builder.add_edge("tool", "model")
+    builder.add_edge("finalize", END)
     return builder.compile(checkpointer=False)
 
 
 async def run_agent_graph(
     graph: CompiledStateGraph, *, goal: str, acceptance_criteria: Sequence[str]
 ) -> AgentGraphState:
-    return await graph.ainvoke(
+    result = await graph.ainvoke(
         {"goal": goal, "acceptance_criteria": list(acceptance_criteria)},
         config={"recursion_limit": GRAPH_RECURSION_LIMIT},
     )
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("final_result"), AgentFinalResult)
+        or not isinstance(result.get("finalization_raw"), AIMessage)
+        or result.get("finalization_calls") != 1
+    ):
+        raise AgentGraphError("invalid_finalization_result")
+    return result
