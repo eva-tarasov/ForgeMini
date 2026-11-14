@@ -20,6 +20,8 @@ from app.db.session import create_engine, create_session_factory
 from app.domain.execution import AgentRunStatus as Status
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
+from app.services.agent_result import AgentFinalResult
+from app.services.agent_result_codec import encode_agent_result
 from app.services.agent_runs import (
     AgentRunService,
     StaleAgentRunStatusError,
@@ -105,6 +107,12 @@ async def transition(factory, run_id, current, target):
         assert not session.in_transaction()
 
 
+READY_RESULT = AgentFinalResult(
+    summary="Synthetic analysis", status="ready_for_verification",
+    relevant_components=(), assumptions=(), observations=(), blocked_reason=None,
+)
+
+
 def test_successful_transition_is_visible_in_independent_session(database):
     async def check():
         async with database() as (factory, run_id):
@@ -138,11 +146,18 @@ def test_sequential_transitions_have_ordered_events(database):
                 (Status.RUNNING, Status.VERIFYING),
                 (Status.VERIFYING, Status.FAILED),
             ]
-            for current, target in transitions:
-                await transition(factory, run_id, current, target)
+            await transition(factory, run_id, *transitions[0])
+            async with factory() as session:
+                await AgentRunService(session).complete_execution(run_id, READY_RESULT)
+            await transition(factory, run_id, *transitions[2])
             status, events = await snapshot(factory, run_id)
             assert status == Status.FAILED.value
-            assert_events(events, transitions)
+            assert [event.sequence for event in events] == [1, 2, 3, 4]
+            assert events[1].event_type == "agent_result_recorded"
+            assert events[1].payload == {"schema_version": 1, "result_status": "ready_for_verification"}
+            for event, (current, target) in zip([events[0], *events[2:]], transitions, strict=True):
+                assert event.event_type == "agent_run_status_changed"
+                assert event.payload == {"from": current.value, "to": target.value}
 
     asyncio.run(check())
 
@@ -163,15 +178,22 @@ def test_event_constraint_failure_rolls_back_status_and_preserves_history(databa
                     assert await session.scalar(
                         select(AgentRunModel.status).where(AgentRunModel.id == run_id)
                     ) == Status.VERIFYING.value
+                    assert await session.scalar(
+                        select(AgentRunModel.final_result).where(AgentRunModel.id == run_id)
+                    ) == encode_agent_result(READY_RESULT)
                     event.sequence = 1
                     return event
 
                 monkeypatch.setattr(service.events, "add_status_changed", duplicate_sequence)
                 with pytest.raises(IntegrityError) as exc:
-                    await service.transition_status(run_id, Status.RUNNING, Status.VERIFYING)
+                    await service.complete_execution(run_id, READY_RESULT)
                 assert exc.value.orig.sqlstate == "23505"
                 assert not session.in_transaction()
             assert await snapshot(factory, run_id) == before
+            async with factory() as session:
+                assert await session.scalar(
+                    select(AgentRunModel.final_result.is_(None)).where(AgentRunModel.id == run_id)
+                ) is True
 
     asyncio.run(check())
 

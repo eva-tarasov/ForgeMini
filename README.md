@@ -158,11 +158,19 @@ fi
 
 `TaskService.transition_status()` также сохраняет статус в PostgreSQL под блокировкой строки и отклоняет запрос с устаревшим ожидаемым статусом. У Task собственный граф состояний. Переход AgentRun сам по себе не меняет Task. `verifying → running` допустим для исправления, а переход в `succeeded` заблокирован до появления независимого подтверждения результата. Оба метода перехода доступны на уровне сервисов. HTTP API пока не публикует операции перехода.
 
-Agent runtime, исполнение инструментов, обработка approvals, оркестрация retry/resume и независимый механизм verification пока не реализованы. Записи `Approval` и `ToolCall` описывают данные согласований и вызовов инструментов. Их наличие в базе не означает, что Forge выполняет эти операции.
+`AgentService` захватывает подготовленный AgentRun и закрывает claim-сессию до вызова `AgentRunner`. Текущий LangGraph runtime поддерживает ограниченный read-only `read_fixture`. Обработка approvals, оркестрация retry/resume и независимая verification относятся к последующим этапам.
+
+### Предварительный результат AgentRun
+
+Миграция `1d972cc34fbe` добавляет nullable JSONB-колонку `agent_runs.final_result`. Версия хранения 1 использует объект `{"schema_version": 1, "result": {...}}`. В `result` входят `summary`, `status`, `relevant_components`, `assumptions`, `observations` и `blocked_reason`. Codec валидирует результат и вложенные observations по существующему строгому контракту. При чтении JSON-массивы восстанавливаются как tuple.
+
+После claim на новом run событие `queued → running` получает sequence 1. `complete_execution()` под блокировкой AgentRun проверяет `running` и отсутствие записанного результата. Один commit сохраняет JSONB, событие `agent_result_recorded` (sequence 2, payload только `schema_version` и `result_status`), новый статус и событие перехода (sequence 3). `ready_for_verification` ведёт в `verifying`, а `blocked` ведёт в `failed` с сохранением результата. Ошибка runner или невалидный результат ведёт в `failed` с SQL NULL и двумя событиями смены статуса.
+
+Любой новый переход в `verifying` требует сохранённого валидного `ready_for_verification`. При отменённом или уже завершённом run позднее completion отклоняется. `AgentService.get_run_result()` читает через новую сессию без вызова runner. Для SQL NULL, включая исторические `verifying`, он возвращает `None`. Отсутствующий run и повреждённый документ дают отдельные ошибки. Исторические строки сохраняются без backfill. Предварительный результат доступен для независимой verification, которая по-прежнему требуется для `succeeded`. Хранение завершённого результата не обеспечивает recovery и resume исполнения.
 
 ### Добавление AgentEvent
 
-Все production-записи AgentEvent проходят через `AgentEventRepository.append(run_id, event_type=..., payload=...)`. Текущий writer переходов вызывает `add_status_changed()`, который делегирует в `append()`. Caller передаёт непустой тип события длиной до 100 символов и JSON-совместимый словарь. Родительский AgentRun должен уже существовать или быть явно flushed в той же транзакции.
+Все production-записи AgentEvent проходят через `AgentEventRepository.append(run_id, event_type=..., payload=...)`. Запись результата вызывает `append()` напрямую. Смена статуса вызывает `add_status_changed()`, который делегирует в `append()`. Caller передаёт непустой тип события длиной до 100 символов и JSON-совместимый словарь. Родительский AgentRun должен уже существовать или быть явно flushed в той же транзакции.
 
 `append()` блокирует ID родительского AgentRun через `SELECT FOR UPDATE` с отключённым autoflush. После получения блокировки репозиторий явно выполняет `flush()` всего текущего unit of work, включая предыдущие pending events. Затем отдельный запрос `COALESCE(MAX(sequence), 0) + 1` выделяет номер в пределах этого AgentRun. При PostgreSQL `READ COMMITTED` отдельный запрос получает свежий snapshot и видит события, зафиксированные за время ожидания блокировки.
 
@@ -216,18 +224,27 @@ FORGE_TASK04_TEST_DB="$TEST_DB" python -m pytest -q tests/test_repository_integr
 
 Тесты принимают только имя с префиксом `forge_task04_` и удаляют только записи с собранными во время теста ID. База остаётся на месте.
 
-### PostgreSQL integration tests для Step 06 и Step 07A
+### PostgreSQL integration tests для Step 06 и Step 07
 
-Из `backend` с активированным виртуальным окружением укажите имя уже мигрированной отдельной базы вместо `forge_task06_review`. Схема должна включать revision `496f3a2c5b81`.
+Создайте новую выделенную базу из корня репозитория при запущенном Compose. Существующую базу Step 07A сохраните для исторической проверки.
 
 ```bash
-TEST_DB=forge_task06_review
-POSTGRES_DB="$TEST_DB" POSTGRES_HOST=127.0.0.1 FORGE_TASK06_TEST_DB="$TEST_DB" python -m pytest -q \
-  tests/test_agent_event_append_integration.py \
-  tests/test_agent_service_integration.py \
-  tests/test_agent_run_integration.py \
-  tests/test_task_transition_integration.py \
-  tests/test_task_idempotency_integration.py
+TEST_DB=forge_task06_week3_result_$(date +%Y%m%d_%H%M%S)
+docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB" &&
+(
+  cd backend || exit 1
+  export POSTGRES_DB="$TEST_DB" POSTGRES_HOST=127.0.0.1 FORGE_TASK06_TEST_DB="$TEST_DB"
+  .venv/bin/python -m alembic upgrade head &&
+  .venv/bin/python -m alembic current &&
+  .venv/bin/python -m alembic check &&
+  .venv/bin/python -m pytest -v \
+    tests/test_agent_result_persistence_integration.py \
+    tests/test_agent_event_append_integration.py \
+    tests/test_agent_service_integration.py \
+    tests/test_agent_run_integration.py \
+    tests/test_task_transition_integration.py \
+    tests/test_task_idempotency_integration.py
+)
 ```
 
-`POSTGRES_DB` и `FORGE_TASK06_TEST_DB` должны совпадать, а имя должно соответствовать `forge_task06_[a-z0-9_]+`. Перед записью тесты сверяют `current_database()` и при очистке удаляют только созданные ими записи. Тесты AgentEvent дополнительно проверяют `SHOW transaction_isolation` и подтверждают ожидание блокировки через `pg_blocking_pids()`.
+`POSTGRES_DB` и `FORGE_TASK06_TEST_DB` должны совпадать, а имя должно соответствовать `forge_task06_[a-z0-9_]+`. Тесты результата проверяют revision `1d972cc34fbe`. Перед записью тесты сверяют `current_database()` и при очистке удаляют только созданные ими записи. Проверки конкуренции используют `READ COMMITTED` и подтверждают ожидание блокировки через `pg_blocking_pids()`.

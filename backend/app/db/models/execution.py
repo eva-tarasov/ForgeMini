@@ -21,11 +21,16 @@ class AgentRunModel(Base):
         UniqueConstraint("task_id", "attempt_number", name="uq_agent_runs_task_attempt"),
         CheckConstraint("attempt_number >= 1", name="ck_agent_runs_attempt_positive"),
         status_check(AgentRunStatus, "ck_agent_runs_status"),
+        CheckConstraint(
+            "final_result IS NULL OR jsonb_typeof(final_result) = 'object'",
+            name="ck_agent_runs_final_result_object",
+        ),
     )
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     task_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True)
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    final_result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

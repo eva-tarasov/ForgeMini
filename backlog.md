@@ -46,10 +46,11 @@
 - Acceptance criteria: определить, как сохранять исходную идентичность идемпотентного запроса. Проверить replay и конфликт с другим payload в PostgreSQL integration tests.
 
 ## BL-08 — Сериализация нумерации AgentEvent
-- Type: concurrency/reliability debt. Status: решение подготовлено, ожидает финального review и merge. Окончательное закрытие после принятия PR.
+- Type: concurrency/reliability debt. Status: closed. [PR #22](https://github.com/eva-tarasov/myFirstForge/pull/22) merged в `main` (`2aaeae5`).
 - Contract: `AgentEventRepository.append()` блокирует родительский AgentRun без autoflush, явно выполняет flush и отдельным запросом вычисляет `COALESCE(MAX(sequence), 0) + 1` при PostgreSQL `READ COMMITTED`. Status writer использует этот же контракт через `add_status_changed()`. Commit и rollback принадлежат caller. [AgentEventRepository](backend/app/repositories/agent_events.py)
 - Evidence: 15 новых PostgreSQL cases прошли. `pg_blocking_pids()` подтвердил ожидание блокировки для двух generic writers и для generic/status в обоих порядках. После commit история имеет sequence 1, 2. После rollback ожидающий writer повторно использует номер 1. Разные AgentRun нумеруются независимо. [Integration tests](backend/tests/test_agent_event_append_integration.py)
 - Regression correction: `test_event_repository_sequences_and_does_not_commit` проверяет блокировку внутри `no_autoflush`, порядок `lock → flush → MAX → add` и владение commit/rollback. Обычный pytest после исправления дал `429 passed, 67 skipped` без failures и warnings. Повторный PostgreSQL suite дал `61 passed`.
+- Приняты три ручных сценария по отчёту владельца: concurrent append, append с выключенным autoflush и rollback.
 - Remaining boundary: все будущие writers используют общий append contract в коротких транзакциях для одного AgentRun. `UNIQUE(agent_run_id, sequence)` остаётся финальной защитой.
 
 ## BL-09 — Уровень изоляции транзакций при replay

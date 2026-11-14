@@ -19,7 +19,7 @@ from app.services.agent_runs import (
 def make_service(status="queued"):
     session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     service = AgentRunService(session)
-    run = SimpleNamespace(status=status)
+    run = SimpleNamespace(id=uuid4(), status=status, final_result=None)
     service.runs.get_for_update = AsyncMock(return_value=run)
     service.events.add_status_changed = AsyncMock()
     return service, session, run
@@ -27,7 +27,6 @@ def make_service(status="queued"):
 
 def test_success_commits_status_and_event_in_order():
     service, session, run = make_service()
-    run_id = uuid4()
     calls = []
 
     async def lock(_):
@@ -36,7 +35,7 @@ def test_success_commits_status_and_event_in_order():
 
     async def add_event(id_, current, target):
         assert run.status == "running"
-        assert (id_, current, target) == (run_id, Status.QUEUED, Status.RUNNING)
+        assert (id_, current, target) == (run.id, Status.QUEUED, Status.RUNNING)
         calls.append("event")
 
     async def commit():
@@ -45,8 +44,10 @@ def test_success_commits_status_and_event_in_order():
     service.runs.get_for_update.side_effect = lock
     service.events.add_status_changed.side_effect = add_event
     session.commit.side_effect = commit
-    asyncio.run(service.transition_status(run_id, Status.QUEUED, Status.RUNNING))
+    asyncio.run(service.transition_status(run.id, Status.QUEUED, Status.RUNNING))
     assert calls == ["lock", "event", "commit"]
+    service.runs.get_for_update.assert_awaited_once_with(run.id)
+    service.events.add_status_changed.assert_awaited_once_with(run.id, Status.QUEUED, Status.RUNNING)
     session.rollback.assert_not_awaited()
     assert service.runs.session is service.events.session is session
 
@@ -63,7 +64,7 @@ def test_rejected_transitions_rollback_without_event(actual, expected, target, e
     if actual is None:
         service.runs.get_for_update.return_value = None
     with pytest.raises(error):
-        asyncio.run(service.transition_status(uuid4(), expected, target))
+        asyncio.run(service.transition_status(run.id, expected, target))
     service.events.add_status_changed.assert_not_awaited()
     session.commit.assert_not_awaited()
     session.rollback.assert_awaited_once()
@@ -73,10 +74,9 @@ def test_rejected_transitions_rollback_without_event(actual, expected, target, e
 
 def test_repeated_old_expected_does_not_append_event():
     service, session, run = make_service()
-    run_id = uuid4()
-    asyncio.run(service.transition_status(run_id, Status.QUEUED, Status.RUNNING))
+    asyncio.run(service.transition_status(run.id, Status.QUEUED, Status.RUNNING))
     with pytest.raises(StaleAgentRunStatusError) as exc:
-        asyncio.run(service.transition_status(run_id, Status.QUEUED, Status.RUNNING))
+        asyncio.run(service.transition_status(run.id, Status.QUEUED, Status.RUNNING))
     assert (exc.value.expected, exc.value.actual) == (Status.QUEUED, Status.RUNNING)
     assert run.status == "running"
     service.events.add_status_changed.assert_awaited_once()
@@ -86,30 +86,36 @@ def test_repeated_old_expected_does_not_append_event():
 
 @pytest.mark.parametrize("failure", ["event", "commit"])
 def test_write_failures_rollback(failure):
-    service, session, _ = make_service()
+    service, session, run = make_service()
     operation = service.events.add_status_changed if failure == "event" else session.commit
-    operation.side_effect = RuntimeError("failure")
-    with pytest.raises(RuntimeError, match="failure"):
-        asyncio.run(service.transition_status(uuid4(), Status.QUEUED, Status.RUNNING))
+    error = RuntimeError("failure")
+    operation.side_effect = error
+    with pytest.raises(RuntimeError, match="failure") as exc:
+        asyncio.run(service.transition_status(run.id, Status.QUEUED, Status.RUNNING))
+    assert exc.value is error
+    service.events.add_status_changed.assert_awaited_once_with(run.id, Status.QUEUED, Status.RUNNING)
     session.rollback.assert_awaited_once()
     if failure == "event":
         session.commit.assert_not_awaited()
+    else:
+        session.commit.assert_awaited_once()
 
 
 def test_cancelled_operation_rolls_back():
-    service, session, _ = make_service()
+    service, session, run = make_service()
     service.events.add_status_changed.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(service.transition_status(uuid4(), Status.QUEUED, Status.RUNNING))
+        asyncio.run(service.transition_status(run.id, Status.QUEUED, Status.RUNNING))
+    service.events.add_status_changed.assert_awaited_once_with(run.id, Status.QUEUED, Status.RUNNING)
     session.rollback.assert_awaited_once()
     session.commit.assert_not_awaited()
 
 
 @pytest.mark.parametrize("expected,target", [("queued", Status.RUNNING), (Status.QUEUED, "running")])
 def test_invalid_status_types_rollback_before_lock(expected, target):
-    service, session, _ = make_service()
+    service, session, run = make_service()
     with pytest.raises(TypeError):
-        asyncio.run(service.transition_status(uuid4(), expected, target))
+        asyncio.run(service.transition_status(run.id, expected, target))
     service.runs.get_for_update.assert_not_awaited()
     service.events.add_status_changed.assert_not_awaited()
     session.rollback.assert_awaited_once()
@@ -120,6 +126,7 @@ def test_run_repository_locks_and_does_not_commit():
     assert asyncio.run(AgentRunRepository(session).get_for_update(uuid4())) is None
     statement = session.scalar.await_args.args[0]
     assert "FOR UPDATE" in str(statement.compile(dialect=postgresql.dialect()))
+    assert statement.get_execution_options().get("populate_existing") is True
     session.commit.assert_not_awaited()
 
 

@@ -28,6 +28,7 @@ from app.domain.execution import AgentRunStatus as Status
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.services.agent_result import AgentFinalResult, FixtureObservation
+from app.services.agent_result_codec import encode_agent_result
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 from app.services.agent_runs import AgentRunNotFoundError, AgentRunService, StaleAgentRunStatusError
 from app.services.agent_service import AgentService
@@ -117,7 +118,7 @@ def _result(*, blocker=None, observations=()):
     )
 
 
-async def _assert_persisted(factory, request, workspace_id, status, *edges):
+async def _assert_persisted(factory, request, workspace_id, status, *edges, result=None):
     async with factory() as session:
         task = await session.get(TaskModel, request.task_id)
         run = await session.get(AgentRunModel, request.run_id)
@@ -130,11 +131,21 @@ async def _assert_persisted(factory, request, workspace_id, status, *edges):
         assert (task.workspace_id, task.goal, tuple(task.acceptance_criteria), task.status, task.idempotency_key) == (
             workspace_id, GOAL, CRITERIA, "queued", None,
         )
+        expected = [
+            ("agent_run_status_changed", {"from": source.value, "to": target.value})
+            for source, target in edges
+        ]
+        if result is None:
+            assert await session.scalar(
+                select(AgentRunModel.final_result.is_(None)).where(AgentRunModel.id == run.id)
+            ) is True
+        else:
+            assert run.final_result == encode_agent_result(result)
+            expected.insert(-1, ("agent_result_recorded", {"schema_version": 1, "result_status": result.status}))
         assert [
             (event.sequence, event.event_type, event.payload) for event in events
         ] == [
-            (number, "agent_run_status_changed", {"from": source.value, "to": target.value})
-            for number, (source, target) in enumerate(edges, 1)
+            (number, event_type, payload) for number, (event_type, payload) in enumerate(expected, 1)
         ]
 
 
@@ -174,7 +185,7 @@ def test_agent_service_commits_claim_before_runner_and_finishes_in_new_session(d
         runner.run.assert_awaited_once_with(request)
         assert len(sessions) == 2 and sessions[0] is not sessions[1]
         assert closed == sessions
-        await _assert_persisted(factory, request, workspace_id, target, CLAIM, (Status.RUNNING, target))
+        await _assert_persisted(factory, request, workspace_id, target, CLAIM, (Status.RUNNING, target), result=result)
 
     database(check)
 
@@ -294,7 +305,7 @@ def test_agent_service_concurrent_claim(database, monkeypatch):
 
         runner.run.assert_awaited_once_with(request)
         await _assert_persisted(
-            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING)
+            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING), result=expected
         )
 
     database(check)
@@ -445,7 +456,7 @@ def test_agent_service_executes_real_graph(database, monkeypatch):
         execution.assert_awaited_once_with(component="task_service")
         finalizer.ainvoke.assert_awaited_once()
         await _assert_persisted(
-            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING)
+            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING), result=result
         )
 
     database(check)

@@ -23,7 +23,8 @@ def test_common_metadata(model, parent_column, target, timestamp):
     table = model.__table__
     assert Base.metadata.tables[table.name] is table
     assert isinstance(table.c.id.type, Uuid) and table.c.id.primary_key
-    assert all(not c.nullable for c in table.c if c.name != "decided_at")
+    nullable_columns = {ApprovalModel: {"decided_at"}, AgentRunModel: {"final_result"}}
+    assert {c.name for c in table.c if c.nullable} == nullable_columns.get(model, set())
     parent = table.c[parent_column]
     assert isinstance(parent.type, Uuid)
     foreign_key = next(iter(parent.foreign_keys))
@@ -49,7 +50,7 @@ def test_unique_and_other_checks():
         assert any([c.name for c in constraint.columns] == columns for constraint in model.__table__.constraints if isinstance(constraint, UniqueConstraint))
     assert not any(isinstance(c, UniqueConstraint) and [col.name for col in c.columns] == ["tool_call_id"] for c in ApprovalModel.__table__.constraints)
     for model, names in [
-        (AgentRunModel, {"ck_agent_runs_attempt_positive", "ck_agent_runs_status"}),
+        (AgentRunModel, {"ck_agent_runs_attempt_positive", "ck_agent_runs_status", "ck_agent_runs_final_result_object"}),
         (AgentEventModel, {"ck_agent_events_sequence_positive", "ck_agent_events_type_not_blank"}),
         (ToolCallModel, {"ck_tool_calls_name_not_blank", "ck_tool_calls_status"}),
         (ApprovalModel, {"ck_approvals_status"}),
@@ -57,11 +58,15 @@ def test_unique_and_other_checks():
     ]:
         assert {c.name for c in model.__table__.constraints if isinstance(c, CheckConstraint)} == names
     assert isinstance(AgentEventModel.__table__.c.payload.type, JSONB)
+    final_result = AgentRunModel.__table__.c.final_result
+    assert isinstance(final_result.type, JSONB) and final_result.type.none_as_null
+    assert final_result.default is None and final_result.server_default is None
     assert ApprovalModel.__table__.c.decided_at.nullable
     assert ApprovalModel.__table__.c.decided_at.type.timezone
     run_checks = {str(c.sqltext) for c in AgentRunModel.__table__.constraints if isinstance(c, CheckConstraint)}
     event_checks = {str(c.sqltext) for c in AgentEventModel.__table__.constraints if isinstance(c, CheckConstraint)}
     assert "attempt_number >= 1" in run_checks
+    assert "final_result IS NULL OR jsonb_typeof(final_result) = 'object'" in run_checks
     assert "sequence >= 1" in event_checks
     for model, field in [(AgentEventModel, "event_type"), (ToolCallModel, "tool_name"), (ArtifactModel, "kind"), (ArtifactModel, "storage_ref")]:
         checks = {str(c.sqltext) for c in model.__table__.constraints if isinstance(c, CheckConstraint)}
