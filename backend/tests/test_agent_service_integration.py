@@ -460,3 +460,110 @@ def test_agent_service_executes_real_graph(database, monkeypatch):
         )
 
     database(check)
+
+
+@pytest.mark.parametrize("phase", ["research", "finalization"])
+def test_agent_service_deadline_cancels_graph(database, monkeypatch, phase):
+    async def check(factory, request, workspace_id):
+        waiting = asyncio.Event()
+        started, cancelled, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def wait_for_model(*_args, **_kwargs):
+            started.set()
+            try:
+                await waiting.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finally:
+                cleaned.set()
+
+        original = read_fixture.coroutine
+        execution = AsyncMock(wraps=original)
+
+        @wraps(original)
+        async def observe_fixture(**kwargs):
+            return await execution(**kwargs)
+
+        monkeypatch.setattr(read_fixture, "coroutine", observe_fixture)
+        research = create_autospec(Runnable, instance=True)
+        finalizer = create_autospec(Runnable, instance=True)
+        if phase == "research":
+            research.ainvoke.side_effect = wait_for_model
+        else:
+            research.ainvoke.side_effect = [
+                AIMessage(content="", tool_calls=[{
+                    "name": "read_fixture", "id": "fixture-1", "args": {"component": "task_service"},
+                }]),
+                AIMessage(content="Синтетический fixture прочитан."),
+            ]
+            finalizer.ainvoke.side_effect = wait_for_model
+
+        runner = LangGraphAgentRunner(create_agent_graph(research, finalizer))
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        service = AgentService(factory, runner, execution_timeout_seconds=0.5)
+        async with asyncio.timeout(5):
+            with pytest.raises(AgentRunnerError, match="^execution_deadline_exceeded$") as exc:
+                await service.execute_run(request.run_id)
+            await asyncio.wait_for(cleaned.wait(), timeout=2)
+
+        assert exc.value.reason == "execution_deadline_exceeded"
+        assert isinstance(exc.value.__cause__, TimeoutError)
+        assert started.is_set() and cancelled.is_set()
+        run.assert_awaited_once_with(request)
+        if phase == "research":
+            research.ainvoke.assert_awaited_once()
+            execution.assert_not_awaited()
+            finalizer.ainvoke.assert_not_awaited()
+        else:
+            assert research.ainvoke.await_count == 2
+            execution.assert_awaited_once_with(component="task_service")
+            finalizer.ainvoke.assert_awaited_once()
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED)
+        )
+
+    database(check)
+
+
+def test_agent_service_deadline_preserves_domain_cancellation(database):
+    async def check(factory, request, workspace_id):
+        started, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def run(_snapshot):
+            started.set()
+            try:
+                await release.wait()
+                return _result()
+            finally:
+                cleaned.set()
+
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner, execution_timeout_seconds=2)
+        task = asyncio.create_task(service.execute_run(request.run_id))
+        cancelled = (Status.RUNNING, Status.CANCELLED)
+        try:
+            async with asyncio.timeout(8):
+                await started.wait()
+                await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+                async with factory() as session:
+                    await AgentRunService(session).transition_status(request.run_id, *cancelled)
+                await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+                assert not cleaned.is_set() and not task.done()
+                with pytest.raises(StaleAgentRunStatusError) as exc:
+                    await task
+                assert (exc.value.expected, exc.value.actual) == cancelled
+                deadline_error = exc.value.__cause__
+                assert isinstance(deadline_error, AgentRunnerError)
+                assert deadline_error.reason == "execution_deadline_exceeded"
+                assert isinstance(deadline_error.__cause__, TimeoutError)
+                assert cleaned.is_set()
+        finally:
+            release.set()
+            await _cancel_and_join(task)
+
+        runner.run.assert_awaited_once_with(request)
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+
+    database(check)

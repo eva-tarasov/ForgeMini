@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 07A принят, Step 07B ожидает финального review и merge
+**Status:** in progress — Step 07 принят, Step 08A подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -449,21 +449,27 @@ cancelled
     - Claim блокирует строку `AgentRun`, снимает неизменяемый snapshot задачи и фиксирует `queued → running` вместе с `agent_run_status_changed`. Сессия claim закрывается до запуска `AgentRunner`. Финальный переход открывает отдельную сессию и требует `running`. Если за время исполнения сохранилась отмена, финальный переход отклоняется. `ready_for_verification` переводит run в `verifying`, а `blocked` и ошибки исполнения переводят его в `failed`, пока run находится в `running`.
     - `Task.status` и номер попытки остаются прежними. Сохранение результатов и восстановление после сбоя отложены. Coroutine cancellation пробрасывается и может оставить `AgentRun` в `running`, если отдельного доменного перехода в `cancelled` не было. Это ограничение относится к Step 08 и Week 7.
     - Исторические проверки 06B: `pip check` PASS, обычный pytest `429 passed, 52 skipped`, runner/graph/finalization `92 passed`, пять ручных учебных случаев PASS по отчёту владельца. PostgreSQL suite дал `46 passed` (21 новый и 25 прежних) в базе `forge_task06_week3_20261114_113611`, revision `496f3a2c5b81`, `alembic check` PASS. В прогоне проверены реальный конфликт `SELECT FOR UPDATE`, rollback статуса и события, отмена во время исполнения и полный offline StateGraph с `read_fixture` через `LangGraphAgentRunner`.
-- [ ] 07. Persistence & Agent Events — in progress.
+- [x] 07. Persistence & Agent Events — DONE.
   - [x] 07A. Safe AgentEvent Append — DONE. [PR #22](https://github.com/eva-tarasov/myFirstForge/pull/22) merged в `main` (`2aaeae5`).
     - AgentEvent получает sequence под блокировкой родительского AgentRun. Репозиторий отключает autoflush при захвате блокировки, явно сбрасывает pending writes и читает `MAX(sequence)` отдельным запросом при `READ COMMITTED`. Status writer использует тот же контракт. Caller владеет транзакцией.
     - PostgreSQL suite дал `61 passed` (15 новых и 46 прежних) в `forge_task06_week3_20261114_113611`, revision `496f3a2c5b81 (head)`, `alembic check` PASS. Проверены блокировки двух generic writers, оба порядка generic/status, rollback с повторным использованием sequence и работа без autoflush.
     - Первый обычный прогон дал `428 passed, 1 failed, 67 skipped`. Заглушка session в `test_event_repository_sequences_and_does_not_commit` не поддерживала `no_autoflush`, `flush` и отдельные результаты двух SQL-запросов. Исправленный тест проверяет блокировку внутри `no_autoflush`, затем `flush → MAX → add`, а также отсутствие commit и rollback со стороны репозитория.
     - После correction в автоматических прогонах Codex прошли отдельный unit-тест (`1 passed`), весь модуль (`14 passed`), обычная регрессия (`429 passed, 67 skipped`) и повторный PostgreSQL suite (`61 passed`, `READ COMMITTED`). Во всех четырёх прогонах 0 failures и 0 pytest warnings. `pip check` PASS.
     - Три ручных учебных сценария PASS по данным владельца: concurrent append, append с выключенным autoflush и rollback. BL-08 закрыт после merge PR #22.
-  - [ ] 07B. Durable Result Persistence — исправление регрессии подготовлено, ожидает финального review и merge. [PR #23](https://github.com/eva-tarasov/myFirstForge/pull/23)
+  - [x] 07B. Durable Result Persistence — DONE. [PR #23](https://github.com/eva-tarasov/myFirstForge/pull/23) merged в `main` (`03607dc`).
     - `AgentRun.final_result` хранит nullable JSONB, storage version 1. Completion фиксирует результат, изменение статуса и два события одной транзакцией. Новый переход в `verifying` требует валидного `ready_for_verification`. Исторический `verifying` с SQL NULL сохраняется и читается без backfill. Сохранённый предварительный результат доступен из новой сессии без запуска runner. Для `succeeded` по-прежнему нужна независимая verification.
     - Миграция `1d972cc34fbe (head)` прошла с legacy-строками в `forge_task06_week3_result_20261114_123241` и с нуля в `forge_task06_week3_result_fresh_20261114_123241`. `alembic check` PASS в обеих базах. В legacy-проверке прежние строки и история совпали до и после upgrade, у обоих run SQL NULL.
     - Исходная проверка 07B дала `51 passed` для codec/model suite и `87 passed` для PostgreSQL suite. Обычный pytest дал `466 passed, 5 failed, 93 skipped`, 0 warnings. Все пять сбоев в `test_agent_run_service.py` вызвала устаревшая заглушка AgentRun без `id`.
     - Исправленная заглушка содержит `id`, `status` и `final_result=None`. Unit-тест проверяет, что блокировка строки и событие используют один ID. Отдельная проверка требует `populate_existing=True` у `SELECT FOR UPDATE`, чтобы после ожидания блокировки SQLAlchemy обновляла ранее загруженный AgentRun актуальными данными и второй completion отклонялся по сохранённому статусу.
     - Повторные автоматические проверки дали `14 passed` в модуле AgentRunService, `471 passed, 93 skipped` в обычной регрессии и `87 passed` в PostgreSQL suite (26 новых и 61 прежний). Во всех трёх прогонах 0 failures и 0 pytest warnings. `pip check` PASS. PostgreSQL подтвердил базу `forge_task06_week3_result_20261114_123241`, `READ COMMITTED` и revision `1d972cc34fbe`.
     - Пять ручных учебных сценариев PASS по логам владельца: чтение результата через новый engine, rollback при сбое result event, rollback при сбое status event, отклонение позднего ready и отклонение позднего blocked.
-- [ ] 08. Reliability & Execution Limits — not started.
+- [ ] 08. Reliability & Execution Limits — in progress.
+  - [ ] 08A. Agent Execution Deadline — реализация подготовлена, ожидает review и учебной проверки.
+    - `AgentService` применяет один монотонный deadline ко всему `AgentRunner.run()`, по умолчанию 60 секунд. Лимит задаётся keyword-only параметром конструктора. Claim, валидация результата и запись в PostgreSQL выполняются вне этого deadline. Внутренний timeout runner и существующие ошибки провайдера сохраняют исходный тип и причину.
+    - Истечение deadline даёт `execution_deadline_exceeded`. Текущий `running` переходит в `failed` с SQL NULL и двумя событиями смены статуса. Уже сохранённый `cancelled` сохраняется. Поздний результат отклоняется, даже если runner перехватил отмену или event loop ещё не запустил callback таймера. Внешняя отмена coroutine пробрасывается и может оставить run в `running`. Отмена кооперативная. Автоматических повторов и восстановления исполнения нет.
+    - `pip check` PASS. Deadline unit suite `23 passed`, runner/graph/finalization `92 passed`, обычный pytest `494 passed, 96 skipped`. PostgreSQL suite `90 passed` (3 новых и 87 прежних) в `forge_task06_week3_result_20261114_123241` при `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Подтверждены отмена research и финализации в реальном StateGraph и сохранение committed cancellation. Во всех прогонах 0 failures и 0 pytest warnings.
+  - [ ] 08B. Error Classification, Failure Metadata & Retry Policy — not started.
+  - [ ] 08C. Cancellation Management — not started.
 - [ ] 09. Usage, Cost & Observability — not started.
 - [ ] 10. Integration & Week 3 Review — not started.
 
