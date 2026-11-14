@@ -160,6 +160,14 @@ fi
 
 Agent runtime, исполнение инструментов, обработка approvals, оркестрация retry/resume и независимый механизм verification пока не реализованы. Записи `Approval` и `ToolCall` описывают данные согласований и вызовов инструментов. Их наличие в базе не означает, что Forge выполняет эти операции.
 
+### Добавление AgentEvent
+
+Все production-записи AgentEvent проходят через `AgentEventRepository.append(run_id, event_type=..., payload=...)`. Текущий writer переходов вызывает `add_status_changed()`, который делегирует в `append()`. Caller передаёт непустой тип события длиной до 100 символов и JSON-совместимый словарь. Родительский AgentRun должен уже существовать или быть явно flushed в той же транзакции.
+
+`append()` блокирует ID родительского AgentRun через `SELECT FOR UPDATE` с отключённым autoflush. После получения блокировки репозиторий явно выполняет `flush()` всего текущего unit of work, включая предыдущие pending events. Затем отдельный запрос `COALESCE(MAX(sequence), 0) + 1` выделяет номер в пределах этого AgentRun. При PostgreSQL `READ COMMITTED` отдельный запрос получает свежий snapshot и видит события, зафиксированные за время ожидания блокировки.
+
+Caller владеет commit и rollback и держит короткую транзакцию для одного AgentRun. Репозиторий возвращает новый pending event, а блокировка сохраняется до конца транзакции. После rollback номер может использоваться повторно. `UNIQUE(agent_run_id, sequence)` остаётся финальной защитой. Гарантии этого контракта ограничены транзакционной записью и нумерацией. Event sourcing, доставка событий и durable workflow за его пределами.
+
 ## Идемпотентное создание Task
 
 `POST /tasks` принимает необязательный заголовок `Idempotency-Key` со значением UUID. Ключ действует в пределах Workspace. Для сравнения запроса сервис убирает пробелы по краям `goal` и каждого элемента `acceptance_criteria`. Порядок критериев учитывается.
@@ -208,16 +216,18 @@ FORGE_TASK04_TEST_DB="$TEST_DB" python -m pytest -q tests/test_repository_integr
 
 Тесты принимают только имя с префиксом `forge_task04_` и удаляют только записи с собранными во время теста ID. База остаётся на месте.
 
-### PostgreSQL integration tests для Step 06
+### PostgreSQL integration tests для Step 06 и Step 07A
 
 Из `backend` с активированным виртуальным окружением укажите имя уже мигрированной отдельной базы вместо `forge_task06_review`. Схема должна включать revision `496f3a2c5b81`.
 
 ```bash
 TEST_DB=forge_task06_review
-POSTGRES_DB="$TEST_DB" FORGE_TASK06_TEST_DB="$TEST_DB" python -m pytest -q \
+POSTGRES_DB="$TEST_DB" POSTGRES_HOST=127.0.0.1 FORGE_TASK06_TEST_DB="$TEST_DB" python -m pytest -q \
+  tests/test_agent_event_append_integration.py \
+  tests/test_agent_service_integration.py \
   tests/test_agent_run_integration.py \
   tests/test_task_transition_integration.py \
   tests/test_task_idempotency_integration.py
 ```
 
-Обе переменные должны совпадать, а имя должно соответствовать `forge_task06_[a-z0-9_]+`. Перед записью тесты сверяют `current_database()` и при очистке удаляют только созданные ими записи.
+`POSTGRES_DB` и `FORGE_TASK06_TEST_DB` должны совпадать, а имя должно соответствовать `forge_task06_[a-z0-9_]+`. Перед записью тесты сверяют `current_database()` и при очистке удаляют только созданные ими записи. Тесты AgentEvent дополнительно проверяют `SHOW transaction_isolation` и подтверждают ожидание блокировки через `pg_blocking_pids()`.

@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 06A принят, Step 06B подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 06 принят, Step 07A ожидает финального review и merge
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -443,13 +443,20 @@ cancelled
 - [x] 05. Custom Single-Agent Graph — DONE.
   - [x] 05A. Custom Model/Tool Graph — DONE. [PR #18](https://github.com/eva-tarasov/myFirstForge/pull/18) merged в `main` (`2aef2db`). Историческое evidence: `pip check` PASS, graph tests `34 passed`, предыдущие model/tool demo tests `69 passed`, полный pytest `371 passed, 31 skipped`, три начальных ручных учебных сценария PASS и проверка исправления `6 passed, 5 deselected` по отчёту владельца. PostgreSQL integration NOT RUN, версии зависимостей сохранены. Граф использует общий `read_fixture`, проверяет бюджеты перед исполнением и добавляет сообщения с уникальными ID. Checkpointer отключён.
   - [x] 05B. Structured Finalization — DONE. [PR #19](https://github.com/eva-tarasov/myFirstForge/pull/19) merged в `main` (`92a4f85`). Историческое evidence: `pip check` PASS, graph/finalization tests `69 passed` (сохранены все 34 прежних сценария графа), model/settings tests `64 passed`, полный pytest `406 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL integration NOT RUN, версии зависимостей сохранены. Узел `finalize` получает `TaskAnalysis` и формирует `AgentFinalResult` с runtime observations и статусом `ready_for_verification` или `blocked`. Observations содержат фактические синтетические ответы fixture. Независимая verification остаётся отдельным этапом. Бюджет: до двух исследовательских вызовов модели, одно исполнение fixture и один вызов финализатора.
-- [ ] 06. AgentRunner & AgentService — in progress.
+- [x] 06. AgentRunner & AgentService — DONE.
   - [x] 06A. AgentRunner Contract & LangGraph Adapter — DONE. [PR #20](https://github.com/eva-tarasov/myFirstForge/pull/20) merged в `main` (`94da6c5`). Исторические проверки: `pip check` PASS, runner tests `23 passed`, graph/finalization tests `69 passed`, полный pytest `429 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL integration NOT RUN. Зависимости сохранены. Application layer владеет `AgentRunner` Protocol, `AgentRunRequest` и result models. Адаптер возвращает `AgentFinalResult`, оборачивает обычные ошибки исполнения в `AgentRunnerError("execution_failed")` с исходной причиной и пробрасывает asyncio cancellation.
-  - [ ] 06B. AgentService & Lifecycle Integration — реализация подготовлена, ожидает review и учебной проверки.
+  - [x] 06B. AgentService & Lifecycle Integration — DONE. [PR #21](https://github.com/eva-tarasov/myFirstForge/pull/21) merged в `main` (`4b58198`).
     - Claim блокирует строку `AgentRun`, снимает неизменяемый snapshot задачи и фиксирует `queued → running` вместе с `agent_run_status_changed`. Сессия claim закрывается до запуска `AgentRunner`. Финальный переход открывает отдельную сессию и требует `running`. Если за время исполнения сохранилась отмена, финальный переход отклоняется. `ready_for_verification` переводит run в `verifying`, а `blocked` и ошибки исполнения переводят его в `failed`, пока run находится в `running`.
-    - `Task.status` и номер попытки остаются прежними. Сохранение результатов и восстановление после сбоя отложены. Coroutine cancellation пробрасывается и может оставить `AgentRun` в `running`, если отдельного доменного перехода в `cancelled` не было. Это ограничение относится к Step 08 и Week 7. BL-08 остаётся открытым до закрепления общего append contract перед появлением новых writers в Step 07.
-    - Проверки 06B: `pip check` PASS. Обычный pytest дал `429 passed, 52 skipped` с выключенными PostgreSQL opt-ins. В отдельной базе `forge_task06_week3_20261114_113611` применены миграции до `496f3a2c5b81`, `alembic check` PASS. PostgreSQL suite дал `46 passed` (21 новый и 25 прежних), включая реальный конфликт `SELECT FOR UPDATE`, rollback статуса и события, отмену во время исполнения и полный offline StateGraph с `read_fixture` через `LangGraphAgentRunner`.
-- [ ] 07. Persistence & Agent Events — not started.
+    - `Task.status` и номер попытки остаются прежними. Сохранение результатов и восстановление после сбоя отложены. Coroutine cancellation пробрасывается и может оставить `AgentRun` в `running`, если отдельного доменного перехода в `cancelled` не было. Это ограничение относится к Step 08 и Week 7.
+    - Исторические проверки 06B: `pip check` PASS, обычный pytest `429 passed, 52 skipped`, runner/graph/finalization `92 passed`, пять ручных учебных случаев PASS по отчёту владельца. PostgreSQL suite дал `46 passed` (21 новый и 25 прежних) в базе `forge_task06_week3_20261114_113611`, revision `496f3a2c5b81`, `alembic check` PASS. В прогоне проверены реальный конфликт `SELECT FOR UPDATE`, rollback статуса и события, отмена во время исполнения и полный offline StateGraph с `read_fixture` через `LangGraphAgentRunner`.
+- [ ] 07. Persistence & Agent Events — in progress.
+  - [ ] 07A. Safe AgentEvent Append — regression correction подготовлен, ожидает финального review и merge. [PR #22](https://github.com/eva-tarasov/myFirstForge/pull/22)
+    - AgentEvent получает sequence под блокировкой родительского AgentRun. Репозиторий отключает autoflush при захвате блокировки, явно сбрасывает pending writes и читает `MAX(sequence)` отдельным запросом при `READ COMMITTED`. Status writer использует тот же контракт. Caller владеет транзакцией.
+    - PostgreSQL suite дал `61 passed` (15 новых и 46 прежних) в `forge_task06_week3_20261114_113611`, revision `496f3a2c5b81 (head)`, `alembic check` PASS. Проверены блокировки двух generic writers, оба порядка generic/status, rollback с повторным использованием sequence и работа без autoflush.
+    - Первый обычный прогон дал `428 passed, 1 failed, 67 skipped`. Заглушка session в `test_event_repository_sequences_and_does_not_commit` не поддерживала `no_autoflush`, `flush` и отдельные результаты двух SQL-запросов. Исправленный тест проверяет блокировку внутри `no_autoflush`, затем `flush → MAX → add`, а также отсутствие commit и rollback со стороны репозитория.
+    - После correction прошли отдельный unit-тест (`1 passed`), весь модуль (`14 passed`), обычная регрессия (`429 passed, 67 skipped`) и повторный PostgreSQL suite (`61 passed`, `READ COMMITTED`). Во всех четырёх прогонах 0 failures и 0 pytest warnings. `pip check` PASS.
+    - Три ручных учебных сценария PASS по данным владельца: concurrent append, append с выключенным autoflush и rollback. BL-08 ожидает финального review и merge.
+  - [ ] 07B. Durable Result Persistence — not started.
 - [ ] 08. Reliability & Execution Limits — not started.
 - [ ] 09. Usage, Cost & Observability — not started.
 - [ ] 10. Integration & Week 3 Review — not started.

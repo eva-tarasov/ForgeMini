@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 from uuid import uuid4
 
 import pytest
@@ -124,15 +124,45 @@ def test_run_repository_locks_and_does_not_commit():
 
 
 def test_event_repository_sequences_and_does_not_commit():
-    session = SimpleNamespace(scalar=AsyncMock(return_value=4), add=MagicMock(), commit=AsyncMock())
     run_id = uuid4()
+    session = MagicMock(
+        no_autoflush=MagicMock(),
+        scalar=AsyncMock(side_effect=[run_id, 4]),
+        flush=AsyncMock(),
+        add=MagicMock(),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
     event = asyncio.run(AgentEventRepository(session).add_status_changed(run_id, Status.RUNNING, Status.VERIFYING))
-    statement = session.scalar.await_args.args[0]
-    sql = str(statement.compile(dialect=postgresql.dialect())).lower()
-    assert "max(agent_events.sequence)" in sql
-    assert "agent_events.agent_run_id" in sql
+
+    assert session.scalar.await_count == 2
+    lock_statement, sequence_statement = (query.args[0] for query in session.scalar.await_args_list)
+    lock = lock_statement.compile(dialect=postgresql.dialect())
+    lock_sql = " ".join(str(lock).lower().split())
+    assert lock_sql.startswith("select agent_runs.id from agent_runs")
+    assert "where agent_runs.id =" in lock_sql
+    assert "for update" in lock_sql
+    assert list(lock.params.values()) == [run_id]
+
+    sequence = sequence_statement.compile(dialect=postgresql.dialect())
+    sequence_sql = " ".join(str(sequence).lower().split())
+    assert "coalesce(max(agent_events.sequence)," in sequence_sql
+    assert "+" in sequence_sql
+    assert "where agent_events.agent_run_id =" in sequence_sql
+    assert list(sequence.params.values()) == [0, 1, run_id]
+
     assert event.agent_run_id == run_id and event.sequence == 4
     assert event.event_type == "agent_run_status_changed"
     assert event.payload == {"from": "running", "to": "verifying"}
+    assert session.mock_calls == [
+        call.no_autoflush.__enter__(),
+        call.scalar(lock_statement),
+        call.no_autoflush.__exit__(None, None, None),
+        call.flush(),
+        call.scalar(sequence_statement),
+        call.add(event),
+    ]
+    session.flush.assert_awaited_once_with()
     session.add.assert_called_once_with(event)
     session.commit.assert_not_awaited()
+    session.rollback.assert_not_awaited()
