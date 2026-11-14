@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 04A принят, Step 04B подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 04 принят, Step 05A подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -437,10 +437,12 @@ cancelled
 - [x] 03. Tool Calling & LangChain create_agent — DONE.
   - [x] 03A. Tool Calling Foundation — DONE. [PR #14](https://github.com/eva-tarasov/myFirstForge/pull/14) merged в `main` (`4d80293`). Историческое evidence: `pip check` PASS, model tests `64 passed`, полный pytest `305 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL integration tests не запускались.
   - [x] 03B. LangChain create_agent — DONE. [PR #15](https://github.com/eva-tarasov/myFirstForge/pull/15) merged в `main` (`e2bad56`). Историческое evidence: `pip check` PASS, сохранены версии всех 57 ранее установленных non-editable пакетов, model/agent tests `80 passed`, полный pytest `321 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. PostgreSQL connection smoke NOT RUN: сервис недоступен. Dev dependency: `langchain==1.4.10`. В 03B транзитивно установлены `langgraph==1.2.21`, `langgraph-checkpoint==4.3.1`, `langgraph-prebuilt==1.1.1`, `langgraph-sdk==0.4.14` и `ormsgpack==1.13.1`.
-- [ ] 04. LangGraph Fundamentals — in progress.
+- [x] 04. LangGraph Fundamentals — DONE.
   - [x] 04A. StateGraph Foundation — DONE. [PR #16](https://github.com/eva-tarasov/myFirstForge/pull/16) merged в `main` (`dec5580`). Историческое evidence: Python `3.13.0`, `pip check` PASS, graph tests `9 passed`, полный pytest `330 passed, 31 skipped`, четыре ручных учебных случая PASS по отчёту владельца. `langgraph==1.2.21` объявлен прямой зависимостью, версии всех 63 non-editable пакетов сохранены. PostgreSQL integration tests не запускались.
-  - [ ] 04B. Reducers, Messages & Cyclic Execution — in progress. Реализация подготовлена, ожидает review и учебной проверки. Новые зависимости не добавлялись.
-- [ ] 05. Custom Single-Agent Graph — not started.
+  - [x] 04B. Reducers, Messages & Cyclic Execution — DONE. [PR #17](https://github.com/eva-tarasov/myFirstForge/pull/17) merged в `main` (`6a44ff0`). Историческое evidence: `pip check` PASS, graph cycle tests `7 passed`, полный pytest `337 passed, 31 skipped`, три ручных учебных случая PASS по отчёту владельца. Версии зависимостей сохранены. PostgreSQL integration NOT RUN.
+- [ ] 05. Custom Single-Agent Graph — in progress.
+  - [ ] 05A. Custom Model/Tool Graph — реализация подготовлена, ожидает review и учебной проверки. Граф использует общий `read_fixture` из `fixture_tools.py` и ограничивает запуск двумя вызовами модели и одним исполнением fixture. Узел tool проверяет бюджет следующего model call и весь batch до исполнения. Новые сообщения добавляются с уникальными ID. Checkpointer отключён.
+  - [ ] 05B. Structured Finalization — not started.
 - [ ] 06. AgentRunner & AgentService — not started.
 - [ ] 07. Persistence & Agent Events — not started.
 - [ ] 08. Reliability & Execution Limits — not started.

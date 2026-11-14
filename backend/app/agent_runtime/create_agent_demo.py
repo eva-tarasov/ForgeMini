@@ -6,8 +6,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
+from app.agent_runtime.fixture_tools import read_fixture
 from app.agent_runtime.model import build_task_messages
-from app.agent_runtime.tool_calling_demo import read_fixture
 
 
 _SYSTEM_PROMPT = (
