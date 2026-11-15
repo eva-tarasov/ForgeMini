@@ -15,6 +15,8 @@ from app.agent_runtime.agent_result import AgentFinalResult, FixtureObservation
 from app.agent_runtime.finalization import finalize_agent_result
 from app.agent_runtime.fixture_tools import FixtureInput, read_fixture
 from app.agent_runtime.model import build_task_messages
+from app.agent_runtime.usage_capture import invoke_observed_model
+from app.services.agent_usage import ModelCallStage
 
 
 MAX_MODEL_CALLS = 2
@@ -84,7 +86,7 @@ async def call_model(state: AgentGraphState, tool_model: Runnable) -> dict[str, 
     if state["model_calls"] >= MAX_MODEL_CALLS:
         raise AgentGraphError("model_budget_exceeded")
 
-    response = await tool_model.ainvoke(state["messages"])
+    response = await invoke_observed_model(tool_model, state["messages"], stage=ModelCallStage.RESEARCH)
     if not isinstance(response, AIMessage):
         raise AgentGraphError("invalid_model_message")
     if response.invalid_tool_calls:

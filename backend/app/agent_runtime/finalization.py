@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.agent_runtime.agent_result import AgentFinalResult, FixtureObservation
 from app.agent_runtime.structured_output import TaskAnalysis, invoke_structured_analysis
+from app.services.agent_usage import ModelCallStage
 
 
 _SYSTEM_INSTRUCTIONS = (
@@ -66,7 +67,9 @@ async def finalize_agent_result(
     messages = build_finalization_messages(
         goal=goal, acceptance_criteria=acceptance_criteria, history=history, observations=observations
     )
-    analysis_result = await invoke_structured_analysis(structured_model, messages=messages)
+    analysis_result = await invoke_structured_analysis(
+        structured_model, messages=messages, usage_stage=ModelCallStage.FINALIZATION,
+    )
     raw = analysis_result.raw
     if raw.additional_kwargs.get("refusal"):
         raise FinalizationError("model_refusal")

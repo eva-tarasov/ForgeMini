@@ -7,6 +7,8 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict
 
 from app.agent_runtime.model import build_task_messages
+from app.agent_runtime.usage_capture import invoke_observed_model
+from app.services.agent_usage import ModelCallStage
 
 
 class TaskAnalysis(BaseModel):
@@ -48,9 +50,13 @@ async def invoke_structured_task_model(
 
 
 async def invoke_structured_analysis(
-    model: Runnable, *, messages: Sequence[BaseMessage]
+    model: Runnable, *, messages: Sequence[BaseMessage], usage_stage: ModelCallStage | None = None,
 ) -> TaskAnalysisResult:
-    result = await model.ainvoke(list(messages))
+    model_messages = list(messages)
+    if usage_stage is None:
+        result = await model.ainvoke(model_messages)
+    else:
+        result = await invoke_observed_model(model, model_messages, stage=usage_stage)
     if not isinstance(result, Mapping) or not {"raw", "parsed", "parsing_error"}.issubset(result):
         raise StructuredOutputError("invalid_envelope")
 
