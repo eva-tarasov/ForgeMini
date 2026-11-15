@@ -25,8 +25,10 @@ from app.core.settings import Settings
 from app.db.models import AgentEventModel, AgentRunModel, TaskModel, WorkspaceModel
 from app.db.session import create_engine, create_session_factory
 from app.domain.execution import AgentRunStatus as Status
+from app.domain.transitions import InvalidAgentRunTransition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
+from app.services.active_runs import ActiveRunRegistry
 from app.services.agent_failure import AgentFailure, AgentFailureCode, AgentFailureContractError, RetryDisposition
 from app.services.agent_result import AgentFinalResult, FixtureObservation
 from app.services.agent_result_codec import encode_agent_result
@@ -147,7 +149,9 @@ async def _assert_persisted(factory, request, workspace_id, status, *edges, resu
             ) is True
         else:
             assert run.final_result == encode_agent_result(result)
-            expected.insert(-1, ("agent_result_recorded", {"schema_version": 1, "result_status": result.status}))
+            target = Status.VERIFYING if result.status == "ready_for_verification" else Status.FAILED
+            index = edges.index((Status.RUNNING, target))
+            expected.insert(index, ("agent_result_recorded", {"schema_version": 1, "result_status": result.status}))
         if failure is not None:
             expected.insert(-1, ("agent_execution_failed", {"schema_version": 1, "code": failure.value}))
         assert [
@@ -848,3 +852,498 @@ def test_agent_service_rejects_invalid_failure_history(database, payloads, reaso
             assert [(event.sequence, event.payload) for event in events] == list(enumerate(payloads, 1))
 
     database(check, initial=Status.FAILED)
+
+
+@pytest.mark.parametrize("initial", list(Status))
+def test_agent_service_cancels_from_supported_states(database, initial):
+    async def check(factory, request, workspace_id):
+        runner = SimpleNamespace(run=AsyncMock())
+        service = AgentService(factory, runner)
+        edges = ()
+        result = None
+        if initial is Status.VERIFYING:
+            result = _result()
+            async with factory() as session:
+                runs = AgentRunService(session)
+                await runs.claim_for_execution(request.run_id)
+                await runs.complete_execution(request.run_id, result)
+            edges = (CLAIM, (Status.RUNNING, Status.VERIFYING))
+        if initial in (Status.FAILED, Status.SUCCEEDED):
+            with pytest.raises(InvalidAgentRunTransition) as exc:
+                await service.cancel_run(request.run_id)
+            assert (exc.value.current, exc.value.target) == (initial, Status.CANCELLED)
+            await _assert_persisted(factory, request, workspace_id, initial)
+        else:
+            await service.cancel_run(request.run_id)
+            await service.cancel_run(request.run_id)
+            if initial is not Status.CANCELLED:
+                edges += ((initial, Status.CANCELLED),)
+            await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, *edges, result=result)
+            if initial is Status.QUEUED:
+                with pytest.raises(StaleAgentRunStatusError) as exc:
+                    await service.execute_run(request.run_id)
+                assert (exc.value.expected, exc.value.actual) == (Status.QUEUED, Status.CANCELLED)
+                await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, *edges)
+            assert await service.get_run_failure(request.run_id) is None
+        runner.run.assert_not_called()
+
+    database(check, initial=Status.QUEUED if initial is Status.VERIFYING else initial)
+
+
+def test_agent_service_rejects_missing_cancellation_target(database):
+    async def check(factory, request, workspace_id):
+        runner = SimpleNamespace(run=AsyncMock())
+        with pytest.raises(AgentRunNotFoundError):
+            await AgentService(factory, runner).cancel_run(uuid4())
+        await _assert_persisted(factory, request, workspace_id, Status.QUEUED)
+        runner.run.assert_not_called()
+
+    database(check)
+
+
+@pytest.mark.parametrize("phase", ["research", "finalization"])
+def test_agent_service_cancel_stops_active_graph(database, monkeypatch, phase):
+    async def check(factory, request, workspace_id):
+        started, cleaned = asyncio.Event(), asyncio.Event()
+        observed_statuses = []
+
+        async def wait_for_model(*_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                async with factory() as session:
+                    status = await session.scalar(
+                        select(AgentRunModel.status).where(AgentRunModel.id == request.run_id)
+                    )
+                    observed_statuses.append(status)
+                raise
+            finally:
+                cleaned.set()
+
+        original = read_fixture.coroutine
+        execution = AsyncMock(wraps=original)
+
+        @wraps(original)
+        async def observe_fixture(**kwargs):
+            return await execution(**kwargs)
+
+        monkeypatch.setattr(read_fixture, "coroutine", observe_fixture)
+        research = create_autospec(Runnable, instance=True)
+        finalizer = create_autospec(Runnable, instance=True)
+        if phase == "research":
+            research.ainvoke.side_effect = wait_for_model
+        else:
+            research.ainvoke.side_effect = [
+                AIMessage(content="", tool_calls=[{
+                    "name": "read_fixture", "id": "fixture-1", "args": {"component": "task_service"},
+                }]),
+                AIMessage(content="Синтетический fixture прочитан."),
+            ]
+            finalizer.ainvoke.side_effect = wait_for_model
+
+        runner = LangGraphAgentRunner(create_agent_graph(research, finalizer))
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        registry = ActiveRunRegistry()
+        service = AgentService(factory, runner, active_runs=registry, execution_timeout_seconds=60)
+        tasks = [asyncio.create_task(service.execute_run(request.run_id))]
+        cancelled = (Status.RUNNING, Status.CANCELLED)
+        try:
+            # This outer bound is far shorter than the runner deadline.
+            async with asyncio.timeout(8):
+                await started.wait()
+                await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+                tasks.append(asyncio.create_task(service.cancel_run(request.run_id)))
+                await tasks[1]
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[0]
+                await cleaned.wait()
+            assert tasks[0].cancelled() and observed_statuses == ["cancelled"]
+        finally:
+            await _cancel_and_join(*tasks)
+
+        run.assert_awaited_once_with(request)
+        if phase == "research":
+            research.ainvoke.assert_awaited_once()
+            execution.assert_not_awaited()
+            finalizer.ainvoke.assert_not_awaited()
+        else:
+            assert research.ainvoke.await_count == 2
+            execution.assert_awaited_once_with(component="task_service")
+            finalizer.ainvoke.assert_awaited_once()
+        assert request.run_id not in registry
+        assert await service.get_run_failure(request.run_id) is None
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+
+    database(check)
+
+
+def test_agent_service_cancel_during_claim_cleanup(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        committed, release = asyncio.Event(), asyncio.Event()
+        runner = SimpleNamespace(run=AsyncMock())
+        registry = ActiveRunRegistry()
+        service = AgentService(factory, runner, active_runs=registry)
+        original = AgentRunService.claim_for_execution
+
+        async def hold_committed_claim(runs, run_id):
+            assert run_id in registry
+            snapshot = await original(runs, run_id)
+            assert not runs.session.in_transaction()
+            committed.set()
+            await release.wait()
+            return snapshot
+
+        monkeypatch.setattr(AgentRunService, "claim_for_execution", hold_committed_claim)
+        tasks = [asyncio.create_task(service.execute_run(request.run_id))]
+        cancelled = (Status.RUNNING, Status.CANCELLED)
+        try:
+            async with asyncio.timeout(8):
+                await committed.wait()
+                await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+                tasks.append(asyncio.create_task(service.cancel_run(request.run_id)))
+                await tasks[1]
+                await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+                assert not tasks[0].done() and tasks[0].cancelling() == 0
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[0]
+        finally:
+            release.set()
+            await _cancel_and_join(*tasks)
+
+        runner.run.assert_not_called()
+        assert request.run_id not in registry
+        assert await service.get_run_failure(request.run_id) is None
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+
+    database(check)
+
+
+async def _wait_for_run_blocker(factory, holder_pid, waiter_pid, waiter):
+    assert holder_pid != waiter_pid
+    async with factory() as observer:
+        while holder_pid not in await observer.scalar(
+            text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter_pid}
+        ):
+            assert not waiter.done(), "Expected a wait on the AgentRun row lock"
+            await asyncio.sleep(0.01)  # Poll PostgreSQL for evidence, independent of task ordering.
+
+
+def test_agent_service_cancellation_wins_before_claim(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        staged, release, contender_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        pids = []
+        registry = ActiveRunRegistry()
+        runner = SimpleNamespace(run=AsyncMock())
+        service = AgentService(factory, runner, active_runs=registry)
+        original_lock = AgentRunRepository.get_for_update
+        original_append = AgentEventRepository.add_status_changed
+
+        async def track_lock(repository, run_id):
+            pids.append(await repository.session.scalar(text("SELECT pg_backend_pid()")))
+            if len(pids) == 2:
+                assert run_id in registry
+                contender_entered.set()
+            return await original_lock(repository, run_id)
+
+        async def hold_cancellation(repository, run_id, current, target):
+            event = await original_append(repository, run_id, current, target)
+            if target is Status.CANCELLED:
+                await repository.session.flush()
+                staged.set()
+                await release.wait()
+            return event
+
+        monkeypatch.setattr(AgentRunRepository, "get_for_update", track_lock)
+        monkeypatch.setattr(AgentEventRepository, "add_status_changed", hold_cancellation)
+        tasks = [asyncio.create_task(service.cancel_run(request.run_id))]
+        try:
+            async with asyncio.timeout(8):
+                await staged.wait()
+                execution = asyncio.create_task(service.execute_run(request.run_id))
+                tasks.append(execution)
+                await contender_entered.wait()
+                await _wait_for_run_blocker(factory, *pids, execution)
+                await _assert_persisted(factory, request, workspace_id, Status.QUEUED)
+                release.set()
+                await tasks[0]
+                with pytest.raises(StaleAgentRunStatusError) as exc:
+                    await execution
+                assert (exc.value.expected, exc.value.actual) == (Status.QUEUED, Status.CANCELLED)
+                assert execution.cancelling() == 0
+        finally:
+            release.set()
+            await _cancel_and_join(*tasks)
+
+        runner.run.assert_not_called()
+        assert request.run_id not in registry
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, (Status.QUEUED, Status.CANCELLED))
+
+    database(check)
+
+
+async def _exercise_cancel_persistence_race(
+    factory, request, workspace_id, monkeypatch, *, cancellation_first, execution_fails,
+):
+    started, release_runner = asyncio.Event(), asyncio.Event()
+    first_staged, release_first = asyncio.Event(), asyncio.Event()
+    second_entered, second_locked, release_second = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    pids = {}
+    result = _result()
+    error = AgentRunnerError("provider_connection")
+    execution_target = Status.FAILED if execution_fails else Status.VERIFYING
+    first_target = Status.CANCELLED if cancellation_first else execution_target
+
+    async def run(_snapshot):
+        started.set()
+        await release_runner.wait()
+        if execution_fails:
+            raise error
+        return result
+
+    original_lock = AgentRunRepository.get_for_update
+    original_append = AgentEventRepository.add_status_changed
+
+    async def track_lock(repository, run_id):
+        task = asyncio.current_task()
+        pids[task] = await repository.session.scalar(text("SELECT pg_backend_pid()"))
+        if len(pids) == 2:
+            second_entered.set()
+            row = await original_lock(repository, run_id)
+            second_locked.set()
+            await release_second.wait()
+            return row
+        return await original_lock(repository, run_id)
+
+    async def stage_and_hold(repository, run_id, current, target):
+        event = await original_append(repository, run_id, current, target)
+        if target is first_target:
+            await repository.session.flush()
+            first_staged.set()
+            await release_first.wait()
+        return event
+
+    runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+    registry = ActiveRunRegistry()
+    service = AgentService(factory, runner, active_runs=registry)
+    execution = asyncio.create_task(service.execute_run(request.run_id))
+    tasks = [execution]
+    cancelled_edge = (Status.RUNNING, Status.CANCELLED)
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+            monkeypatch.setattr(AgentRunRepository, "get_for_update", track_lock)
+            monkeypatch.setattr(AgentEventRepository, "add_status_changed", stage_and_hold)
+            if cancellation_first:
+                cancellation = asyncio.create_task(service.cancel_run(request.run_id))
+                tasks.append(cancellation)
+                first, second = cancellation, execution
+                await first_staged.wait()
+                release_runner.set()
+            else:
+                release_runner.set()
+                await first_staged.wait()
+                cancellation = asyncio.create_task(service.cancel_run(request.run_id))
+                tasks.append(cancellation)
+                first, second = execution, cancellation
+
+            await second_entered.wait()
+            await _wait_for_run_blocker(factory, pids[first], pids[second], second)
+            await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+            release_first.set()
+            if cancellation_first:
+                await cancellation
+                await second_locked.wait()
+                assert execution.cancelling() == 0 and not execution.done()
+                release_second.set()
+                with pytest.raises(StaleAgentRunStatusError) as exc:
+                    await execution
+                assert (exc.value.expected, exc.value.actual) == cancelled_edge
+                assert exc.value.__cause__ is (error if execution_fails else None)
+            elif execution_fails:
+                with pytest.raises(AgentRunnerError) as exc:
+                    await execution
+                assert exc.value is error
+                release_second.set()
+                with pytest.raises(InvalidAgentRunTransition) as exc:
+                    await cancellation
+                assert (exc.value.current, exc.value.target) == (Status.FAILED, Status.CANCELLED)
+            else:
+                assert await execution is result
+                release_second.set()
+                await cancellation
+    finally:
+        release_runner.set()
+        release_first.set()
+        release_second.set()
+        await _cancel_and_join(*tasks)
+
+    runner.run.assert_awaited_once_with(request)
+    assert request.run_id not in registry
+    if cancellation_first:
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled_edge)
+    elif execution_fails:
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
+            failure=AgentFailureCode.PROVIDER_CONNECTION,
+        )
+    else:
+        await _assert_persisted(
+            factory, request, workspace_id, Status.CANCELLED, CLAIM,
+            (Status.RUNNING, Status.VERIFYING), (Status.VERIFYING, Status.CANCELLED), result=result,
+        )
+
+
+@pytest.mark.parametrize("cancellation_first", [True, False], ids=["cancel-first", "completion-first"])
+def test_agent_service_cancel_completion_race(database, monkeypatch, cancellation_first):
+    async def check(factory, request, workspace_id):
+        await _exercise_cancel_persistence_race(
+            factory, request, workspace_id, monkeypatch,
+            cancellation_first=cancellation_first, execution_fails=False,
+        )
+
+    database(check)
+
+
+@pytest.mark.parametrize("cancellation_first", [True, False], ids=["cancel-first", "failure-first"])
+def test_agent_service_cancel_failure_race(database, monkeypatch, cancellation_first):
+    async def check(factory, request, workspace_id):
+        await _exercise_cancel_persistence_race(
+            factory, request, workspace_id, monkeypatch,
+            cancellation_first=cancellation_first, execution_fails=True,
+        )
+
+    database(check)
+
+
+def test_agent_service_cancel_rollback_leaves_runner_active(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        started, release, interrupted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        result = _result()
+
+        async def run(_snapshot):
+            started.set()
+            try:
+                await release.wait()
+                return result
+            except asyncio.CancelledError:
+                interrupted.set()
+                raise
+
+        original_append = AgentEventRepository.add_status_changed
+
+        async def invalidate_event(repository, run_id, current, target):
+            event = await original_append(repository, run_id, current, target)
+            if target is Status.CANCELLED:
+                session = repository.session
+                await session.flush()
+                assert await session.scalar(
+                    select(AgentRunModel.status).where(AgentRunModel.id == run_id)
+                ) == "cancelled"
+                assert await session.scalar(
+                    select(AgentEventModel.sequence).where(AgentEventModel.id == event.id)
+                ) == 2
+                event.sequence = 0
+                await session.flush()
+            return event
+
+        monkeypatch.setattr(AgentEventRepository, "add_status_changed", invalidate_event)
+        registry = ActiveRunRegistry()
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner, active_runs=registry)
+        task = asyncio.create_task(service.execute_run(request.run_id))
+        try:
+            async with asyncio.timeout(8):
+                await started.wait()
+                with pytest.raises(IntegrityError) as exc:
+                    await service.cancel_run(request.run_id)
+                assert exc.value.orig.sqlstate == "23514"
+                assert exc.value.orig.__cause__.constraint_name == "ck_agent_events_sequence_positive"
+                assert not task.done() and task.cancelling() == 0 and not interrupted.is_set()
+                await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+                release.set()
+                assert await task is result
+        finally:
+            release.set()
+            await _cancel_and_join(task)
+
+        runner.run.assert_awaited_once_with(request)
+        assert request.run_id not in registry
+        await _assert_persisted(
+            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING), result=result,
+        )
+
+    database(check)
+
+
+def test_agent_service_serializes_concurrent_cancellation_and_signals_once(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        started, signalled = asyncio.Event(), asyncio.Event()
+        release_runner, first_staged, release_first, second_entered = (
+            asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+        )
+        pids = []
+
+        async def run(_snapshot):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                signalled.set()
+                await release_runner.wait()
+                raise
+
+        registry = ActiveRunRegistry()
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner, active_runs=registry)
+        execution = asyncio.create_task(service.execute_run(request.run_id))
+        tasks = [execution]
+        original_lock = AgentRunRepository.get_for_update
+        original_append = AgentEventRepository.add_status_changed
+
+        async def track_lock(repository, run_id):
+            pids.append(await repository.session.scalar(text("SELECT pg_backend_pid()")))
+            if len(pids) == 2:
+                second_entered.set()
+            return await original_lock(repository, run_id)
+
+        async def stage_and_hold(repository, run_id, current, target):
+            event = await original_append(repository, run_id, current, target)
+            await repository.session.flush()
+            first_staged.set()
+            await release_first.wait()
+            return event
+
+        try:
+            async with asyncio.timeout(10):
+                await started.wait()
+                monkeypatch.setattr(AgentRunRepository, "get_for_update", track_lock)
+                monkeypatch.setattr(AgentEventRepository, "add_status_changed", stage_and_hold)
+                tasks.append(asyncio.create_task(service.cancel_run(request.run_id)))
+                await first_staged.wait()
+                tasks.append(asyncio.create_task(service.cancel_run(request.run_id)))
+                await second_entered.wait()
+                await _wait_for_run_blocker(factory, *pids, tasks[2])
+                assert execution.cancelling() == 0 and not signalled.is_set()
+                release_first.set()
+                await asyncio.gather(*tasks[1:])
+                await signalled.wait()
+                await service.cancel_run(request.run_id)
+                assert execution.cancelling() == 1 and not execution.done()
+                release_runner.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await execution
+        finally:
+            release_first.set()
+            release_runner.set()
+            await _cancel_and_join(*tasks)
+
+        runner.run.assert_awaited_once_with(request)
+        assert request.run_id not in registry
+        await _assert_persisted(
+            factory, request, workspace_id, Status.CANCELLED, CLAIM, (Status.RUNNING, Status.CANCELLED),
+        )
+
+    database(check)

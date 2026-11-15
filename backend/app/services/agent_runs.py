@@ -98,6 +98,19 @@ class AgentRunService:
             return None
         return decode_agent_result(run.final_result)
 
+    async def cancel_execution(self, run_id: UUID) -> None:
+        try:
+            run = await self.runs.get_for_update(run_id)
+            if run is None:
+                raise AgentRunNotFoundError(run_id)
+            actual = AgentRunStatus(run.status)
+            if actual is not AgentRunStatus.CANCELLED:
+                await self._transition_locked(run, actual, AgentRunStatus.CANCELLED)
+            await self.session.commit()
+        except BaseException:
+            await self.session.rollback()
+            raise
+
     async def complete_execution(self, run_id: UUID, result: AgentFinalResult) -> None:
         try:
             document = encode_agent_result(result)
