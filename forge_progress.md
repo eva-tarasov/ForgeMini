@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 07 принят, Step 08A подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 08A принят, Step 08B подготовлен и ожидает review и учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -464,11 +464,15 @@ cancelled
     - Повторные автоматические проверки дали `14 passed` в модуле AgentRunService, `471 passed, 93 skipped` в обычной регрессии и `87 passed` в PostgreSQL suite (26 новых и 61 прежний). Во всех трёх прогонах 0 failures и 0 pytest warnings. `pip check` PASS. PostgreSQL подтвердил базу `forge_task06_week3_result_20261114_123241`, `READ COMMITTED` и revision `1d972cc34fbe`.
     - Пять ручных учебных сценариев PASS по логам владельца: чтение результата через новый engine, rollback при сбое result event, rollback при сбое status event, отклонение позднего ready и отклонение позднего blocked.
 - [ ] 08. Reliability & Execution Limits — in progress.
-  - [ ] 08A. Agent Execution Deadline — реализация подготовлена, ожидает review и учебной проверки.
+  - [x] 08A. Agent Execution Deadline — DONE. [PR #24](https://github.com/eva-tarasov/myFirstForge/pull/24) merged в `main` (`e5fde60`).
     - `AgentService` применяет один монотонный deadline ко всему `AgentRunner.run()`, по умолчанию 60 секунд. Лимит задаётся keyword-only параметром конструктора. Claim, валидация результата и запись в PostgreSQL выполняются вне этого deadline. Внутренний timeout runner и существующие ошибки провайдера сохраняют исходный тип и причину.
-    - Истечение deadline даёт `execution_deadline_exceeded`. Текущий `running` переходит в `failed` с SQL NULL и двумя событиями смены статуса. Уже сохранённый `cancelled` сохраняется. Поздний результат отклоняется, даже если runner перехватил отмену или event loop ещё не запустил callback таймера. Внешняя отмена coroutine пробрасывается и может оставить run в `running`. Отмена кооперативная. Автоматических повторов и восстановления исполнения нет.
+    - Истечение deadline даёт `execution_deadline_exceeded`. Текущий `running` переходит в `failed` с SQL NULL. Уже сохранённый `cancelled` сохраняется. Поздний результат отклоняется, даже если runner перехватил отмену или event loop ещё не запустил callback таймера. Внешняя отмена coroutine пробрасывается и может оставить run в `running`. Отмена кооперативная. Автоматических повторов и восстановления исполнения нет.
     - `pip check` PASS. Deadline unit suite `23 passed`, runner/graph/finalization `92 passed`, обычный pytest `494 passed, 96 skipped`. PostgreSQL suite `90 passed` (3 новых и 87 прежних) в `forge_task06_week3_result_20261114_123241` при `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Подтверждены отмена research и финализации в реальном StateGraph и сохранение committed cancellation. Во всех прогонах 0 failures и 0 pytest warnings.
-  - [ ] 08B. Error Classification, Failure Metadata & Retry Policy — not started.
+    - Пять ручных учебных сценариев PASS по отчёту владельца. `git diff --check` PASS.
+  - [ ] 08B. Error Classification, Failure Metadata & Retry Policy — реализация подготовлена, ожидает review и учебной проверки.
+    - Application layer владеет 16 стабильными кодами и вычисляет `transient_candidate`, `not_retryable` или `review_required`. Runtime adapter классифицирует исключения SDK, графа и structured output. Общий deadline остаётся отдельным кодом. Автоматические повторы, новая попытка и durable recovery за пределами 08B.
+    - `agent_execution_failed` содержит только `schema_version` и `code`. Одна транзакция сохраняет его и переход `running → failed`, оставляя SQL NULL в `final_result`. `get_run_failure()` читает событие без исполнения runner. Исторические строки без metadata и сохранённые `blocked` results возвращают `None`.
+    - `pip check` PASS. Failure contract/classification `69 passed`, runner/deadline/graph/finalization `115 passed`, обычный pytest `563 passed, 113 skipped`. PostgreSQL suite `107 passed` (17 новых и 90 прежних) в `forge_task06_week3_result_20261114_123241`, `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Проверены все пять HTTP MockTransport сценариев, чтение через новый engine, rollback обоих событий, конкурентная запись и сохранение доменной отмены. Во всех итоговых прогонах 0 failures и 0 pytest warnings.
   - [ ] 08C. Cancellation Management — not started.
 - [ ] 09. Usage, Cost & Observability — not started.
 - [ ] 10. Integration & Week 3 Review — not started.

@@ -527,6 +527,10 @@ def test_agent_result_execution_failures_leave_sql_null(database, failure):
         else:
             assert exc.value.reason == "invalid_runner_result"
         run.assert_awaited_once_with(request)
-        await assert_persisted(factory, request, workspace_id, Status.FAILED, CLAIM, status_event(Status.FAILED))
+        code = "execution_failed" if failure == "runner-error" else "invalid_runner_result"
+        failure_event = ("agent_execution_failed", {"schema_version": 1, "code": code})
+        await assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, failure_event, status_event(Status.FAILED)
+        )
 
     database(check)

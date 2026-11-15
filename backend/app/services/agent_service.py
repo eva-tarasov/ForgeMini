@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.execution import AgentRunStatus
+from app.services.agent_failure import AgentFailure, classify_execution_error
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
 from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
@@ -43,8 +43,9 @@ class AgentService:
             except AgentResultContractError:
                 raise AgentRunnerError("invalid_runner_result") from None
         except Exception as execution_error:
+            failure = classify_execution_error(execution_error)
             try:
-                await self._fail(run_id)
+                await self._fail(run_id, failure)
             except Exception as transition_error:
                 raise transition_error from execution_error
             raise
@@ -71,6 +72,10 @@ class AgentService:
         async with self._session_factory() as session:
             return await AgentRunService(session).get_final_result(run_id)
 
+    async def get_run_failure(self, run_id: UUID) -> AgentFailure | None:
+        async with self._session_factory() as session:
+            return await AgentRunService(session).get_failure(run_id)
+
     async def _claim(self, run_id: UUID) -> AgentRunRequest:
         async with self._session_factory() as session:
             return await AgentRunService(session).claim_for_execution(run_id)
@@ -79,10 +84,6 @@ class AgentService:
         async with self._session_factory() as session:
             await AgentRunService(session).complete_execution(run_id, result)
 
-    async def _fail(self, run_id: UUID) -> None:
+    async def _fail(self, run_id: UUID, failure: AgentFailure) -> None:
         async with self._session_factory() as session:
-            await AgentRunService(session).transition_status(
-                run_id,
-                expected_status=AgentRunStatus.RUNNING,
-                target_status=AgentRunStatus.FAILED,
-            )
+            await AgentRunService(session).fail_execution(run_id, failure)

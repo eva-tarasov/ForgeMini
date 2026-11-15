@@ -27,10 +27,16 @@ from app.db.session import create_engine, create_session_factory
 from app.domain.execution import AgentRunStatus as Status
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
+from app.services.agent_failure import AgentFailure, AgentFailureCode, AgentFailureContractError, RetryDisposition
 from app.services.agent_result import AgentFinalResult, FixtureObservation
 from app.services.agent_result_codec import encode_agent_result
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
-from app.services.agent_runs import AgentRunNotFoundError, AgentRunService, StaleAgentRunStatusError
+from app.services.agent_runs import (
+    AgentRunNotFoundError,
+    AgentRunResultAlreadyRecordedError,
+    AgentRunService,
+    StaleAgentRunStatusError,
+)
 from app.services.agent_service import AgentService
 
 
@@ -118,7 +124,7 @@ def _result(*, blocker=None, observations=()):
     )
 
 
-async def _assert_persisted(factory, request, workspace_id, status, *edges, result=None):
+async def _assert_persisted(factory, request, workspace_id, status, *edges, result=None, failure=None):
     async with factory() as session:
         task = await session.get(TaskModel, request.task_id)
         run = await session.get(AgentRunModel, request.run_id)
@@ -142,6 +148,8 @@ async def _assert_persisted(factory, request, workspace_id, status, *edges, resu
         else:
             assert run.final_result == encode_agent_result(result)
             expected.insert(-1, ("agent_result_recorded", {"schema_version": 1, "result_status": result.status}))
+        if failure is not None:
+            expected.insert(-1, ("agent_execution_failed", {"schema_version": 1, "code": failure.value}))
         assert [
             (event.sequence, event.event_type, event.payload) for event in events
         ] == [
@@ -232,7 +240,13 @@ def test_agent_service_saves_failed_and_propagates_execution_error(database, fai
         else:
             assert exc.value.reason == "invalid_runner_result"
         run.assert_awaited_once_with(request)
-        await _assert_persisted(factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED))
+        code = (
+            AgentFailureCode.EXECUTION_FAILED if failure in ("runner", "unexpected")
+            else AgentFailureCode.INVALID_RUNNER_RESULT
+        )
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED), failure=code,
+        )
 
     database(check)
 
@@ -521,7 +535,8 @@ def test_agent_service_deadline_cancels_graph(database, monkeypatch, phase):
             execution.assert_awaited_once_with(component="task_service")
             finalizer.ainvoke.assert_awaited_once()
         await _assert_persisted(
-            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED)
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
+            failure=AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED,
         )
 
     database(check)
@@ -567,3 +582,269 @@ def test_agent_service_deadline_preserves_domain_cancellation(database):
         await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
 
     database(check)
+
+
+@pytest.mark.parametrize("error,code", [
+    (AgentRunnerError("provider_timeout"), AgentFailureCode.PROVIDER_TIMEOUT),
+    (AgentRunnerError("provider_quota_exhausted"), AgentFailureCode.PROVIDER_QUOTA_EXHAUSTED),
+    (TimeoutError("synthetic private detail"), AgentFailureCode.RUNNER_TIMEOUT),
+    (AgentRunnerError("synthetic private detail"), AgentFailureCode.EXECUTION_FAILED),
+])
+def test_agent_service_persists_classified_execution_failure(database, error, code):
+    async def check(factory, request, workspace_id):
+        runner = SimpleNamespace(run=AsyncMock(side_effect=error))
+        service = AgentService(factory, runner)
+        with pytest.raises(type(error)) as exc:
+            await service.execute_run(request.run_id)
+        assert exc.value is error
+        runner.run.assert_awaited_once_with(request)
+        assert await service.get_run_failure(request.run_id) == AgentFailure(code)
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED), failure=code,
+        )
+
+    database(check)
+
+
+def test_agent_service_failure_persists_across_engines(database):
+    async def check(_factory, request, workspace_id):
+        settings = Settings(postgres_db=os.environ["FORGE_TASK06_TEST_DB"])
+        error = AgentRunnerError("provider_connection")
+        runner = SimpleNamespace(run=AsyncMock(side_effect=error))
+        writer_engine = create_engine(settings)
+        try:
+            writer = AgentService(create_session_factory(writer_engine), runner)
+            with pytest.raises(AgentRunnerError) as exc:
+                await writer.execute_run(request.run_id)
+            assert exc.value is error
+            runner.run.assert_awaited_once_with(request)
+        finally:
+            await asyncio.wait_for(writer_engine.dispose(), timeout=5)
+
+        reader_engine = create_engine(settings)
+        try:
+            factory = create_session_factory(reader_engine)
+            unused_runner = SimpleNamespace(run=AsyncMock())
+            reader = AgentService(factory, unused_runner)
+            failure = await reader.get_run_failure(request.run_id)
+            assert failure == AgentFailure(AgentFailureCode.PROVIDER_CONNECTION)
+            assert failure.retry_disposition is RetryDisposition.TRANSIENT_CANDIDATE
+            unused_runner.run.assert_not_called()
+            await _assert_persisted(
+                factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
+                failure=AgentFailureCode.PROVIDER_CONNECTION,
+            )
+        finally:
+            await asyncio.wait_for(reader_engine.dispose(), timeout=5)
+
+    database(check)
+
+
+@pytest.mark.parametrize("failure_type", ["agent_execution_failed", "agent_run_status_changed"])
+def test_agent_service_failure_is_atomic(database, monkeypatch, failure_type):
+    async def check(factory, request, workspace_id):
+        original_append = AgentEventRepository.append
+        attempted = []
+        persistence_errors = []
+        execution_error = RuntimeError("synthetic private detail")
+        expected = [
+            ("agent_run_status_changed", {"from": "queued", "to": "running"}),
+            ("agent_execution_failed", {"schema_version": 1, "code": "execution_failed"}),
+        ]
+        if failure_type == "agent_run_status_changed":
+            expected.append(("agent_run_status_changed", {"from": "running", "to": "failed"}))
+
+        async def append_then_break(repository, run_id, *, event_type, payload):
+            attempted.append((event_type, payload))
+            event = await original_append(repository, run_id, event_type=event_type, payload=payload)
+            if len(attempted) == 1 or event_type != failure_type:
+                return event
+            session = repository.session
+            await session.flush()
+            status, result_is_null = (await session.execute(
+                select(AgentRunModel.status, AgentRunModel.final_result.is_(None)).where(AgentRunModel.id == run_id)
+            )).one()
+            expected_status = "running" if failure_type == "agent_execution_failed" else "failed"
+            assert (status, result_is_null) == (expected_status, True)
+            events = (await session.execute(
+                select(AgentEventModel.sequence, AgentEventModel.event_type, AgentEventModel.payload)
+                .where(AgentEventModel.agent_run_id == run_id).order_by(AgentEventModel.sequence)
+            )).all()
+            assert events == [(number, *item) for number, item in enumerate(expected, 1)]
+            event.sequence = 0
+            try:
+                await session.flush()
+            except IntegrityError as error:
+                persistence_errors.append(error)
+                raise
+
+        monkeypatch.setattr(AgentEventRepository, "append", append_then_break)
+        runner = SimpleNamespace(run=AsyncMock(side_effect=execution_error))
+        service = AgentService(factory, runner)
+        with pytest.raises(IntegrityError) as exc:
+            await service.execute_run(request.run_id)
+        assert persistence_errors == [exc.value]
+        assert exc.value.orig.sqlstate == "23514"
+        assert exc.value.orig.__cause__.constraint_name == "ck_agent_events_sequence_positive"
+        assert exc.value.__cause__ is execution_error
+        assert attempted == expected
+        runner.run.assert_awaited_once_with(request)
+        assert await service.get_run_failure(request.run_id) is None
+        await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+
+    database(check)
+
+
+def test_agent_service_serializes_concurrent_failures(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        winner = AgentFailure(AgentFailureCode.PROVIDER_TIMEOUT)
+        loser = AgentFailure(AgentFailureCode.RUNNER_TIMEOUT)
+        staged, release, entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async with factory() as session:
+            assert await AgentRunService(session).claim_for_execution(request.run_id) == request
+
+        async with factory() as first, factory() as second:
+            first_pid = await first.scalar(text("SELECT pg_backend_pid()"))
+            second_pid = await second.scalar(text("SELECT pg_backend_pid()"))
+            assert first_pid != second_pid
+            cached_run = await second.get(AgentRunModel, request.run_id)
+            assert cached_run.status == "running"
+            first_service = AgentRunService(first)
+            original = first_service.events.add_status_changed
+
+            async def stage_and_wait(*args):
+                event = await original(*args)
+                await first.flush()
+                staged.set()
+                await release.wait()
+                return event
+
+            async def compete():
+                entered.set()
+                await AgentRunService(second).fail_execution(request.run_id, loser)
+
+            monkeypatch.setattr(first_service.events, "add_status_changed", stage_and_wait)
+            tasks = [asyncio.create_task(first_service.fail_execution(request.run_id, winner))]
+            try:
+                async with asyncio.timeout(10):
+                    await staged.wait()
+                    tasks.append(asyncio.create_task(compete()))
+                    await entered.wait()
+                    async with factory() as observer:
+                        while first_pid not in await observer.scalar(
+                            text("SELECT pg_blocking_pids(:pid)"), {"pid": second_pid}
+                        ):
+                            assert not tasks[1].done(), "Second failure did not wait on the run lock"
+                            await asyncio.sleep(0.01)
+                    await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM)
+                    release.set()
+                    await tasks[0]
+                    with pytest.raises(StaleAgentRunStatusError) as exc:
+                        await tasks[1]
+                    assert (exc.value.expected, exc.value.actual) == (Status.RUNNING, Status.FAILED)
+            finally:
+                release.set()
+                await _cancel_and_join(*tasks)
+
+        async with factory() as session:
+            with pytest.raises(StaleAgentRunStatusError) as exc:
+                await AgentRunService(session).fail_execution(request.run_id, loser)
+            assert (exc.value.expected, exc.value.actual) == (Status.RUNNING, Status.FAILED)
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED), failure=winner.code,
+        )
+
+    database(check)
+
+
+def test_agent_service_failure_rejects_existing_metadata_on_running_run(database):
+    async def check(factory, request, workspace_id):
+        event_payload = {"schema_version": 1, "code": "runner_timeout"}
+        async with factory.begin() as session:
+            await AgentEventRepository(session).append(
+                request.run_id, event_type="agent_execution_failed", payload=event_payload,
+            )
+        async with factory() as session:
+            service = AgentRunService(session)
+            with pytest.raises(AgentFailureContractError, match="^duplicate_execution_failure$"):
+                await service.fail_execution(request.run_id, AgentFailure(AgentFailureCode.EXECUTION_FAILED))
+            assert not session.in_transaction()
+            assert await service.get_failure(request.run_id) == AgentFailure(AgentFailureCode.RUNNER_TIMEOUT)
+            events = await service.events.get_execution_failure_events(request.run_id)
+            assert [(event.sequence, event.payload) for event in events] == [(1, event_payload)]
+            run = await service.runs.get(request.run_id)
+            assert run.status == "running" and run.final_result is None
+
+    database(check, initial=Status.RUNNING)
+
+
+def test_agent_service_failure_rejects_running_run_with_result(database):
+    async def check(factory, request, workspace_id):
+        result = _result()
+        async with factory.begin() as session:
+            run = await session.get(AgentRunModel, request.run_id)
+            run.final_result = encode_agent_result(result)
+        async with factory() as session:
+            service = AgentRunService(session)
+            with pytest.raises(AgentRunResultAlreadyRecordedError, match="^result_already_recorded$"):
+                await service.fail_execution(request.run_id, AgentFailure(AgentFailureCode.EXECUTION_FAILED))
+            assert not session.in_transaction()
+        # No lifecycle events were added, and the existing result survives.
+        async with factory() as session:
+            run = await session.get(AgentRunModel, request.run_id)
+            assert run.status == "running" and run.final_result == encode_agent_result(result)
+            assert not (await session.scalars(
+                select(AgentEventModel).where(AgentEventModel.agent_run_id == request.run_id)
+            )).all()
+
+    database(check, initial=Status.RUNNING)
+
+
+@pytest.mark.parametrize("case", ["missing-run", "historical-failed", "blocked", "ready"])
+def test_agent_service_reads_absent_failure_metadata(database, case):
+    async def check(factory, request, workspace_id):
+        runner = SimpleNamespace(run=AsyncMock())
+        service = AgentService(factory, runner)
+        if case == "missing-run":
+            with pytest.raises(AgentRunNotFoundError):
+                await service.get_run_failure(uuid4())
+            await _assert_persisted(factory, request, workspace_id, Status.QUEUED)
+        elif case == "historical-failed":
+            assert await service.get_run_failure(request.run_id) is None
+            await _assert_persisted(factory, request, workspace_id, Status.FAILED)
+        else:
+            result = _result(blocker="Synthetic blocker" if case == "blocked" else None)
+            target = Status.FAILED if case == "blocked" else Status.VERIFYING
+            async with factory() as session:
+                runs = AgentRunService(session)
+                await runs.claim_for_execution(request.run_id)
+                await runs.complete_execution(request.run_id, result)
+            assert await service.get_run_failure(request.run_id) is None
+            await _assert_persisted(
+                factory, request, workspace_id, target, CLAIM, (Status.RUNNING, target), result=result,
+            )
+        runner.run.assert_not_called()
+
+    database(check, initial=Status.FAILED if case == "historical-failed" else Status.QUEUED)
+
+
+@pytest.mark.parametrize("payloads,reason", [
+    ([{"schema_version": 1, "code": "synthetic private detail"}], "invalid_stored_failure"),
+    ([{"schema_version": 2, "code": "runner_timeout"}], "unsupported_failure_version"),
+    ([{"schema_version": 1, "code": "runner_timeout"}] * 2, "duplicate_execution_failure"),
+])
+def test_agent_service_rejects_invalid_failure_history(database, payloads, reason):
+    async def check(factory, request, _workspace_id):
+        async with factory.begin() as session:
+            repository = AgentEventRepository(session)
+            for payload in payloads:
+                await repository.append(request.run_id, event_type="agent_execution_failed", payload=payload)
+        runner = SimpleNamespace(run=AsyncMock())
+        with pytest.raises(AgentFailureContractError, match=f"^{reason}$"):
+            await AgentService(factory, runner).get_run_failure(request.run_id)
+        runner.run.assert_not_called()
+        async with factory() as session:
+            events = await AgentEventRepository(session).get_execution_failure_events(request.run_id)
+            assert [(event.sequence, event.payload) for event in events] == list(enumerate(payloads, 1))
+
+    database(check, initial=Status.FAILED)

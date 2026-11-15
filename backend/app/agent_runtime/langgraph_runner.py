@@ -1,6 +1,7 @@
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent_runtime.agent_graph import run_agent_graph
+from app.agent_runtime.error_classification import classify_runtime_error
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 
@@ -18,4 +19,5 @@ class LangGraphAgentRunner:
             )
             return state["final_result"]
         except Exception as exc:
-            raise AgentRunnerError("execution_failed") from exc
+            code = classify_runtime_error(exc)
+            raise AgentRunnerError(code.value) from exc

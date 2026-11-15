@@ -289,7 +289,8 @@ def test_langgraph_runner_translates_error(monkeypatch, fixture_execution, provi
         asyncio.run(runner.run(_request()))
 
     error = exc.value
-    assert error.reason == str(error) == "execution_failed"
+    expected = "runner_timeout" if provider_failure else "graph_execution_failed"
+    assert error.reason == str(error) == expected
     if provider_failure:
         assert error.__cause__ is provider_error
     else:

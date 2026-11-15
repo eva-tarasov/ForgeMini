@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.services.agent_failure import AgentFailure, AgentFailureCode
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 from app.services.agent_service import AgentService, DEFAULT_EXECUTION_TIMEOUT_SECONDS
@@ -97,7 +98,7 @@ def test_agent_service_deadline_cancels_runner_and_rejects_late_result(
 
         service, runner = make_service(run=run, execution_timeout_seconds=0.05)
 
-        async def fail(_run_id):
+        async def fail(_run_id, _failure):
             assert lifecycle == ["started", "cancelled", "cleanup"]
 
         service._fail.side_effect = fail
@@ -112,7 +113,9 @@ def test_agent_service_deadline_cancels_runner_and_rejects_late_result(
             assert isinstance(exc.value.__cause__.__cause__, asyncio.CancelledError)
         service._claim.assert_awaited_once_with(request_snapshot.run_id)
         runner.run.assert_awaited_once_with(request_snapshot)
-        service._fail.assert_awaited_once_with(request_snapshot.run_id)
+        service._fail.assert_awaited_once_with(
+            request_snapshot.run_id, AgentFailure(AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED)
+        )
         service._complete.assert_not_called()
 
     asyncio.run(check())
@@ -134,7 +137,8 @@ def test_agent_service_deadline_distinguishes_inner_timeout(make_service, reques
     assert exc.value is error
     assert exc.value.__cause__ is (inner if wrapped else None)
     runner.run.assert_awaited_once_with(request_snapshot)
-    service._fail.assert_awaited_once_with(request_snapshot.run_id)
+    code = AgentFailureCode.EXECUTION_FAILED if wrapped else AgentFailureCode.RUNNER_TIMEOUT
+    service._fail.assert_awaited_once_with(request_snapshot.run_id, AgentFailure(code))
     service._complete.assert_not_called()
 
 
@@ -192,7 +196,9 @@ def test_agent_service_deadline_rejects_late_return_before_timer_callback(
         assert exc.value.reason == "execution_deadline_exceeded"
         assert exc.value.__cause__ is None
         runner.run.assert_awaited_once_with(request_snapshot)
-        service._fail.assert_awaited_once_with(request_snapshot.run_id)
+        service._fail.assert_awaited_once_with(
+            request_snapshot.run_id, AgentFailure(AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED)
+        )
         service._complete.assert_not_called()
 
     asyncio.run(check())

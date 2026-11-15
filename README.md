@@ -166,7 +166,7 @@ fi
 
 Таймер запроса провайдера действует на отдельный запрос модели и по умолчанию составляет 15 секунд. При собственном deadline сервис выдаёт `AgentRunnerError("execution_deadline_exceeded")`. Более ранние ошибки runner, включая его собственный timeout, сохраняют исходный тип и причину. Автоматических повторов нет.
 
-При истечении deadline run в `running` переходит в `failed`. `final_result` остаётся SQL NULL, в обычной истории вызова два события смены статуса. Если отдельная транзакция уже зафиксировала `cancelled`, сервис сохраняет этот статус и пробрасывает `StaleAgentRunStatusError` с ошибкой deadline в цепочке причин. Внешний `CancelledError` пробрасывается без автоматической смены статуса, поэтому run может остаться в `running`.
+При истечении deadline run в `running` переходит в `failed` с событием `agent_execution_failed` между двумя событиями смены статуса. `final_result` остаётся SQL NULL. Если отдельная транзакция уже зафиксировала `cancelled`, сервис сохраняет этот статус и пробрасывает `StaleAgentRunStatusError` с ошибкой deadline в цепочке причин. Внешний `CancelledError` пробрасывается без автоматической смены статуса, поэтому run может остаться в `running`.
 
 Deadline использует кооперативную отмену asyncio. Блокировка event loop или игнорирование отмены могут задержать завершение. Сервис отклоняет результат, вернувшийся после deadline. Отмена уже отправленного внешнего действия, принудительное завершение процесса и восстановление после сбоя находятся за пределами этой гарантии.
 
@@ -174,13 +174,42 @@ Deadline использует кооперативную отмену asyncio. �
 
 Миграция `1d972cc34fbe` добавляет nullable JSONB-колонку `agent_runs.final_result`. Версия хранения 1 использует объект `{"schema_version": 1, "result": {...}}`. В `result` входят `summary`, `status`, `relevant_components`, `assumptions`, `observations` и `blocked_reason`. Codec валидирует результат и вложенные observations по существующему строгому контракту. При чтении JSON-массивы восстанавливаются как tuple.
 
-После claim на новом run событие `queued → running` получает sequence 1. `complete_execution()` под блокировкой AgentRun проверяет `running` и отсутствие записанного результата. Один commit сохраняет JSONB, событие `agent_result_recorded` (sequence 2, payload только `schema_version` и `result_status`), новый статус и событие перехода (sequence 3). `ready_for_verification` ведёт в `verifying`, а `blocked` ведёт в `failed` с сохранением результата. Ошибка runner или невалидный результат ведёт в `failed` с SQL NULL и двумя событиями смены статуса.
+После claim на новом run событие `queued → running` получает sequence 1. `complete_execution()` под блокировкой AgentRun проверяет `running` и отсутствие записанного результата. Один commit сохраняет JSONB, событие `agent_result_recorded` (sequence 2, payload только `schema_version` и `result_status`), новый статус и событие перехода (sequence 3). `ready_for_verification` ведёт в `verifying`, а `blocked` ведёт в `failed` с сохранением результата.
 
 Любой новый переход в `verifying` требует сохранённого валидного `ready_for_verification`. При отменённом или уже завершённом run позднее completion отклоняется. `AgentService.get_run_result()` читает через новую сессию без вызова runner. Для SQL NULL, включая исторические `verifying`, он возвращает `None`. Отсутствующий run и повреждённый документ дают отдельные ошибки. Исторические строки сохраняются без backfill. Предварительный результат доступен для независимой verification, которая по-прежнему требуется для `succeeded`. Хранение завершённого результата не обеспечивает recovery и resume исполнения.
 
+### Ошибки исполнения и retry disposition
+
+`LangGraphAgentRunner` сопоставляет тип ошибки SDK или графа со стабильным кодом и сохраняет исходное исключение как `__cause__`. `AgentService` принимает известные коды из `AgentRunnerError.reason`, классифицирует прямой `TimeoutError` как `runner_timeout`, а неизвестную ошибку или reason как `execution_failed`. Классификация не использует сообщения и цепочки исключений.
+
+| Условие | Код | Retry disposition |
+| --- | --- | --- |
+| Общий deadline сервиса | `execution_deadline_exceeded` | `review_required` |
+| Обычный `TimeoutError` | `runner_timeout` | `review_required` |
+| SDK timeout или HTTP 408 | `provider_timeout` | `transient_candidate` |
+| SDK connection error | `provider_connection` | `transient_candidate` |
+| HTTP 429, код `rate_limit_exceeded` | `provider_rate_limited` | `transient_candidate` |
+| HTTP 429, код `insufficient_quota` | `provider_quota_exhausted` | `not_retryable` |
+| HTTP 429, другой или отсутствующий код | `provider_rate_limit_unknown` | `review_required` |
+| HTTP 401 или 403 | `provider_auth` | `not_retryable` |
+| HTTP 400, 404 или 422 | `provider_request_rejected` | `not_retryable` |
+| HTTP 500–599 | `provider_unavailable` | `transient_candidate` |
+| Прочие SDK API errors | `provider_error` | `review_required` |
+| Лимит рекурсии, модели, инструментов или финализации | `graph_budget_exceeded` | `review_required` |
+| Прочий `AgentGraphError` | `graph_execution_failed` | `review_required` |
+| `StructuredOutputError` или `FinalizationError` | `structured_output_invalid` | `review_required` |
+| Runner вернул результат вне контракта | `invalid_runner_result` | `review_required` |
+| Неизвестная ошибка или неизвестный reason | `execution_failed` | `review_required` |
+
+`transient_candidate` указывает на потенциально временный сбой. `not_retryable` означает, что повтор при прежних условиях бессмысленен. `review_required` требует отдельного решения. Ни один из этих исходов не запускает retry, не создаёт новую попытку и не обеспечивает восстановление исполнения.
+
+После claim история ошибки состоит из `queued → running`, `agent_execution_failed` и `running → failed` с sequence 1, 2, 3. Под блокировкой AgentRun одна транзакция сохраняет failure event, новый статус и status event. `final_result` остаётся SQL NULL. Payload failure event содержит только `{"schema_version": 1, "code": "<stable code>"}`. Текст исключения, traceback, HTTP-данные, raw model output и retry disposition в event не попадают.
+
+`AgentService.get_run_failure()` читает metadata через новую сессию без вызова runner. При отсутствии AgentRun возвращается ошибка поиска. Если события нет, метод возвращает `None`, в том числе для исторического `failed` и сохранённого `blocked` result. Повреждённое, неизвестной версии или дублированное событие даёт ошибку контракта. Retry disposition вычисляется из прочитанного кода.
+
 ### Добавление AgentEvent
 
-Все production-записи AgentEvent проходят через `AgentEventRepository.append(run_id, event_type=..., payload=...)`. Запись результата вызывает `append()` напрямую. Смена статуса вызывает `add_status_changed()`, который делегирует в `append()`. Caller передаёт непустой тип события длиной до 100 символов и JSON-совместимый словарь. Родительский AgentRun должен уже существовать или быть явно flushed в той же транзакции.
+Все production-записи AgentEvent проходят через `AgentEventRepository.append(run_id, event_type=..., payload=...)`. Запись результата и ошибки исполнения вызывает `append()` напрямую. Смена статуса вызывает `add_status_changed()`, который делегирует в `append()`. Caller передаёт непустой тип события длиной до 100 символов и JSON-совместимый словарь. Родительский AgentRun должен уже существовать или быть явно flushed в той же транзакции.
 
 `append()` блокирует ID родительского AgentRun через `SELECT FOR UPDATE` с отключённым autoflush. После получения блокировки репозиторий явно выполняет `flush()` всего текущего unit of work, включая предыдущие pending events. Затем отдельный запрос `COALESCE(MAX(sequence), 0) + 1` выделяет номер в пределах этого AgentRun. При PostgreSQL `READ COMMITTED` отдельный запрос получает свежий snapshot и видит события, зафиксированные за время ожидания блокировки.
 

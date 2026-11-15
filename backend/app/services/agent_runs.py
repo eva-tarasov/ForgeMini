@@ -8,6 +8,13 @@ from app.domain.transitions import validate_agent_run_transition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tasks import TaskRepository
+from app.services.agent_failure import (
+    AGENT_EXECUTION_FAILED_EVENT,
+    AgentFailure,
+    AgentFailureContractError,
+    decode_agent_failure,
+    encode_agent_failure,
+)
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import decode_agent_result, encode_agent_result
 from app.services.agent_runner import AgentRunRequest
@@ -109,6 +116,34 @@ class AgentRunService:
                 payload={"schema_version": document["schema_version"], "result_status": result_status},
             )
             await self._transition_locked(run, AgentRunStatus.RUNNING, target)
+            await self.session.commit()
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def get_failure(self, run_id: UUID) -> AgentFailure | None:
+        if await self.runs.get(run_id) is None:
+            raise AgentRunNotFoundError(run_id)
+        events = await self.events.get_execution_failure_events(run_id)
+        if not events:
+            return None
+        if len(events) > 1:
+            raise AgentFailureContractError("duplicate_execution_failure")
+        return decode_agent_failure(events[0].payload)
+
+    async def fail_execution(self, run_id: UUID, failure: AgentFailure) -> None:
+        try:
+            payload = encode_agent_failure(failure)
+            run = await self.runs.get_for_update(run_id)
+            if run is None:
+                raise AgentRunNotFoundError(run_id)
+            self._check_expected_status(run, AgentRunStatus.RUNNING)
+            if run.final_result is not None:
+                raise AgentRunResultAlreadyRecordedError("result_already_recorded")
+            if await self.events.get_execution_failure_events(run.id):
+                raise AgentFailureContractError("duplicate_execution_failure")
+            await self.events.append(run.id, event_type=AGENT_EXECUTION_FAILED_EVENT, payload=payload)
+            await self._transition_locked(run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
