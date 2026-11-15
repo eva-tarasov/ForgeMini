@@ -46,7 +46,7 @@
 
 ## 3. Technology decision gates
 
-- **Week 3 — Agent Runtime:** владелец утвердил LangChain + LangGraph как образовательное и архитектурное направление ([ADR-002](docs/adr/ADR-002.md)). Один основной production-minded runtime — собственный `StateGraph` за независимым Forge `AgentRunner`. `LangChain create_agent` — ограниченный учебный прототип, прямой loop — mental model, OpenAI Agents SDK отложен. Production-пригодность предстоит проверить на tool calls, structured output, instrumentation, approvals integration, cost и тестируемости.
+- **Week 3 — Agent Runtime:** владелец утвердил LangChain + LangGraph как образовательное и архитектурное направление ([ADR-002](docs/adr/ADR-002.md)). Один основной production-minded runtime — собственный `StateGraph` за независимым Forge `AgentRunner`. `LangChain create_agent` — ограниченный учебный прототип, прямой loop — mental model, OpenAI Agents SDK отложен. Step 10 проверил tool calls, structured output, instrumentation, cost и persistence в offline flow с SDK и PostgreSQL. Live provider, production-пригодность и approvals integration остаются открытыми.
 
   Для Week 3 владелец явно утвердил LangChain и LangGraph по образовательным причинам, изложенным в ADR-002. Это решение относится к текущему milestone и не изменяет общие критерии Architecture Change Gate. Production-пригодность выбранной реализации должна быть подтверждена последующими проверками.
 - **Week 7 — Durable Orchestration:** исходная кандидатура — **Temporal**. Сравнить с **LangGraph** на одинаковом сценарии `execute → approval pause → resume → verification → worker restart`. Проверить recovery semantics, безопасные side effects, checkpoint/replay, сложность deployment и соответствие нашему domain state. При необходимости возможно сочетание разных уровней, но **не подключать оба по умолчанию**.
@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 09B принят, Step 09C подготовлен и ожидает review и ручной учебной проверки
+**Status:** in progress — Step 09 принят. Step 10 подготовлен, ожидает review, ручного учебного checkpoint владельца и merge.
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -479,7 +479,7 @@ cancelled
     - Проверены rollback отмены без сигнала, отмена research и финализации реального StateGraph, обе стороны гонок с claim и записью исхода, сохранение результата при отмене из `verifying` и сохранение metadata, если ошибка записалась первой. Coroutine cancellation отдельно от доменной отмены. Отмена кооперативна. Завершение cleanup, отзыв внешнего действия и distributed recovery остаются за пределами гарантии.
     - `pip check` PASS. Cancellation unit suite `22 passed`, связанные unit/regression тесты `129 passed`, обычный pytest `585 passed, 131 skipped`. PostgreSQL suite `125 passed` (18 новых и 107 прежних) в `forge_task06_week3_result_20261114_123241`, `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Во всех прогонах 0 failures и 0 pytest warnings.
     - Пять ручных учебных сценариев PASS по отчёту владельца. `git diff --check` PASS.
-- [ ] 09. Usage, Cost & Observability — in progress.
+- [x] 09. Usage, Cost & Observability — DONE.
   - [x] 09A. Model Usage Capture — DONE. [PR #27](https://github.com/eva-tarasov/myFirstForge/pull/27) merged в `main` (`8a07636`).
     - Явный `capture_agent_usage(run_id)` передаёт изолированный collector через `ContextVar`. Research и structured finalization учитываются на границе `ainvoke()` до валидации ответа. Snapshot сохраняет наблюдавшийся usage после ошибки графа, deadline или отмены. `reported`, `missing` и `invalid` различаются. Known totals суммируют валидные основные счётчики. Cost, PostgreSQL persistence и автоматическое владение scope остаются последующим этапам.
     - MockTransport подтвердил три вызова и 100 токенов (71 input, 29 output). Параллельные исполнения одного StateGraph подтвердили изоляцию scopes. Usage suite `64 passed`, связанные regression tests `168 passed`, обычный pytest `649 passed, 131 skipped`, PostgreSQL suite `125 passed` в `forge_task06_week3_result_20261114_123241` при `READ COMMITTED`, revision `1d972cc34fbe`. `pip check` и `alembic check` PASS. Во всех прогонах 0 failures и 0 pytest warnings.
@@ -490,13 +490,19 @@ cancelled
     - Python Deep Dives. Явный `Decimal.Context` сохраняет точность цен независимо от ambient context. Десятичные строки в JSONB сохраняют ставку и её scale. `ContextVar` восстанавливает внешний collector. `finally` выполняет отдельную запись usage и очистку handle, а `BaseException.add_note()` сохраняет первичный `CancelledError` при вторичной ошибке записи.
     - Cost/usage suite `144 passed`, связанные регрессии `137 passed`, обычный pytest `729 passed, 152 skipped`, PostgreSQL suite `146 passed` (21 новый и 125 прежних). В базе `forge_task06_week3_result_20261114_123241` подтверждены `READ COMMITTED`, revision `1d972cc34fbe` и `alembic check` PASS. Проверены rollback usage, запись после rollback completion и конкуренция с `pg_blocking_pids()`. `pip check` PASS. Во всех прогонах 0 failures и 0 pytest warnings.
     - Пять ручных учебных сценариев PASS по отчёту владельца. `git diff --check` PASS.
-  - [ ] 09C. Observability — реализация подготовлена, ожидает review и ручной учебной проверки владельца.
+  - [x] 09C. Observability — DONE. [PR #29](https://github.com/eva-tarasov/myFirstForge/pull/29) merged в `main` (`9edbf5e`).
     - `forge.agent` пишет безопасные JSON-события выполнения фаз и операций, классифицированные сбои и агрегаты наблюдаемого usage. `operation_id` выделяется для каждого вызова, `run_id` связывает исполнение и отмену, `task_id` берётся из успешного claim. PostgreSQL сохраняет историю AgentEvent по существующим правилам.
     - Python `3.13.0`, `pip check` PASS. Observability/HTTP suite `26 passed` (20 новых и 6 прежних), связанные регрессии `164 passed`, обычный pytest `749 passed, 156 skipped` (PostgreSQL opt-in выключены). PostgreSQL suite `150 passed` (4 новых и 146 прежних), база `forge_task06_week3_result_20261114_123241`, `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Во всех итоговых pytest-прогонах 0 failures и 0 warnings.
     - В реальном StateGraph с синтетическими ответами и `read_fixture` проверены ready, deadline, явная отмена и rollback записи usage после PostgreSQL CHECK. Проверки подтверждают прежние последовательности AgentEvent и раздельные транзакции. Тесты отказа sink проверяют отсутствие утечек в JSON и stderr и сохранение исходных ошибок и отмены.
-    - BL-04 реализован для событий агента и ожидает приёмки. BL-02 и BL-03 остаются открыты.
+    - 11 ручных учебных сценариев PASS по отчёту владельца. BL-04 закрыт для событий агента. BL-02 и BL-03 остаются открыты.
     - Python Deep Dives. `Handler` отвечает за запись в поток, а `Formatter` проверяет и сериализует поля. Синхронный context manager замеряет фазу вокруг `await` и пробрасывает исходное исключение. `perf_counter_ns()` измеряет длительность, а UTC timestamp задаёт время записи. Локальный контекст корреляции сохраняется при чередовании asyncio-задач.
-- [ ] 10. Integration & Week 3 Review — not started.
+- [ ] 10. Integration & Week 3 Review — тесты, verification и документация подготовлены, ожидают review и учебной приёмки владельца.
+  - Read-only architecture audit сверил modular monolith, `AgentRunner` и границы PostgreSQL, явный claim до runner, lifecycle guards, fixture-only graph, бюджеты и отмену. [Матрица из 15 критериев](docs/LEARNING_GUIDE_WEEK3.md#матрица-architecture-audit).
+  - На свежем head до исправления Task schema дал `1 passed, 1 failed` из-за устаревшего списка колонок. Execution schema дал `1 failed` на nullability. Обновлены проверки точного Task metadata, default `queued`, именованных CHECK и scoped UNIQUE. Execution schema с savepoint проверяет nullable JSONB result, SQL NULL и запрет JSON array/string/null. Исходная схема проверена всей цепочкой миграций.
+  - Offline E2E создаёт Task обычным `TaskService`, явно добавляет queued AgentRun, выполняет собственный StateGraph через `ChatOpenAI` и HTTPX MockTransport. Три model requests и один `read_fixture` дают preliminary result и `verifying`. Проверены четыре durable события, 71 input / 29 output / 100 total, 21 cached и 14 reasoning, полные usage/cost и стоимость `Decimal("0.00034250")`. Fresh engine читает исторические записи. Переход в `succeeded` без verification evidence отклонён.
+  - Python `3.13.0`, `pip check` PASS. Обычный pytest `749 passed, 157 skipped`. Основной PostgreSQL suite `151 passed` (150 предыдущих и новый E2E), connection `2 passed`, Task schema `2 passed`, HTTP/repository `1 passed`, execution schema `1 passed`. Всего **906 уникальных случаев**, 0 итоговых failures, 0 pytest warnings, 0 непокрытых skips после opt-in. BL-06 в текущем окружении не воспроизведён.
+  - `forge_task06_week3_result_20261114_123241` использована для lifecycle и connection. Новые базы `forge_task03_week3_final_20261115_161856`, `forge_task04_week3_final_20261115_161856` и `forge_task05_week3_final_20261115_161856` мигрированы с нуля. Для всех подтверждены PostgreSQL `17.11`, `READ COMMITTED`, revision `1d972cc34fbe (head)` и `alembic check` PASS. Базы сохранены.
+  - Python Deep Dives. `Protocol` изолирует adapter и облегчает fake, `async with` даёт сессии разные сроки жизни, nested transaction создаёт savepoint для ожидаемого SQL error. MockTransport перехватывает SDK-границу до сети. `ContextVar`, frozen snapshot, `Decimal` и отдельный monotonic clock связывают модельные вызовы с проверяемой историей и диагностикой. [Учебное руководство Week 3](docs/LEARNING_GUIDE_WEEK3.md).
 
 ## Теория
 
@@ -512,7 +518,7 @@ cancelled
 
 ## Реализация
 
-**Week 3 Technology Decision Gate** пройден решением владельца: LangChain + собственный LangGraph `StateGraph` ([ADR-002](docs/adr/ADR-002.md)). Это направление ещё не подтверждено тестами; domain model не менять ради фреймворка.
+**Week 3 Technology Decision Gate** пройден решением владельца. Выбраны LangChain и собственный LangGraph `StateGraph` ([ADR-002](docs/adr/ADR-002.md)). Step 10 подтвердил runtime в offline flow с PostgreSQL, реальным SDK и синтетическими ответами MockTransport. Live provider и production-пригодность требуют отдельных проверок. Доменная модель остаётся независимой от framework.
 
 Добавить:
 
@@ -555,6 +561,19 @@ blocked_reason
 - timeout/error корректно отражаются;
 - usage/cost видны;
 - Евгений объясняет agent loop.
+
+### Evidence Step 10 и открытая приёмка
+
+| Исходный критерий | Источник и проверка | Итог и открытая граница |
+|---|---|---|
+| Task запускает AgentRun | [Task API](backend/app/api/tasks.py), [AgentService](backend/app/services/agent_service.py), [E2E](backend/tests/test_agent_service_integration.py) | Внутренний flow подтверждён. После `TaskService.create_task()` тест явно создаёт queued AgentRun, затем передаёт `run_id` в `execute_run()`. `POST /tasks` создаёт Task. Трактовка первого критерия остаётся владельцу. |
+| AgentRun state сохраняется | [AgentRunService](backend/app/services/agent_runs.py), [переходы](backend/tests/test_agent_run_integration.py), [E2E](backend/tests/test_agent_service_integration.py) | Подтверждены durable `verifying`, точная история, fresh-engine read и отказ `succeeded` без evidence. Независимый verifier и durable resume остаются открытыми. |
+| output структурирован | [Finalizer](backend/app/agent_runtime/finalization.py), [codec](backend/app/services/agent_result_codec.py), [тесты результата](backend/tests/test_agent_result_persistence_integration.py) | Подтверждены предварительный типизированный результат, runtime observations и JSONB envelope. Наблюдения относятся к synthetic fixture. |
+| timeout/error корректно отражаются | [AgentService](backend/app/services/agent_service.py), [классификация](backend/app/services/agent_failure.py), [PG lifecycle suite](backend/tests/test_agent_service_integration.py) | Подтверждены deadline, failure metadata, отмена и rollback. Локальный сигнал кооперативен и действует в пределах процесса. |
+| usage/cost видны | [Стоимость](backend/app/services/agent_cost.py), [usage codec](backend/app/services/agent_usage_codec.py), [E2E](backend/tests/test_agent_service_integration.py) | Подтверждены JSON summary, исторические ставки и воспроизводимая оценка из PostgreSQL. Реальный billing не проверялся. |
+| Евгений объясняет agent loop | [Упражнения и самопроверка](docs/LEARNING_GUIDE_WEEK3.md#20-упражнения-самопроверка-и-вопросы-для-интервью) | Ожидается отдельное evidence владельца. Технические прогоны Step 10 не заменяют учебный checkpoint. |
+
+Открытое evidence для приёмки Week 3 — review и merge Step 10, трактовка первого exit criterion и объяснение agent loop владельцем. Автоматический запуск через API, настоящий доступ к репозиторию, live provider и billing, production load, распределённая отмена и восстановление после сбоя выходят за пределы проверенного offline контура. Фактические часы не сообщены.
 
 ---
 

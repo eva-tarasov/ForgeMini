@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
-from sqlalchemy import Text, Uuid, delete, inspect, insert, text
+from sqlalchemy import String, Text, Uuid, delete, inspect, insert, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
@@ -48,15 +48,17 @@ def test_migrated_schema_metadata():
                     workspaces = {c["name"]: c for c in inspector.get_columns("workspaces")}
                     tasks = {c["name"]: c for c in inspector.get_columns("tasks")}
                     assert set(workspaces) == {"id", "name"}
-                    assert set(tasks) == {"id", "workspace_id", "goal", "acceptance_criteria"}
-                    assert all(not c["nullable"] for c in (*workspaces.values(), *tasks.values()))
+                    assert set(tasks) == {"id", "workspace_id", "goal", "acceptance_criteria", "status", "idempotency_key"}
+                    assert all(not c["nullable"] for c in workspaces.values())
+                    assert {name for name, column in tasks.items() if column["nullable"]} == {"idempotency_key"}
                     assert isinstance(workspaces["id"]["type"], Uuid)
-                    assert isinstance(tasks["id"]["type"], Uuid)
-                    assert isinstance(tasks["workspace_id"]["type"], Uuid)
+                    assert all(isinstance(tasks[name]["type"], Uuid) for name in ("id", "workspace_id", "idempotency_key"))
                     assert workspaces["name"]["type"].length == 100
-                    assert tasks["goal"]["type"].length == 500
+                    assert isinstance(tasks["goal"]["type"], String) and tasks["goal"]["type"].length == 500
                     assert isinstance(tasks["acceptance_criteria"]["type"], ARRAY)
                     assert isinstance(tasks["acceptance_criteria"]["type"].item_type, Text)
+                    assert isinstance(tasks["status"]["type"], String) and tasks["status"]["type"].length == 32
+                    assert tasks["status"]["default"] == "'queued'::character varying"
                     assert inspector.get_pk_constraint("workspaces")["constrained_columns"] == ["id"]
                     assert inspector.get_pk_constraint("tasks")["constrained_columns"] == ["id"]
                     fk = inspector.get_foreign_keys("tasks")[0]
@@ -68,7 +70,13 @@ def test_migrated_schema_metadata():
                         "ck_workspaces_name_not_blank"
                     }
                     assert {c["name"] for c in inspector.get_check_constraints("tasks")} == {
-                        "ck_tasks_goal_not_blank", "ck_tasks_acceptance_criteria_count"
+                        "ck_tasks_goal_not_blank", "ck_tasks_acceptance_criteria_count", "ck_tasks_status"
+                    }
+                    assert {
+                        (constraint["name"], tuple(constraint["column_names"]))
+                        for constraint in inspector.get_unique_constraints("tasks")
+                    } == {
+                        ("uq_tasks_workspace_idempotency_key", ("workspace_id", "idempotency_key")),
                     }
                     assert any(
                         i["column_names"] == ["workspace_id"]
@@ -95,6 +103,9 @@ def test_migrated_schema_constraints():
                     await connection.execute(insert(TaskModel).values(
                         id=task_id, workspace_id=workspace_id, goal="test", acceptance_criteria=["ok"]
                     ))
+                    assert (await connection.execute(
+                        select(TaskModel.status, TaskModel.idempotency_key).where(TaskModel.id == task_id)
+                    )).one() == ("queued", None)
                     await connection.execute(insert(TaskModel).values(
                         id=uuid4(), workspace_id=workspace_id, goal="test", acceptance_criteria=["ok"] * 10
                     ))
@@ -110,6 +121,9 @@ def test_migrated_schema_constraints():
                     await rejected(insert(WorkspaceModel).values(id=uuid4(), name=None), "23502")
                     await rejected(insert(WorkspaceModel).values(id=uuid4(), name="x" * 101), "22001")
                     await rejected(insert(WorkspaceModel).values(id=workspace_id, name="duplicate"), "23505")
+                    await rejected(insert(TaskModel).values(
+                        id=uuid4(), workspace_id=workspace_id, goal="test", acceptance_criteria=["ok"], status="invalid"
+                    ), "23514")
                     for goal in ("", " \t\n"):
                         await rejected(insert(TaskModel).values(
                             id=uuid4(), workspace_id=workspace_id, goal=goal, acceptance_criteria=["ok"]

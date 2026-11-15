@@ -21,10 +21,10 @@
 - Acceptance criteria: проверено фактическое содержимое access logs и задокументирована безопасная конфигурация без чувствительных URL и query.
 
 ## BL-04 — Форматирование других событий
-- Type: improvement; Priority: low; Status: deferred
-- Context / Evidence: `JsonFormatter.format()` ожидает `record.http_fields` и рассчитан на HTTP-события.
-- Target milestone: не определён.
-- Acceptance criteria: при появлении других событий определены их схема и logger; обычное HTTP-логирование сохраняется.
+- Type: improvement. Priority: low. Status: closed для событий агента. [PR #29](https://github.com/eva-tarasov/myFirstForge/pull/29) merged в `main` (`9edbf5e`).
+- Contract — `forge.agent` с `propagate=False` и одним отдельным `forge.agent.json` handler. `AgentJsonFormatter` принимает разрешённые поля для операций, фаз, failure code и usage/cost. Корреляция по `operation_id`, `run_id`, `task_id`, UTC timestamp и монотонная длительность. `forge.http` продолжает использовать HTTP-схему. [Код logger](backend/app/core/logging.py) · [Agent event schema](backend/app/services/agent_observability.py).
+- Evidence PR #29 — 26 observability/HTTP cases (20 новых и 6 прежних HTTP), 164 связанные проверки, 150 PostgreSQL cases. 11 ручных случаев приняты по отчёту владельца. Step 10 подтвердил agent JSON в одном end-to-end flow с durable lifecycle. [Тесты HTTP](backend/tests/test_logging.py) · [Интеграционный тест](backend/tests/test_agent_service_integration.py).
+- Граница закрытия — agent events. BL-02 покрывает перенос HTTP request ID, BL-03 — Uvicorn access logs. Локальные operational logs не предоставляют durable recovery.
 
 ## BL-05 — Автоматические проверки GitHub
 - Type: improvement; Priority: medium; Status: open
@@ -35,6 +35,7 @@
 ## BL-06 — Предупреждение Starlette TestClient
 - Type: debt; Priority: low; Status: open
 - Context / Evidence: локальный pytest воспроизводит `StarletteDeprecationWarning` о `httpx` и `starlette.testclient`.
+- Step 10 — предупреждение не воспроизведено в текущем окружении с Starlette `1.9.0` и httpx `0.28.1`. Обычный suite и отдельный PostgreSQL HTTP/repository test завершились без pytest warnings. Зависимости не обновлялись, историческая запись сохраняется.
 - Target milestone: не определён.
 - Acceptance criteria: совместимый путь обновления зависимостей выбран и проверен; тесты проходят без этого предупреждения.
 

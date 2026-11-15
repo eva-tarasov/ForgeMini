@@ -2,7 +2,7 @@
 
 Минимальный FastAPI backend для проекта Forge. Требуется Python 3.11 или новее.
 
-Документация: [архитектура Week 1](docs/ARCHITECTURE.md), [учебное руководство Week 1](docs/LEARNING_GUIDE.md), [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md), [ADR-001](docs/adr/ADR-001.md), [backlog](backlog.md).
+Документация проекта — [архитектура Week 1](docs/ARCHITECTURE.md), [учебное руководство Week 1](docs/LEARNING_GUIDE.md), [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md), [учебное руководство Week 3](docs/LEARNING_GUIDE_WEEK3.md), [ADR-001](docs/adr/ADR-001.md), [ADR-002](docs/adr/ADR-002.md) и [backlog](backlog.md).
 Документ архитектуры описывает состояние Week 1; актуальный запуск PostgreSQL и API приведён ниже.
 
 ## Установка
@@ -126,6 +126,8 @@ FORGE_TEST_SCHEMA_DB="$TEST_DB" python -m pytest -q tests/test_schema_integratio
 Тесты схемы запускаются только при заданном `FORGE_TEST_SCHEMA_DB` с префиксом `forge_task03_` и откатывают свои строки. Тестовая база остаётся на месте; её удаление требует отдельного решения. `alembic check` дополняет, а не заменяет проверки ограничений в PostgreSQL.
 
 ## Данные исполнения агента
+
+`POST /tasks` создаёт и сохраняет Task. Внутренний `AgentService.execute_run(run_id)` принимает UUID уже существующего `queued` AgentRun. Финальный тест Week 3 вызывает настоящий `TaskService.create_task()`, затем явно создаёт связанный AgentRun в тестовом setup. Публичный API предоставляет работу с Task и Workspace. Scheduler, автоматическое создание AgentRun и HTTP-интерфейс запуска находятся за пределами текущей реализации. [Разбор полного прохода](docs/LEARNING_GUIDE_WEEK3.md#16-полный-проход-task--agentrun)
 
 Task описывает намерение, AgentRun — отдельную попытку исполнения: один Task может иметь несколько AgentRun. У AgentRun есть AgentEvent для структурированных событий, ToolCall для записи вызовов инструментов и Artifact со ссылкой на результат. Approval связан с ToolCall; для одного вызова допускается несколько согласований.
 
@@ -323,45 +325,98 @@ Caller владеет commit и rollback и держит короткую тра
 
 ## Тесты
 
-Из директории `backend` с активированным виртуальным окружением:
+Из `backend` запустите обычный pytest в проектном `.venv`. Отдельный subprocess изолирует PostgreSQL opt-ins от текущего shell.
 
 ```bash
-python -m pytest -q
-```
-
-Для opt-in проверки репозиториев создайте отдельную пустую базу из корня репозитория. Если `createdb` завершится ошибкой, остановитесь и выберите другое имя:
-
-```bash
-TEST_DB=forge_task04_$(date +%Y%m%d_%H%M%S)
-docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB"
-cd backend
-POSTGRES_DB="$TEST_DB" alembic upgrade head
-FORGE_TASK04_TEST_DB="$TEST_DB" python -m pytest -q tests/test_repository_integration.py
-```
-
-Тесты принимают только имя с префиксом `forge_task04_` и удаляют только записи с собранными во время теста ID. База остаётся на месте.
-
-### PostgreSQL integration tests для Step 06 и Step 07
-
-Создайте новую выделенную базу из корня репозитория при запущенном Compose. Существующую базу Step 07A сохраните для исторической проверки.
-
-```bash
-TEST_DB=forge_task06_week3_result_$(date +%Y%m%d_%H%M%S)
-docker compose exec -T postgres sh -c 'exec createdb -U "$POSTGRES_USER" "$1"' sh "$TEST_DB" &&
 (
-  cd backend || exit 1
-  export POSTGRES_DB="$TEST_DB" POSTGRES_HOST=127.0.0.1 FORGE_TASK06_TEST_DB="$TEST_DB"
-  .venv/bin/python -m alembic upgrade head &&
-  .venv/bin/python -m alembic current &&
-  .venv/bin/python -m alembic check &&
-  .venv/bin/python -m pytest -v \
-    tests/test_agent_result_persistence_integration.py \
-    tests/test_agent_event_append_integration.py \
-    tests/test_agent_service_integration.py \
-    tests/test_agent_run_integration.py \
-    tests/test_task_transition_integration.py \
-    tests/test_task_idempotency_integration.py
+  unset FORGE_TEST_POSTGRES FORGE_TEST_SCHEMA_DB FORGE_TASK04_TEST_DB FORGE_TASK05_TEST_DB FORGE_TASK06_TEST_DB
+  .venv/bin/python -m pip check &&
+  .venv/bin/python -m pytest -q -rs
 )
 ```
 
-`POSTGRES_DB` и `FORGE_TASK06_TEST_DB` должны совпадать, а имя должно соответствовать `forge_task06_[a-z0-9_]+`. Тесты результата проверяют revision `1d972cc34fbe`. Перед записью тесты сверяют `current_database()` и при очистке удаляют только созданные ими записи. Проверки конкуренции используют `READ COMMITTED` и подтверждают ожидание блокировки через `pg_blocking_pids()`.
+### Полная проверка PostgreSQL для Week 3
+
+Из корня репозитория проверьте локальный Compose и порт. Существующий `.env` задаёт пользователя и пароль PostgreSQL. Подставьте свой локальный порт, если он отличается от `55432`.
+
+```bash
+docker compose ps postgres
+docker compose port postgres 5432
+```
+
+Следующий блок создаёт четыре свежие базы для тестов и мигрирует каждую к `1d972cc34fbe (head)`. `createdb` использует системную базу `postgres` как maintenance database. Если имя уже занято, команда останавливает блок. Базы и volume после проверки сохраняются. Для повторного Step 10 используйте существующие имена из таблицы ниже и пропустите создание. Сначала проверьте имя базы, isolation и revision.
+
+```bash
+(
+  set -e
+  stamp=$(date -u +%Y%m%d_%H%M%S)
+  task_schema_db="forge_task03_week3_final_$stamp"
+  repository_db="forge_task04_week3_final_$stamp"
+  execution_schema_db="forge_task05_week3_final_$stamp"
+  lifecycle_db="forge_task06_week3_result_$stamp"
+  export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=55432
+  export LANGSMITH_TRACING=false LANGSMITH_TRACING_V2=false
+  export LANGCHAIN_TRACING=false LANGCHAIN_TRACING_V2=false LANGCHAIN_HANDLER=false
+  unset FORGE_TEST_POSTGRES FORGE_TEST_SCHEMA_DB FORGE_TASK04_TEST_DB FORGE_TASK05_TEST_DB FORGE_TASK06_TEST_DB
+
+  for test_database in "$task_schema_db" "$repository_db" "$execution_schema_db" "$lifecycle_db"; do
+    docker compose exec -T postgres sh -ec \
+      'exec createdb --maintenance-db=postgres -U "$POSTGRES_USER" "$1"' sh "$test_database"
+    (
+      cd backend
+      POSTGRES_DB="$test_database" .venv/bin/python -m alembic upgrade head
+    )
+    docker compose exec -T postgres sh -ec \
+      'exec psql -U "$POSTGRES_USER" -d "$1" -v ON_ERROR_STOP=1 -c "SELECT current_database(); SHOW transaction_isolation; SHOW server_version;"' \
+      sh "$test_database"
+    (
+      cd backend
+      POSTGRES_DB="$test_database" .venv/bin/python -m alembic current
+      POSTGRES_DB="$test_database" .venv/bin/python -m alembic check
+    )
+  done
+
+  cd backend
+  POSTGRES_DB="$lifecycle_db" FORGE_TASK06_TEST_DB="$lifecycle_db" \
+    .venv/bin/python -m pytest -v \
+      tests/test_agent_service_integration.py \
+      tests/test_agent_result_persistence_integration.py \
+      tests/test_agent_event_append_integration.py \
+      tests/test_agent_run_integration.py \
+      tests/test_task_transition_integration.py \
+      tests/test_task_idempotency_integration.py
+
+  POSTGRES_DB="$lifecycle_db" FORGE_TEST_POSTGRES=1 \
+    .venv/bin/python -m pytest -v tests/test_postgres_integration.py
+  POSTGRES_DB="$task_schema_db" FORGE_TEST_SCHEMA_DB="$task_schema_db" \
+    .venv/bin/python -m pytest -v tests/test_schema_integration.py
+  POSTGRES_DB="$repository_db" FORGE_TASK04_TEST_DB="$repository_db" \
+    .venv/bin/python -m pytest -v tests/test_repository_integration.py
+  POSTGRES_DB="$execution_schema_db" FORGE_TASK05_TEST_DB="$execution_schema_db" \
+    .venv/bin/python -m pytest -v tests/test_execution_schema_integration.py
+)
+```
+
+У всех наборов свои opt-ins. Для `FORGE_TASK05_TEST_DB` и `FORGE_TASK06_TEST_DB` обязательно совпадение с `POSTGRES_DB`. Schema tests откатывают записи, а lifecycle и repository tests чистят созданные ими записи по UUID. Проверки конкуренции используют `READ COMMITTED` и подтверждают ожидание блокировки через `pg_blocking_pids()`.
+
+| Группа | Выделенная база Step 10 | Итог |
+|---|---|---:|
+| Lifecycle, результат, события, переходы и idempotency | `forge_task06_week3_result_20261114_123241` | 151 passed |
+| Engine и session | `forge_task06_week3_result_20261114_123241` | 2 passed |
+| Task schema и rollback | `forge_task03_week3_final_20261115_161856` | 2 passed |
+| HTTP/repository lifecycle и rollback | `forge_task04_week3_final_20261115_161856` | 1 passed |
+| Execution schema и rollback | `forge_task05_week3_final_20261115_161856` | 1 passed |
+
+В Step 10 все четыре базы подтвердили PostgreSQL 17.11, `READ COMMITTED`, `alembic current` на `1d972cc34fbe (head)` и `alembic check` без новых операций. Обычный прогон дал `749 passed, 157 skipped` с opt-ins выключенными. Все 157 покрыты отдельными прогонами. Суммарно 906 уникальных случаев, 0 итоговых failures и 0 pytest warnings.
+
+#### Повторить только E2E
+
+Из `backend` выполните одну команду с уже мигрированной выделенной базой Step 10. Тест использует настоящие TaskService, StateGraph и ChatOpenAI, а HTTPX MockTransport отвечает синтетическими данными. Тест проверяет durable result, history и usage через новый engine. Внешняя отправка модели и tracing в этом тесте отключены.
+
+```bash
+POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=55432 \
+POSTGRES_DB=forge_task06_week3_result_20261114_123241 \
+FORGE_TASK06_TEST_DB=forge_task06_week3_result_20261114_123241 \
+.venv/bin/python -m pytest -v \
+  tests/test_agent_service_integration.py::test_week3_task_to_agent_run_end_to_end
+```

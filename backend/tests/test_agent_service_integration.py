@@ -1,6 +1,7 @@
 """Opt-in lifecycle tests against a dedicated, already migrated PostgreSQL database."""
 
 import asyncio
+import json
 import os
 import re
 from contextlib import asynccontextmanager
@@ -10,9 +11,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec
 from uuid import uuid4
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import Runnable
+from langchain_openai import ChatOpenAI
 from langsmith import tracing_context
 from model_test_support import TRACING_OFF
 from sqlalchemy import delete, select, text
@@ -20,17 +23,20 @@ from sqlalchemy.exc import IntegrityError
 from test_agent_observability import agent_log_capture, assert_agent_operation, read_agent_logs
 
 from app.agent_runtime.agent_graph import create_agent_graph
-from app.agent_runtime.fixture_tools import read_fixture
+from app.agent_runtime.fixture_tools import create_tool_calling_model, read_fixture
 from app.agent_runtime.langgraph_runner import LangGraphAgentRunner
-from app.agent_runtime.structured_output import TaskAnalysis
+from app.agent_runtime.structured_output import TaskAnalysis, create_structured_task_model
 from app.agent_runtime.usage_capture import invoke_observed_model
 from app.core.settings import Settings
 from app.db.models import AgentEventModel, AgentRunModel, TaskModel, WorkspaceModel
 from app.db.session import create_engine, create_session_factory
 from app.domain.execution import AgentRunStatus as Status
 from app.domain.transitions import InvalidAgentRunTransition
+from app.domain.workspace import Workspace
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
+from app.repositories.tasks import TaskRepository
+from app.repositories.workspaces import WorkspaceRepository
 from app.services.active_runs import ActiveRunRegistry
 from app.services.agent_cost import AgentPricing, CostStatus, ModelTariff
 from app.services.agent_failure import AgentFailure, AgentFailureCode, AgentFailureContractError, RetryDisposition
@@ -42,6 +48,7 @@ from app.services.agent_runs import (
     AgentRunResultAlreadyRecordedError,
     AgentRunService,
     StaleAgentRunStatusError,
+    VerificationEvidenceRequiredError,
 )
 from app.services.agent_service import AgentService, AgentUsagePersistenceError
 from app.services.agent_usage import (
@@ -53,6 +60,7 @@ from app.services.agent_usage import (
     UsageStatus,
 )
 from app.services.agent_usage_codec import AgentUsageContractError, AgentUsageRecord, encode_agent_usage
+from app.services.tasks import TaskService
 
 
 pytestmark = pytest.mark.skipif(
@@ -84,28 +92,40 @@ def database():
     settings = Settings(postgres_db=name)
 
     @asynccontextmanager
-    async def seeded(initial):
+    async def seeded(initial, *, use_task_service):
         engine = create_engine(settings)
         factory = create_session_factory(engine)
-        workspace_id, task_id, run_id = uuid4(), uuid4(), uuid4()
-        request = AgentRunRequest(task_id, run_id, GOAL, CRITERIA)
+        workspace_id, run_id = uuid4(), uuid4()
+        task_id = None
         seeded = False
         try:
             async with asyncio.timeout(30):
                 async with factory() as session:
                     assert await session.scalar(text("SELECT current_database()")) == name
-                    session.add(WorkspaceModel(id=workspace_id, name="synthetic agent service"))
-                    await session.flush()
-                    session.add(TaskModel(
-                        id=task_id, workspace_id=workspace_id, goal=GOAL,
-                        acceptance_criteria=list(CRITERIA), status="queued",
-                    ))
-                    await session.flush()
+                    if use_task_service:
+                        workspaces = WorkspaceRepository(session)
+                        await workspaces.add(Workspace(workspace_id, "synthetic agent service"))
+                        await session.flush()
+                        seeded = True  # TaskService commits the workspace and the task.
+                        tasks = TaskService(session, TaskRepository(session), workspaces)
+                        task = await tasks.create_task(workspace_id, GOAL, list(CRITERIA))
+                        task_id = task.id
+                        assert (task.workspace_id, task.goal, task.acceptance_criteria) == (workspace_id, GOAL, CRITERIA)
+                        assert await session.scalar(select(AgentRunModel.id).where(AgentRunModel.task_id == task_id)) is None
+                    else:
+                        task_id = uuid4()
+                        session.add(WorkspaceModel(id=workspace_id, name="synthetic agent service"))
+                        await session.flush()
+                        session.add(TaskModel(
+                            id=task_id, workspace_id=workspace_id, goal=GOAL,
+                            acceptance_criteria=list(CRITERIA), status="queued",
+                        ))
+                        await session.flush()
                     session.add(AgentRunModel(id=run_id, task_id=task_id, attempt_number=1, status=initial.value))
                     await session.flush()
                     seeded = True  # Clean these IDs even if the commit outcome is uncertain.
                     await session.commit()
-                yield factory, request, workspace_id
+                yield factory, AgentRunRequest(task_id, run_id, GOAL, CRITERIA), workspace_id
         finally:
             try:
                 if seeded:
@@ -113,14 +133,16 @@ def database():
                         assert await session.scalar(text("SELECT current_database()")) == name
                         await session.execute(delete(AgentEventModel).where(AgentEventModel.agent_run_id == run_id))
                         await session.execute(delete(AgentRunModel).where(AgentRunModel.id == run_id))
-                        await session.execute(delete(TaskModel).where(TaskModel.id == task_id))
+                        # If create_task did not return, the commit may still have succeeded.
+                        task_filter = TaskModel.workspace_id == workspace_id if task_id is None else TaskModel.id == task_id
+                        await session.execute(delete(TaskModel).where(task_filter))
                         await session.execute(delete(WorkspaceModel).where(WorkspaceModel.id == workspace_id))
             finally:
                 await asyncio.wait_for(engine.dispose(), timeout=10)
 
-    def run(scenario, *, initial=Status.QUEUED):
+    def run(scenario, *, initial=Status.QUEUED, use_task_service=False):
         async def check():
-            async with seeded(initial) as data:
+            async with seeded(initial, use_task_service=use_task_service) as data:
                 await scenario(*data)
 
         asyncio.run(check())
@@ -2049,3 +2071,159 @@ def test_agent_service_observability_records_real_graph(case, database, monkeypa
         ))
 
     database(check)
+
+
+def test_week3_task_to_agent_run_end_to_end(database, monkeypatch, agent_log_capture):
+    settings = Settings(postgres_db=os.environ["FORGE_TASK06_TEST_DB"])
+    api_key = "synthetic-week3-openai-key"
+    base_url = "https://forge-week3.invalid/v1"
+    research_text = "The synthetic fixture describes workspace scope."
+    analysis = TaskAnalysis(
+        summary="Preliminary analysis of synthetic workspace scope",
+        relevant_components=["task_service"],
+        assumptions=["Live repository behavior remains unverified."],
+        blocked_reason=None,
+    )
+    replies = (
+        ("tool_calls", {"content": None, "tool_calls": [{
+            "id": "fixture-1", "type": "function",
+            "function": {"name": "read_fixture", "arguments": '{"component":"task_service"}'},
+        }]}),
+        ("stop", {"content": research_text}),
+        ("stop", {"content": analysis.model_dump_json()}),
+    )
+    calls = []
+    fixture = AsyncMock(wraps=read_fixture.coroutine)
+
+    @wraps(read_fixture.coroutine)
+    async def observe_fixture(**kwargs):
+        return await fixture(**kwargs)
+
+    monkeypatch.setattr(read_fixture, "coroutine", observe_fixture)
+    for name in ("OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID"):
+        monkeypatch.delenv(name, raising=False)
+
+    def respond(http_request):
+        assert http_request.method == "POST"
+        assert http_request.url == httpx.URL(f"{base_url}/chat/completions")
+        assert http_request.headers["authorization"] == f"Bearer {api_key}"
+        assert len(calls) < len(replies)
+        finish_reason, message = replies[len(calls)]
+        tokens = TRAINING_TOKENS[len(calls)]
+        calls.append(json.loads(http_request.content))
+        return httpx.Response(200, json={
+            "id": f"chatcmpl-week3-{len(calls)}", "object": "chat.completion", "created": 1, "model": "gpt-4o-mini",
+            "choices": [{"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", **message}}],
+            "usage": {
+                "prompt_tokens": tokens.input_tokens,
+                "completion_tokens": tokens.output_tokens,
+                "total_tokens": tokens.total_tokens,
+                "prompt_tokens_details": {"cached_tokens": tokens.cached_input_tokens},
+                "completion_tokens_details": {"reasoning_tokens": tokens.reasoning_tokens},
+            },
+        })
+
+    async def check(_setup_factory, request, workspace_id):
+        transport = httpx.MockTransport(respond)
+        execution_engine = create_engine(settings)
+        try:
+            with httpx.Client(transport=transport, trust_env=False) as sync_client:
+                async with httpx.AsyncClient(transport=transport, trust_env=False) as async_client:
+                    model = ChatOpenAI(
+                        model="gpt-4o-mini", api_key=api_key, base_url=base_url,
+                        openai_proxy="", use_responses_api=False, max_retries=0,
+                        http_client=sync_client, http_async_client=async_client,
+                    )
+                    graph = create_agent_graph(create_tool_calling_model(model), create_structured_task_model(model))
+                    runner = LangGraphAgentRunner(graph)
+                    run = AsyncMock(wraps=runner.run)
+                    monkeypatch.setattr(runner, "run", run)
+                    registry = ActiveRunRegistry()
+                    service = AgentService(
+                        create_session_factory(execution_engine), runner, active_runs=registry,
+                        pricing=TRAINING_PRICING, execution_timeout_seconds=10,
+                    )
+                    result = await service.execute_run(request.run_id)
+        finally:
+            await asyncio.wait_for(execution_engine.dispose(), timeout=5)
+
+        run.assert_awaited_once_with(request)
+        assert request.run_id not in registry
+        fixture.assert_awaited_once_with(component="task_service")
+        assert len(calls) == 3
+        research, continued, finalization = calls
+        assert [tool["function"]["name"] for tool in research["tools"]] == ["read_fixture"]
+        assert json.loads(research["messages"][-1]["content"]) == {
+            "goal": request.goal, "acceptance_criteria": list(request.acceptance_criteria),
+        }
+        assert continued["messages"][-1] == {"role": "tool", "content": FIXTURE_TEXT, "tool_call_id": "fixture-1"}
+        assert finalization["response_format"]["type"] == "json_schema"
+        assert not finalization.get("tools")
+        assert json.loads(finalization["messages"][-1]["content"]) == {
+            "goal": request.goal, "acceptance_criteria": list(request.acceptance_criteria),
+            "analysis_notes": [research_text],
+            "observations": [{
+                "source": "synthetic_fixture", "tool_name": "read_fixture", "component": "task_service",
+                "tool_call_id": "fixture-1", "content": FIXTURE_TEXT,
+            }],
+        }
+        assert result == AgentFinalResult(
+            status="ready_for_verification", summary=analysis.summary,
+            relevant_components=("task_service",), assumptions=tuple(analysis.assumptions),
+            observations=(FixtureObservation(
+                component="task_service", tool_call_id="fixture-1", content=FIXTURE_TEXT,
+            ),),
+            blocked_reason=None,
+        )
+
+        rows, = read_agent_logs(agent_log_capture).values()
+        assert_agent_operation(rows, "execute", request.run_id, [
+            ("claim", "completed"), ("runner", "completed"), ("result_validation", "completed"),
+            ("result_persistence", "completed"), ("usage_persistence", "completed"),
+        ], task_id=request.task_id)
+        assert all(row["level"] == "INFO" for row in rows)
+        usage_log, = [row for row in rows if row["event"] == "agent_usage_observed"]
+        assert rows[rows.index(usage_log) + 1]["phase"] == "usage_persistence"
+        assert {key: usage_log[key] for key in (
+            "model_calls_started", "reported_calls", "unknown_usage_calls", "known_input_tokens", "known_output_tokens",
+            "known_total_tokens", "usage_complete", "priced_calls", "unknown_cost_calls", "known_cost_usd", "cost_complete",
+        )} == {
+            "model_calls_started": 3, "reported_calls": 3, "unknown_usage_calls": 0, "known_input_tokens": 71,
+            "known_output_tokens": 29, "known_total_tokens": 100, "usage_complete": True, "priced_calls": 3,
+            "unknown_cost_calls": 0, "known_cost_usd": "0.0003425", "cost_complete": True,
+        }
+        logs = agent_log_capture.getvalue()
+        assert all(value not in logs for value in (
+            api_key, base_url, GOAL, *CRITERIA, research_text, analysis.summary, *analysis.assumptions,
+            FIXTURE_TEXT, "fixture-1", "task_service", "training-v1", "synthetic-model", "gpt-4o-mini", "succeeded",
+        ))
+
+        reading_engine = create_engine(settings)
+        try:
+            factory = create_session_factory(reading_engine)
+            unused = SimpleNamespace(run=AsyncMock())
+            reader = AgentService(factory, unused)
+            assert await reader.get_run_result(request.run_id) == result
+            assert await reader.get_run_failure(request.run_id) is None
+            usage = await reader.get_run_usage(request.run_id)
+            assert usage == _training_usage(request)
+            snapshot = usage.snapshot
+            assert snapshot.usage_complete and snapshot.reported_calls == 3
+            assert (snapshot.known_input_tokens, snapshot.known_output_tokens, snapshot.known_total_tokens) == (71, 29, 100)
+            assert sum(call.tokens.cached_input_tokens for call in snapshot.calls) == 21
+            assert sum(call.tokens.reasoning_tokens for call in snapshot.calls) == 14
+            assert usage.cost_estimate.cost_complete
+            assert usage.cost_estimate.known_cost_usd == Decimal("0.00034250")
+            async with factory() as session:
+                with pytest.raises(VerificationEvidenceRequiredError):
+                    await AgentRunService(session).transition_status(request.run_id, Status.VERIFYING, Status.SUCCEEDED)
+            await _assert_persisted(
+                factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING),
+                result=result, usage=usage,
+            )
+            unused.run.assert_not_called()
+            assert len(calls) == 3 and agent_log_capture.getvalue() == logs
+        finally:
+            await asyncio.wait_for(reading_engine.dispose(), timeout=5)
+
+    database(check, use_task_service=True)

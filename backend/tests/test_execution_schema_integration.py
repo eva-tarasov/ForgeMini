@@ -6,7 +6,7 @@ import re
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import DateTime, delete, inspect, insert, null, select
+from sqlalchemy import DateTime, delete, inspect, insert, null, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 
@@ -30,6 +30,8 @@ def test_execution_schema_and_constraints():
             async with engine.connect() as conn:
                 transaction = await conn.begin()
                 try:
+                    assert await conn.scalar(text("SELECT current_database()")) == DB
+
                     def inspect_schema(sync_conn):
                         inspector = inspect(sync_conn)
                         names = {"agent_runs", "agent_events", "tool_calls", "approvals", "artifacts"}
@@ -37,9 +39,10 @@ def test_execution_schema_and_constraints():
                         parents = {"agent_runs": ("task_id", "tasks"), "agent_events": ("agent_run_id", "agent_runs"),
                                    "tool_calls": ("agent_run_id", "agent_runs"), "approvals": ("tool_call_id", "tool_calls"),
                                    "artifacts": ("agent_run_id", "agent_runs")}
+                        nullable_columns = {"agent_runs": {"final_result"}, "approvals": {"decided_at"}}
                         for table, (column, target) in parents.items():
                             cols = inspector.get_columns(table)
-                            assert all(not c["nullable"] for c in cols if c["name"] != "decided_at")
+                            assert {c["name"] for c in cols if c["nullable"]} == nullable_columns.get(table, set())
                             timestamps = [c for c in cols if c["name"] in ("created_at", "requested_at", "decided_at")]
                             assert all(isinstance(c["type"], DateTime) and c["type"].timezone for c in timestamps)
                             assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"]
@@ -54,12 +57,22 @@ def test_execution_schema_and_constraints():
                             assert inspector.get_check_constraints(table)
                         payload_column = next(c for c in inspector.get_columns("agent_events") if c["name"] == "payload")
                         assert isinstance(payload_column["type"], JSONB)
+                        final_result = next(c for c in inspector.get_columns("agent_runs") if c["name"] == "final_result")
+                        assert isinstance(final_result["type"], JSONB)
+                        assert "ck_agent_runs_final_result_object" in {
+                            c["name"] for c in inspector.get_check_constraints("agent_runs")
+                        }
 
                     await conn.run_sync(inspect_schema)
                     workspace, task, run, tool = uuid4(), uuid4(), uuid4(), uuid4()
                     await conn.execute(insert(WorkspaceModel).values(id=workspace, name="synthetic"))
                     await conn.execute(insert(TaskModel).values(id=task, workspace_id=workspace, goal="synthetic", acceptance_criteria=["ok"]))
-                    await conn.execute(insert(AgentRunModel).values(id=run, task_id=task, attempt_number=1, status="queued"))
+                    await conn.execute(insert(AgentRunModel).values(
+                        id=run, task_id=task, attempt_number=1, status="queued", final_result=null()
+                    ))
+                    assert await conn.scalar(
+                        select(AgentRunModel.final_result.is_(None)).where(AgentRunModel.id == run)
+                    ) is True
                     await conn.execute(insert(AgentRunModel).values(id=uuid4(), task_id=task, attempt_number=2, status="running"))
                     event = uuid4()
                     payload = {"synthetic": [1, "example"]}
@@ -92,6 +105,8 @@ def test_execution_schema_and_constraints():
                         await rejected(insert(AgentRunModel).values(**run_values(attempt_number=value)), "23514")
                         await rejected(insert(AgentEventModel).values(**event_values(sequence=value)), "23514")
                     await rejected(insert(AgentRunModel).values(**run_values(status="invalid")), "23514")
+                    for value in ([], "synthetic", JSONB.NULL):
+                        await rejected(insert(AgentRunModel).values(**run_values(final_result=value)), "23514")
                     await rejected(insert(ToolCallModel).values(id=uuid4(), agent_run_id=run, tool_name="x", status="invalid"), "23514")
                     await rejected(insert(ApprovalModel).values(id=uuid4(), tool_call_id=tool, status="invalid"), "23514")
                     await rejected(insert(AgentRunModel).values(**run_values(status=None)), "23502")
