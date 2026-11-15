@@ -4,13 +4,14 @@ import asyncio
 import os
 import re
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from functools import wraps
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langsmith import tracing_context
 from model_test_support import TRACING_OFF
@@ -21,6 +22,7 @@ from app.agent_runtime.agent_graph import create_agent_graph
 from app.agent_runtime.fixture_tools import read_fixture
 from app.agent_runtime.langgraph_runner import LangGraphAgentRunner
 from app.agent_runtime.structured_output import TaskAnalysis
+from app.agent_runtime.usage_capture import invoke_observed_model
 from app.core.settings import Settings
 from app.db.models import AgentEventModel, AgentRunModel, TaskModel, WorkspaceModel
 from app.db.session import create_engine, create_session_factory
@@ -29,6 +31,7 @@ from app.domain.transitions import InvalidAgentRunTransition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.services.active_runs import ActiveRunRegistry
+from app.services.agent_cost import AgentPricing, CostStatus, ModelTariff
 from app.services.agent_failure import AgentFailure, AgentFailureCode, AgentFailureContractError, RetryDisposition
 from app.services.agent_result import AgentFinalResult, FixtureObservation
 from app.services.agent_result_codec import encode_agent_result
@@ -39,7 +42,16 @@ from app.services.agent_runs import (
     AgentRunService,
     StaleAgentRunStatusError,
 )
-from app.services.agent_service import AgentService
+from app.services.agent_service import AgentService, AgentUsagePersistenceError
+from app.services.agent_usage import (
+    AgentUsageSnapshot,
+    ModelCallOutcome,
+    ModelCallStage,
+    ModelCallUsage,
+    TokenUsage,
+    UsageStatus,
+)
+from app.services.agent_usage_codec import AgentUsageContractError, AgentUsageRecord, encode_agent_usage
 
 
 pytestmark = pytest.mark.skipif(
@@ -126,7 +138,7 @@ def _result(*, blocker=None, observations=()):
     )
 
 
-async def _assert_persisted(factory, request, workspace_id, status, *edges, result=None, failure=None):
+async def _assert_persisted(factory, request, workspace_id, status, *edges, result=None, failure=None, usage=None):
     async with factory() as session:
         task = await session.get(TaskModel, request.task_id)
         run = await session.get(AgentRunModel, request.run_id)
@@ -154,6 +166,8 @@ async def _assert_persisted(factory, request, workspace_id, status, *edges, resu
             expected.insert(index, ("agent_result_recorded", {"schema_version": 1, "result_status": result.status}))
         if failure is not None:
             expected.insert(-1, ("agent_execution_failed", {"schema_version": 1, "code": failure.value}))
+        if usage is not None:
+            expected.append(("agent_usage_recorded", encode_agent_usage(usage)))
         assert [
             (event.sequence, event.event_type, event.payload) for event in events
         ] == [
@@ -162,6 +176,24 @@ async def _assert_persisted(factory, request, workspace_id, status, *edges, resu
 
 
 CLAIM = (Status.QUEUED, Status.RUNNING)
+
+
+def _usage_record(request, *calls, pricing=AgentPricing()):
+    return AgentUsageRecord(AgentUsageSnapshot(request.run_id, calls), pricing)
+
+
+def _unknown_graph_usage(request, *, cancelled_phase=None):
+    stages = (ModelCallStage.RESEARCH, ModelCallStage.RESEARCH, ModelCallStage.FINALIZATION)
+    if cancelled_phase == "research":
+        stages = stages[:1]
+    return _usage_record(request, *(
+        ModelCallUsage(
+            number, stage,
+            ModelCallOutcome.CANCELLED if cancelled_phase and number == len(stages) else ModelCallOutcome.RETURNED,
+            UsageStatus.MISSING, None,
+        )
+        for number, stage in enumerate(stages, 1)
+    ))
 
 
 @pytest.mark.parametrize("blocker,target", [(None, Status.VERIFYING), ("Нужны данные", Status.FAILED)])
@@ -474,7 +506,8 @@ def test_agent_service_executes_real_graph(database, monkeypatch):
         execution.assert_awaited_once_with(component="task_service")
         finalizer.ainvoke.assert_awaited_once()
         await _assert_persisted(
-            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING), result=result
+            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING),
+            result=result, usage=_unknown_graph_usage(request),
         )
 
     database(check)
@@ -541,6 +574,7 @@ def test_agent_service_deadline_cancels_graph(database, monkeypatch, phase):
         await _assert_persisted(
             factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
             failure=AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED,
+            usage=_unknown_graph_usage(request, cancelled_phase=phase),
         )
 
     database(check)
@@ -974,7 +1008,10 @@ def test_agent_service_cancel_stops_active_graph(database, monkeypatch, phase):
             finalizer.ainvoke.assert_awaited_once()
         assert request.run_id not in registry
         assert await service.get_run_failure(request.run_id) is None
-        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled)
+        await _assert_persisted(
+            factory, request, workspace_id, Status.CANCELLED, CLAIM, cancelled,
+            usage=_unknown_graph_usage(request, cancelled_phase=phase),
+        )
 
     database(check)
 
@@ -1344,6 +1381,518 @@ def test_agent_service_serializes_concurrent_cancellation_and_signals_once(datab
         assert request.run_id not in registry
         await _assert_persisted(
             factory, request, workspace_id, Status.CANCELLED, CLAIM, (Status.RUNNING, Status.CANCELLED),
+        )
+
+    database(check)
+
+
+TRAINING_TARIFF = ModelTariff("openai", "synthetic-model", "training-v1", Decimal("2.00"), Decimal("8.00"), Decimal("0.50"))
+TRAINING_PRICING = AgentPricing(TRAINING_TARIFF, TRAINING_TARIFF)
+TRAINING_TOKENS = (TokenUsage(12, 8, 20, 4, 2), TokenUsage(24, 10, 34, 7, 3), TokenUsage(35, 11, 46, 10, 9))
+
+
+def _reported_usage_call(number, stage, tokens):
+    return ModelCallUsage(number, stage, ModelCallOutcome.RETURNED, UsageStatus.REPORTED, tokens)
+
+
+def _training_usage(request, *, interrupted=False):
+    calls = tuple(_reported_usage_call(number, ModelCallStage.RESEARCH, tokens)
+                  for number, tokens in enumerate(TRAINING_TOKENS[:2], 1))
+    final_stage = ModelCallStage.FINALIZATION
+    final = (
+        ModelCallUsage(3, final_stage, ModelCallOutcome.CANCELLED, UsageStatus.MISSING, None)
+        if interrupted else _reported_usage_call(3, final_stage, TRAINING_TOKENS[2])
+    )
+    return _usage_record(request, *calls, final, pricing=TRAINING_PRICING)
+
+
+def _usage_message(content, tokens, **kwargs):
+    return AIMessage(content=content, usage_metadata={
+        "input_tokens": tokens.input_tokens,
+        "output_tokens": tokens.output_tokens,
+        "total_tokens": tokens.total_tokens,
+        "input_token_details": {"cache_read": tokens.cached_input_tokens},
+        "output_token_details": {"reasoning": tokens.reasoning_tokens},
+    }, **kwargs)
+
+
+def _training_usage_graph(*, blocker=None, failure=None, finalizer_call=None):
+    research = create_autospec(Runnable, instance=True)
+    research.ainvoke.side_effect = [
+        _usage_message("", TRAINING_TOKENS[0], tool_calls=[{
+            "name": "read_fixture", "id": "fixture-1", "args": {"component": "task_service"},
+        }]),
+        _usage_message("Synthetic fixture read.", TRAINING_TOKENS[1]),
+    ]
+    finalizer = create_autospec(Runnable, instance=True)
+    if finalizer_call is None:
+        finalizer.ainvoke.return_value = {
+            "raw": _usage_message("", TRAINING_TOKENS[2]),
+            "parsed": TaskAnalysis(
+                summary=" " if failure == "validation" else "Предварительный анализ",
+                relevant_components=[], assumptions=[], blocked_reason=blocker,
+            ) if failure != "parsing" else None,
+            "parsing_error": ValueError("Synthetic private parsing detail") if failure == "parsing" else None,
+        }
+    else:
+        finalizer.ainvoke.side_effect = finalizer_call
+    return LangGraphAgentRunner(create_agent_graph(research, finalizer)), research, finalizer
+
+
+def test_agent_service_usage_persists_across_engines(database, monkeypatch):
+    async def check(_factory, request, workspace_id):
+        original = read_fixture.coroutine
+        fixture = AsyncMock(wraps=original)
+
+        @wraps(original)
+        async def observe(**kwargs):
+            return await fixture(**kwargs)
+
+        monkeypatch.setattr(read_fixture, "coroutine", observe)
+        runner, research, finalizer = _training_usage_graph()
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        settings = Settings(postgres_db=os.environ["FORGE_TASK06_TEST_DB"])
+        writing_engine = create_engine(settings)
+        try:
+            writer = AgentService(create_session_factory(writing_engine), runner, pricing=TRAINING_PRICING)
+            result = await writer.execute_run(request.run_id)
+        finally:
+            await asyncio.wait_for(writing_engine.dispose(), timeout=5)
+
+        assert result == _result(observations=(
+            FixtureObservation(component="task_service", tool_call_id="fixture-1", content=FIXTURE_TEXT),
+        ))
+        run.assert_awaited_once_with(request)
+        fixture.assert_awaited_once_with(component="task_service")
+        assert research.ainvoke.await_count == 2
+        assert isinstance(research.ainvoke.await_args.args[0][-1], ToolMessage)
+        finalizer.ainvoke.assert_awaited_once()
+
+        reading_engine = create_engine(settings)
+        try:
+            factory = create_session_factory(reading_engine)
+            unused_runner = SimpleNamespace(run=AsyncMock())
+            reader = AgentService(factory, unused_runner)
+            usage = await reader.get_run_usage(request.run_id)
+            assert usage == _training_usage(request)
+            assert usage.pricing.research.tariff_version == usage.pricing.finalization.tariff_version == "training-v1"
+            assert (usage.snapshot.known_input_tokens, usage.snapshot.known_output_tokens, usage.snapshot.known_total_tokens) == (
+                71, 29, 100,
+            )
+            assert usage.cost_estimate.cost_complete and usage.cost_estimate.known_cost_usd == Decimal("0.00034250")
+            assert await reader.get_run_result(request.run_id) == result
+            unused_runner.run.assert_not_called()
+            await _assert_persisted(
+                factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING),
+                result=result, usage=usage,
+            )
+        finally:
+            await asyncio.wait_for(reading_engine.dispose(), timeout=5)
+
+    database(check)
+
+
+@pytest.mark.parametrize("case", ["blocked", "parsing", "validation"])
+def test_agent_service_usage_survives_blocked_or_failed_graph(database, monkeypatch, case):
+    async def check(factory, request, workspace_id):
+        runner, research, finalizer = _training_usage_graph(
+            blocker="Synthetic blocker" if case == "blocked" else None, failure=case,
+        )
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        service = AgentService(factory, runner, pricing=TRAINING_PRICING)
+        if case == "blocked":
+            result = await service.execute_run(request.run_id)
+            assert result.status == "blocked" and result.blocked_reason == "Synthetic blocker"
+            assert await service.get_run_result(request.run_id) == result
+            assert await service.get_run_failure(request.run_id) is None
+            code = None
+        else:
+            with pytest.raises(AgentRunnerError, match="^structured_output_invalid$"):
+                await service.execute_run(request.run_id)
+            result = None
+            code = AgentFailureCode.STRUCTURED_OUTPUT_INVALID
+            assert await service.get_run_failure(request.run_id) == AgentFailure(code)
+        usage = await service.get_run_usage(request.run_id)
+        assert usage == _training_usage(request)
+        assert usage.cost_estimate.cost_complete and usage.cost_estimate.known_cost_usd == Decimal("0.00034250")
+        run.assert_awaited_once_with(request)
+        assert research.ainvoke.await_count == 2
+        finalizer.ainvoke.assert_awaited_once()
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
+            result=result, failure=code, usage=usage,
+        )
+
+    database(check)
+
+
+@pytest.mark.parametrize("interruption", ["explicit", "external", "deadline"])
+def test_agent_service_usage_survives_cancellation(database, monkeypatch, interruption):
+    async def check(factory, request, workspace_id):
+        started, cleaned = asyncio.Event(), asyncio.Event()
+        observed_states = []
+
+        async def finalizer_call(_messages):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                async with factory() as session:
+                    run = await session.get(AgentRunModel, request.run_id)
+                    observed_states.append(run.status)
+                raise
+            finally:
+                cleaned.set()
+
+        runner, research, finalizer = _training_usage_graph(finalizer_call=finalizer_call)
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        registry = ActiveRunRegistry()
+        service = AgentService(
+            factory, runner, active_runs=registry, pricing=TRAINING_PRICING,
+            execution_timeout_seconds=0.5 if interruption == "deadline" else 60,
+        )
+        execution = asyncio.create_task(service.execute_run(request.run_id))
+        try:
+            async with asyncio.timeout(8):
+                await started.wait()
+                if interruption == "explicit":
+                    await service.cancel_run(request.run_id)
+                elif interruption == "external":
+                    execution.cancel()
+                if interruption == "deadline":
+                    with pytest.raises(AgentRunnerError, match="^execution_deadline_exceeded$"):
+                        await execution
+                else:
+                    with pytest.raises(asyncio.CancelledError):
+                        await execution
+                await cleaned.wait()
+        finally:
+            await _cancel_and_join(execution)
+
+        expected_status = {"explicit": Status.CANCELLED, "external": Status.RUNNING, "deadline": Status.FAILED}
+        target = expected_status[interruption]
+        code = AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED if interruption == "deadline" else None
+        if interruption == "explicit":
+            assert observed_states == ["cancelled"]
+        assert await service.get_run_failure(request.run_id) == (AgentFailure(code) if code is not None else None)
+        assert request.run_id not in registry
+        run.assert_awaited_once_with(request)
+        assert research.ainvoke.await_count == 2
+        finalizer.ainvoke.assert_awaited_once()
+        usage = await service.get_run_usage(request.run_id)
+        assert usage == _training_usage(request, interrupted=True)
+        assert usage.snapshot.known_total_tokens == 54 and not usage.snapshot.usage_complete
+        cost = usage.cost_estimate
+        assert cost.known_cost_usd == Decimal("0.0001995") and not cost.cost_complete
+        assert cost.calls[-1].status is CostStatus.USAGE_UNKNOWN
+        edges = (CLAIM,) if target is Status.RUNNING else (CLAIM, (Status.RUNNING, target))
+        await _assert_persisted(factory, request, workspace_id, target, *edges, failure=code, usage=usage)
+
+    database(check)
+
+
+def _fail_event_write(monkeypatch, event_to_fail):
+    original = AgentEventRepository.append
+    failed_writes = []
+    attempted = []
+
+    async def append(repository, run_id, *, event_type, payload):
+        attempted.append(event_type)
+        event = await original(repository, run_id, event_type=event_type, payload=payload)
+        if event_type == event_to_fail:
+            session = repository.session
+            await session.flush()
+            assert await session.scalar(
+                select(AgentEventModel.sequence).where(AgentEventModel.id == event.id)
+            ) == event.sequence
+            event.sequence = 0
+            try:
+                await session.flush()
+            except IntegrityError as error:
+                failed_writes.append(error)
+                raise
+        return event
+
+    monkeypatch.setattr(AgentEventRepository, "append", append)
+    return attempted, failed_writes
+
+
+def _assert_sequence_constraint(error):
+    assert error.orig.sqlstate == "23514"
+    assert error.orig.__cause__.constraint_name == "ck_agent_events_sequence_positive"
+
+
+@pytest.mark.parametrize("outcome", ["ready", "failure", "cancelled"])
+def test_agent_service_usage_write_failure_preserves_primary_outcome(database, monkeypatch, outcome):
+    async def check(factory, request, workspace_id):
+        attempted, failed_writes = _fail_event_write(monkeypatch, "agent_usage_recorded")
+        model = create_autospec(Runnable, instance=True)
+        model.ainvoke.return_value = _usage_message("Synthetic response", TRAINING_TOKENS[0])
+        started = asyncio.Event()
+        result = _result()
+        root = RuntimeError("Synthetic upstream failure")
+        original = AgentRunnerError("provider_connection")
+        received_cancellation, propagated_cancellation = [], []
+        registry = ActiveRunRegistry()
+
+        async def run(_snapshot):
+            await invoke_observed_model(model, [], stage=ModelCallStage.RESEARCH)
+            if outcome == "failure":
+                raise original from root
+            if outcome == "cancelled":
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError as error:
+                    received_cancellation.append(error)
+                    raise
+            return result
+
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner, active_runs=registry)
+
+        async def execute():
+            try:
+                return await service.execute_run(request.run_id)
+            except asyncio.CancelledError as error:
+                propagated_cancellation.append(error)
+                raise
+
+        if outcome == "ready":
+            with pytest.raises(AgentUsagePersistenceError, match="^usage_persistence_failed$") as exc:
+                await execute()
+            assert exc.value.__cause__ is failed_writes[0]
+            target, code = Status.VERIFYING, None
+            history = ["agent_run_status_changed", "agent_result_recorded", "agent_run_status_changed"]
+        elif outcome == "failure":
+            with pytest.raises(AgentRunnerError) as exc:
+                await execute()
+            assert exc.value is original and exc.value.__cause__ is root
+            assert exc.value.__notes__ == ["agent_usage_persistence_failed"]
+            target, code, result = Status.FAILED, AgentFailureCode.PROVIDER_CONNECTION, None
+            history = ["agent_run_status_changed", "agent_execution_failed", "agent_run_status_changed"]
+        else:
+            execution = asyncio.create_task(execute())
+            try:
+                async with asyncio.timeout(8):
+                    await started.wait()
+                    await service.cancel_run(request.run_id)
+                    with pytest.raises(asyncio.CancelledError):
+                        await execution
+            finally:
+                await _cancel_and_join(execution)
+            assert len(received_cancellation) == len(propagated_cancellation) == 1
+            assert propagated_cancellation[0] is received_cancellation[0]
+            assert propagated_cancellation[0].__cause__ is None
+            assert propagated_cancellation[0].__notes__ == ["agent_usage_persistence_failed"]
+            target, code, result = Status.CANCELLED, None, None
+            history = ["agent_run_status_changed"] * 2
+
+        (write_error,) = failed_writes
+        _assert_sequence_constraint(write_error)
+        assert attempted == [*history, "agent_usage_recorded"]
+        assert request.run_id not in registry
+        runner.run.assert_awaited_once_with(request)
+        model.ainvoke.assert_awaited_once_with([])
+        assert await service.get_run_usage(request.run_id) is None
+        await _assert_persisted(
+            factory, request, workspace_id, target, CLAIM, (Status.RUNNING, target), result=result, failure=code,
+        )
+
+    database(check)
+
+
+def test_agent_service_usage_survives_completion_transaction_rollback(database, monkeypatch):
+    async def check(factory, request, workspace_id):
+        attempted, failed_writes = _fail_event_write(monkeypatch, "agent_result_recorded")
+        runner, research, finalizer = _training_usage_graph()
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        registry = ActiveRunRegistry()
+        service = AgentService(factory, runner, pricing=TRAINING_PRICING, active_runs=registry)
+
+        with pytest.raises(IntegrityError) as exc:
+            await service.execute_run(request.run_id)
+        assert failed_writes == [exc.value]
+        _assert_sequence_constraint(exc.value)
+        assert attempted == ["agent_run_status_changed", "agent_result_recorded", "agent_usage_recorded"]
+        assert request.run_id not in registry
+        run.assert_awaited_once_with(request)
+        assert research.ainvoke.await_count == 2
+        finalizer.ainvoke.assert_awaited_once()
+        assert await service.get_run_result(request.run_id) is None
+        assert await service.get_run_failure(request.run_id) is None
+        usage = await service.get_run_usage(request.run_id)
+        assert usage == _training_usage(request)
+        await _assert_persisted(factory, request, workspace_id, Status.RUNNING, CLAIM, usage=usage)
+
+    database(check)
+
+
+@pytest.mark.parametrize("same_record", [True, False], ids=["replay", "conflict"])
+def test_agent_service_serializes_concurrent_usage_writes(database, monkeypatch, same_record):
+    async def check(factory, request, workspace_id):
+        first_record = _training_usage(request)
+        second_record = first_record if same_record else _training_usage(request, interrupted=True)
+        staged, release, second_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        pids = []
+        original_append = AgentEventRepository.append
+        original_lock = AgentRunRepository.get_for_update
+
+        async def track_lock(repository, run_id):
+            pids.append(await repository.session.scalar(text("SELECT pg_backend_pid()")))
+            if len(pids) == 2:
+                second_entered.set()
+            return await original_lock(repository, run_id)
+
+        async def hold_usage(repository, run_id, *, event_type, payload):
+            event = await original_append(repository, run_id, event_type=event_type, payload=payload)
+            await repository.session.flush()
+            staged.set()
+            await release.wait()
+            return event
+
+        async def write(record):
+            async with factory() as session:
+                await AgentRunService(session).record_usage(record)
+                assert not session.in_transaction()
+
+        monkeypatch.setattr(AgentEventRepository, "append", hold_usage)
+        monkeypatch.setattr(AgentRunRepository, "get_for_update", track_lock)
+        tasks = [asyncio.create_task(write(first_record))]
+        try:
+            async with asyncio.timeout(8):
+                await staged.wait()
+                tasks.append(asyncio.create_task(write(second_record)))
+                await second_entered.wait()
+                await _wait_for_run_blocker(factory, *pids, tasks[1])
+                await _assert_persisted(factory, request, workspace_id, Status.CANCELLED)
+                release.set()
+                await tasks[0]
+                if same_record:
+                    await tasks[1]
+                else:
+                    with pytest.raises(AgentUsageContractError, match="^conflicting_agent_usage$"):
+                        await tasks[1]
+        finally:
+            release.set()
+            await _cancel_and_join(*tasks)
+
+        await write(first_record)
+        async with factory() as session:
+            assert await AgentRunService(session).get_usage(request.run_id) == first_record
+        await _assert_persisted(factory, request, workspace_id, Status.CANCELLED, usage=first_record)
+
+    database(check, initial=Status.CANCELLED)
+
+
+@pytest.mark.parametrize("case", ["missing", "historical", "unobserved", "queued"])
+def test_agent_service_usage_read_and_write_boundaries(database, case):
+    async def check(factory, request, workspace_id):
+        result = _result()
+        runner = SimpleNamespace(run=AsyncMock(return_value=result))
+        service = AgentService(factory, runner)
+        if case == "missing":
+            missing_id = uuid4()
+            with pytest.raises(AgentRunNotFoundError):
+                await service.get_run_usage(missing_id)
+            usage = _training_usage(request)
+            missing_record = AgentUsageRecord(AgentUsageSnapshot(missing_id, usage.snapshot.calls), usage.pricing)
+            async with factory() as session:
+                with pytest.raises(AgentRunNotFoundError):
+                    await AgentRunService(session).record_usage(missing_record)
+                assert not session.in_transaction()
+            target, edges, result = Status.QUEUED, (), None
+        elif case == "historical":
+            target, edges, result = Status.SUCCEEDED, (), None
+        elif case == "unobserved":
+            assert await service.execute_run(request.run_id) is result
+            target, edges = Status.VERIFYING, (CLAIM, (Status.RUNNING, Status.VERIFYING))
+        else:
+            async with factory() as session:
+                with pytest.raises(AgentUsageContractError, match="^usage_requires_claimed_run$"):
+                    await AgentRunService(session).record_usage(_training_usage(request))
+                assert not session.in_transaction()
+            target, edges, result = Status.QUEUED, (), None
+
+        assert await service.get_run_usage(request.run_id) is None
+        if case == "unobserved":
+            runner.run.assert_awaited_once_with(request)
+        else:
+            runner.run.assert_not_called()
+        await _assert_persisted(factory, request, workspace_id, target, *edges, result=result)
+
+    database(check, initial=Status.SUCCEEDED if case == "historical" else Status.QUEUED)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("corrupt", "invalid_stored_usage"), ("version", "unsupported_usage_version"), ("duplicate", "duplicate_agent_usage"),
+])
+def test_agent_service_usage_rejects_invalid_event_history(database, case, reason):
+    async def check(factory, request, _workspace_id):
+        usage = _training_usage(request)
+        payload = encode_agent_usage(usage)
+        if case == "corrupt":
+            payload["calls"][0]["tokens"]["total_tokens"] = 1
+        elif case == "version":
+            payload["schema_version"] = 2
+        copies = 2 if case == "duplicate" else 1
+        async with factory.begin() as session:
+            for _ in range(copies):
+                await AgentEventRepository(session).append(request.run_id, event_type="agent_usage_recorded", payload=payload)
+
+        runner = SimpleNamespace(run=AsyncMock())
+        with pytest.raises(AgentUsageContractError, match=f"^{reason}$"):
+            await AgentService(factory, runner).get_run_usage(request.run_id)
+        runner.run.assert_not_called()
+        async with factory() as session:
+            with pytest.raises(AgentUsageContractError, match=f"^{reason}$"):
+                await AgentRunService(session).record_usage(usage)
+            assert not session.in_transaction()
+            events = await AgentEventRepository(session).get_usage_events(request.run_id)
+            assert [(event.sequence, event.payload) for event in events] == list(enumerate([payload] * copies, 1))
+
+    database(check, initial=Status.FAILED)
+
+
+def test_agent_service_concurrent_claim_loser_does_not_record_usage(database):
+    async def check(factory, request, workspace_id):
+        model = create_autospec(Runnable, instance=True)
+        model.ainvoke.return_value = _usage_message("Synthetic response", TRAINING_TOKENS[0])
+        started, release = asyncio.Event(), asyncio.Event()
+        result = _result()
+
+        async def run(_snapshot):
+            await invoke_observed_model(model, [], stage=ModelCallStage.RESEARCH)
+            started.set()
+            await release.wait()
+            return result
+
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner)
+        winner = asyncio.create_task(service.execute_run(request.run_id))
+        try:
+            async with asyncio.timeout(8):
+                await started.wait()
+                with pytest.raises(StaleAgentRunStatusError) as exc:
+                    await service.execute_run(request.run_id)
+                assert (exc.value.expected, exc.value.actual) == (Status.QUEUED, Status.RUNNING)
+                assert await service.get_run_usage(request.run_id) is None
+                release.set()
+                assert await winner is result
+        finally:
+            release.set()
+            await _cancel_and_join(winner)
+
+        runner.run.assert_awaited_once_with(request)
+        model.ainvoke.assert_awaited_once_with([])
+        usage = _usage_record(request, _reported_usage_call(1, ModelCallStage.RESEARCH, TRAINING_TOKENS[0]))
+        await _assert_persisted(
+            factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING),
+            result=result, usage=usage,
         )
 
     database(check)

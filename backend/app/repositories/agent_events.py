@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import AgentEventModel, AgentRunModel
 from app.domain.execution import AgentRunStatus
 from app.services.agent_failure import AGENT_EXECUTION_FAILED_EVENT
+from app.services.agent_usage_codec import AGENT_USAGE_RECORDED_EVENT
 
 
 class AgentEventParentNotFoundError(LookupError):
@@ -20,6 +21,15 @@ class AgentEventRepository:
         statement = (
             select(AgentEventModel)
             .where(AgentEventModel.agent_run_id == run_id, AgentEventModel.event_type == AGENT_EXECUTION_FAILED_EVENT)
+            .order_by(AgentEventModel.sequence)
+            .limit(2)
+        )
+        return list((await self.session.scalars(statement)).all())
+
+    async def get_usage_events(self, run_id: UUID) -> list[AgentEventModel]:
+        statement = (
+            select(AgentEventModel)
+            .where(AgentEventModel.agent_run_id == run_id, AgentEventModel.event_type == AGENT_USAGE_RECORDED_EVENT)
             .order_by(AgentEventModel.sequence)
             .limit(2)
         )

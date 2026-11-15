@@ -387,17 +387,18 @@ def _assert_interrupted_graph_usage(monkeypatch, phase):
         invocation = AsyncMock(wraps=runner.run)
         monkeypatch.setattr(runner, "run", invocation)
         service = AgentService(None, runner, execution_timeout_seconds=0.5)
-        fail, complete = AsyncMock(), AsyncMock()
+        fail, complete, persist_usage = AsyncMock(), AsyncMock(), AsyncMock()
         monkeypatch.setattr(service, "_claim", AsyncMock(return_value=request))
         monkeypatch.setattr(service, "_fail", fail)
         monkeypatch.setattr(service, "_complete", complete)
+        monkeypatch.setattr(service, "_persist_usage", persist_usage)
 
         async def execute():
             try:
+                if phase == "deadline":
+                    return await service.execute_run(request.run_id)
                 with capture_agent_usage(request.run_id) as collector:
                     collectors.append(collector)
-                    if phase == "deadline":
-                        return await service.execute_run(request.run_id)
                     return await runner.run(request)
             finally:
                 assert current_usage_collector() is None
@@ -430,9 +431,15 @@ def _assert_interrupted_graph_usage(monkeypatch, phase):
         invocation.assert_awaited_once_with(request)
         assert research.ainvoke.await_count == 2
         assert finalizer.ainvoke.await_count == (0 if phase == "research" else 1)
-        (collector,) = collectors
-        assert collector.closed
-        snapshot = collector.snapshot()
+        if phase == "deadline":
+            persist_usage.assert_awaited_once()
+            snapshot = persist_usage.await_args.args[0]
+            assert snapshot.run_id == request.run_id
+        else:
+            (collector,) = collectors
+            assert collector.closed
+            snapshot = collector.snapshot()
+            persist_usage.assert_not_called()
         expected = [ModelCallUsage(1, Stage.RESEARCH, Outcome.RETURNED, Status.REPORTED, TOKENS)]
         if phase == "research":
             expected.append(ModelCallUsage(2, Stage.RESEARCH, Outcome.CANCELLED, Status.MISSING, None))

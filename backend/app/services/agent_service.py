@@ -5,14 +5,21 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.services.active_runs import ActiveExecution, ActiveRunRegistry
+from app.services.agent_cost import AgentPricing
 from app.services.agent_failure import AgentFailure, classify_execution_error
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
 from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
 from app.services.agent_runs import AgentRunService
+from app.services.agent_usage import AgentUsageSnapshot, UsageCollector, capture_agent_usage
+from app.services.agent_usage_codec import AgentUsageRecord
 
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60.0
+
+
+class AgentUsagePersistenceError(RuntimeError):
+    pass
 
 
 def _check_interruption(handle: ActiveExecution, initial_cancelling: int) -> None:
@@ -28,6 +35,7 @@ class AgentService:
         *,
         execution_timeout_seconds: float = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
         active_runs: ActiveRunRegistry | None = None,
+        pricing: AgentPricing | None = None,
     ) -> None:
         if isinstance(execution_timeout_seconds, bool) or not isinstance(execution_timeout_seconds, (int, float)):
             raise ValueError("invalid_execution_timeout")
@@ -37,23 +45,29 @@ class AgentService:
             raise ValueError("invalid_execution_timeout") from None
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("invalid_execution_timeout")
+        if pricing is not None and not isinstance(pricing, AgentPricing):
+            raise ValueError("invalid_agent_pricing")
         self._session_factory = session_factory
         self._runner = runner
         self._execution_timeout_seconds = timeout_seconds
         self._active_runs = active_runs if active_runs is not None else ActiveRunRegistry()
+        self._pricing = pricing if pricing is not None else AgentPricing()
 
     async def execute_run(self, run_id: UUID) -> AgentFinalResult:
         handle = self._active_runs.register(run_id)
+        collector: UsageCollector | None = None
+        primary_error: BaseException | None = None
         try:
             request = await self._claim(run_id)
             initial_cancelling = handle.task.cancelling()
             _check_interruption(handle, initial_cancelling)
             try:
-                handle.runner_active = True
-                try:
-                    result = await self._run_with_deadline(request)
-                finally:
-                    handle.runner_active = False
+                with capture_agent_usage(run_id) as collector:
+                    handle.runner_active = True
+                    try:
+                        result = await self._run_with_deadline(request)
+                    finally:
+                        handle.runner_active = False
                 _check_interruption(handle, initial_cancelling)
                 try:
                     encode_agent_result(result)
@@ -70,8 +84,21 @@ class AgentService:
 
             await self._complete(run_id, result)
             return result
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            self._active_runs.unregister(run_id, handle)
+            try:
+                if collector is not None:
+                    snapshot = collector.snapshot()
+                    if snapshot.calls:
+                        await self._persist_usage(snapshot)
+            except Exception as write_error:
+                if primary_error is None:
+                    raise AgentUsagePersistenceError("usage_persistence_failed") from write_error
+                primary_error.add_note("agent_usage_persistence_failed")
+            finally:
+                self._active_runs.unregister(run_id, handle)
 
     async def cancel_run(self, run_id: UUID) -> None:
         committed = False
@@ -105,6 +132,14 @@ class AgentService:
     async def get_run_failure(self, run_id: UUID) -> AgentFailure | None:
         async with self._session_factory() as session:
             return await AgentRunService(session).get_failure(run_id)
+
+    async def get_run_usage(self, run_id: UUID) -> AgentUsageRecord | None:
+        async with self._session_factory() as session:
+            return await AgentRunService(session).get_usage(run_id)
+
+    async def _persist_usage(self, snapshot: AgentUsageSnapshot) -> None:
+        async with self._session_factory() as session:
+            await AgentRunService(session).record_usage(AgentUsageRecord(snapshot, self._pricing))
 
     async def _claim(self, run_id: UUID) -> AgentRunRequest:
         async with self._session_factory() as session:

@@ -26,6 +26,7 @@ from app.db.models import AgentEventModel, AgentRunModel, TaskModel, WorkspaceMo
 from app.db.session import create_engine, create_session_factory
 from app.domain.execution import AgentRunStatus as Status
 from app.repositories.agent_events import AgentEventRepository
+from app.services.agent_cost import AgentPricing, CostStatus
 from app.services.agent_result import AgentFinalResult, FixtureObservation
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
@@ -38,6 +39,8 @@ from app.services.agent_runs import (
     VerificationEvidenceRequiredError,
 )
 from app.services.agent_service import AgentService
+from app.services.agent_usage import AgentUsageSnapshot, ModelCallOutcome, ModelCallStage, ModelCallUsage, UsageStatus
+from app.services.agent_usage_codec import AgentUsageRecord, encode_agent_usage
 
 
 pytestmark = pytest.mark.skipif(
@@ -222,14 +225,25 @@ def test_agent_result_persists_across_engines(database, settings, monkeypatch):
         try:
             reader_factory = create_session_factory(reader_engine)
             unused_runner = SimpleNamespace(run=AsyncMock())
-            loaded = await AgentService(reader_factory, unused_runner).get_run_result(request.run_id)
+            reader = AgentService(reader_factory, unused_runner)
+            loaded = await reader.get_run_result(request.run_id)
             assert loaded == original_result and type(loaded) is type(original_result) is AgentFinalResult
             assert type(loaded.observations) is tuple and type(loaded.observations[0]) is FixtureObservation
             assert type(loaded.relevant_components) is tuple and type(loaded.assumptions) is tuple
+            usage = AgentUsageRecord(AgentUsageSnapshot(request.run_id, tuple(
+                ModelCallUsage(number, stage, ModelCallOutcome.RETURNED, UsageStatus.MISSING, None)
+                for number, stage in enumerate(
+                    (ModelCallStage.RESEARCH, ModelCallStage.RESEARCH, ModelCallStage.FINALIZATION), 1,
+                )
+            )), AgentPricing())
+            stored = await reader.get_run_usage(request.run_id)
+            assert stored == usage and not stored.snapshot.usage_complete and not stored.cost_estimate.cost_complete
+            assert [call.status for call in stored.cost_estimate.calls] == [CostStatus.USAGE_UNKNOWN] * 3
             unused_runner.run.assert_not_called()
             await assert_persisted(
                 reader_factory, request, workspace_id, Status.VERIFYING, CLAIM, result_event(expected),
-                status_event(Status.VERIFYING), document=encode_agent_result(expected),
+                status_event(Status.VERIFYING), ("agent_usage_recorded", encode_agent_usage(usage)),
+                document=encode_agent_result(expected),
             )
         finally:
             await asyncio.wait_for(reader_engine.dispose(), timeout=10)

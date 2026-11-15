@@ -18,6 +18,13 @@ from app.services.agent_failure import (
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import decode_agent_result, encode_agent_result
 from app.services.agent_runner import AgentRunRequest
+from app.services.agent_usage_codec import (
+    AGENT_USAGE_RECORDED_EVENT,
+    AgentUsageContractError,
+    AgentUsageRecord,
+    decode_agent_usage,
+    encode_agent_usage,
+)
 from app.services.tasks import TaskNotFoundError
 
 
@@ -161,6 +168,38 @@ class AgentRunService:
         except BaseException:
             await self.session.rollback()
             raise
+
+    async def record_usage(self, record: AgentUsageRecord) -> None:
+        try:
+            payload = encode_agent_usage(record)
+            run_id = record.snapshot.run_id
+            run = await self.runs.get_for_update(run_id)
+            if run is None:
+                raise AgentRunNotFoundError(run_id)
+            if AgentRunStatus(run.status) is AgentRunStatus.QUEUED:
+                raise AgentUsageContractError("usage_requires_claimed_run")
+            existing = await self._read_usage_event(run_id)
+            if existing is None:
+                await self.events.append(run_id, event_type=AGENT_USAGE_RECORDED_EVENT, payload=payload)
+            elif existing != record:
+                raise AgentUsageContractError("conflicting_agent_usage")
+            await self.session.commit()
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def get_usage(self, run_id: UUID) -> AgentUsageRecord | None:
+        if await self.runs.get(run_id) is None:
+            raise AgentRunNotFoundError(run_id)
+        return await self._read_usage_event(run_id)
+
+    async def _read_usage_event(self, run_id: UUID) -> AgentUsageRecord | None:
+        events = await self.events.get_usage_events(run_id)
+        if len(events) > 1:
+            raise AgentUsageContractError("duplicate_agent_usage")
+        if not events:
+            return None
+        return decode_agent_usage(run_id, events[0].payload)
 
     @staticmethod
     def _check_expected_status(run: AgentRunModel, expected: AgentRunStatus) -> AgentRunStatus:
