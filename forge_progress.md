@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 09 принят. Step 10 подготовлен, ожидает review, ручного учебного checkpoint владельца и merge.
+**Status:** done — техническая реализация и verification приняты владельцем. Самостоятельный учебный checkpoint отложен и остаётся неподтверждённым.
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -496,13 +496,17 @@ cancelled
     - В реальном StateGraph с синтетическими ответами и `read_fixture` проверены ready, deadline, явная отмена и rollback записи usage после PostgreSQL CHECK. Проверки подтверждают прежние последовательности AgentEvent и раздельные транзакции. Тесты отказа sink проверяют отсутствие утечек в JSON и stderr и сохранение исходных ошибок и отмены.
     - 11 ручных учебных сценариев PASS по отчёту владельца. BL-04 закрыт для событий агента. BL-02 и BL-03 остаются открыты.
     - Python Deep Dives. `Handler` отвечает за запись в поток, а `Formatter` проверяет и сериализует поля. Синхронный context manager замеряет фазу вокруг `await` и пробрасывает исходное исключение. `perf_counter_ns()` измеряет длительность, а UTC timestamp задаёт время записи. Локальный контекст корреляции сохраняется при чередовании asyncio-задач.
-- [ ] 10. Integration & Week 3 Review — тесты, verification и документация подготовлены, ожидают review и учебной приёмки владельца.
-  - Read-only architecture audit сверил modular monolith, `AgentRunner` и границы PostgreSQL, явный claim до runner, lifecycle guards, fixture-only graph, бюджеты и отмену. [Матрица из 15 критериев](docs/LEARNING_GUIDE_WEEK3.md#матрица-architecture-audit).
-  - На свежем head до исправления Task schema дал `1 passed, 1 failed` из-за устаревшего списка колонок. Execution schema дал `1 failed` на nullability. Обновлены проверки точного Task metadata, default `queued`, именованных CHECK и scoped UNIQUE. Execution schema с savepoint проверяет nullable JSONB result, SQL NULL и запрет JSON array/string/null. Исходная схема проверена всей цепочкой миграций.
-  - Offline E2E создаёт Task обычным `TaskService`, явно добавляет queued AgentRun, выполняет собственный StateGraph через `ChatOpenAI` и HTTPX MockTransport. Три model requests и один `read_fixture` дают preliminary result и `verifying`. Проверены четыре durable события, 71 input / 29 output / 100 total, 21 cached и 14 reasoning, полные usage/cost и стоимость `Decimal("0.00034250")`. Fresh engine читает исторические записи. Переход в `succeeded` без verification evidence отклонён.
-  - Python `3.13.0`, `pip check` PASS. Обычный pytest `749 passed, 157 skipped`. Основной PostgreSQL suite `151 passed` (150 предыдущих и новый E2E), connection `2 passed`, Task schema `2 passed`, HTTP/repository `1 passed`, execution schema `1 passed`. Всего **906 уникальных случаев**, 0 итоговых failures, 0 pytest warnings, 0 непокрытых skips после opt-in. BL-06 в текущем окружении не воспроизведён.
-  - `forge_task06_week3_result_20261114_123241` использована для lifecycle и connection. Новые базы `forge_task03_week3_final_20261115_161856`, `forge_task04_week3_final_20261115_161856` и `forge_task05_week3_final_20261115_161856` мигрированы с нуля. Для всех подтверждены PostgreSQL `17.11`, `READ COMMITTED`, revision `1d972cc34fbe (head)` и `alembic check` PASS. Базы сохранены.
-  - Python Deep Dives. `Protocol` изолирует adapter и облегчает fake, `async with` даёт сессии разные сроки жизни, nested transaction создаёт savepoint для ожидаемого SQL error. MockTransport перехватывает SDK-границу до сети. `ContextVar`, frozen snapshot, `Decimal` и отдельный monotonic clock связывают модельные вызовы с проверяемой историей и диагностикой. [Учебное руководство Week 3](docs/LEARNING_GUIDE_WEEK3.md).
+- [x] 10. Integration & Week 3 Review — DONE. Технический review принят. [PR #30](https://github.com/eva-tarasov/myFirstForge/pull/30) merged в `main` (squash `d2534379de9d8c25036f0ecbdef46197992b5041`).
+  - [x] 10A. Architecture audit & Exit criteria — DONE.
+    - Read-only architecture audit сверил modular monolith, `AgentRunner` и границы PostgreSQL, явный claim до runner, lifecycle guards, fixture-only graph, бюджеты и отмену. [Матрица из 15 критериев](docs/LEARNING_GUIDE_WEEK3.md#матрица-architecture-audit).
+  - [x] 10B. Full integration verification — DONE.
+    - На свежем head до исправления Task schema дал `1 passed, 1 failed` из-за устаревшего списка колонок. Execution schema дал `1 failed` на nullability. Обновлены проверки точного Task metadata, default `queued`, именованных CHECK и scoped UNIQUE. Execution schema с savepoint проверяет nullable JSONB result, SQL NULL и запрет JSON array/string/null. Исходная схема проверена всей цепочкой миграций.
+    - Offline E2E создаёт Task обычным `TaskService`, явно добавляет queued AgentRun, выполняет собственный StateGraph через `ChatOpenAI` и HTTPX MockTransport. Три model requests и один `read_fixture` дают preliminary result и `verifying`. Проверены четыре durable события, 71 input / 29 output / 100 total, 21 cached и 14 reasoning, полные usage/cost и стоимость `Decimal("0.00034250")`. Fresh engine читает исторические записи. Переход в `succeeded` без verification evidence отклонён.
+    - Итоговое evidence PR #30. Python `3.13.0`. Обычный pytest дал `749 passed, 157 skipped` при выключенных PostgreSQL opt-ins. Отдельно PostgreSQL дал `157 passed`: 151 основной случай (150 предыдущих и новый E2E) и 6 дополнительных (connection — 2, Task schema — 2, HTTP/repository — 1, execution schema — 1). Всего **906 уникальных тестов прошли**, 0 итоговых failures, 0 pytest warnings, 0 непокрытых skips. `pip check`, `alembic check` и `git diff --check` — PASS. BL-06 в текущем окружении не воспроизведён.
+    - `forge_task06_week3_result_20261114_123241` использована для lifecycle и connection. Новые базы `forge_task03_week3_final_20261115_161856`, `forge_task04_week3_final_20261115_161856` и `forge_task05_week3_final_20261115_161856` мигрированы с нуля. Для всех четырёх выделенных баз подтверждены имя, PostgreSQL `17.11`, `READ COMMITTED`, revision `1d972cc34fbe (head)` и `alembic check` PASS. Базы сохранены.
+    - По логам ручных прогонов владельца `test_week3_task_to_agent_run_end_to_end`, `test_migrated_schema_metadata` и `test_execution_schema_and_constraints` — PASS.
+  - [x] 10C. Learning documentation & milestone review — DONE. Учебные материалы и технический итог недели приняты. [Учебное руководство Week 3](docs/LEARNING_GUIDE_WEEK3.md).
+    - Python Deep Dives. `Protocol` изолирует adapter и облегчает fake, `async with` даёт сессии разные сроки жизни, nested transaction создаёт savepoint для ожидаемого SQL error. MockTransport перехватывает SDK-границу до сети. `ContextVar`, frozen snapshot, `Decimal` и отдельный monotonic clock связывают модельные вызовы с проверяемой историей и диагностикой.
 
 ## Теория
 
@@ -562,18 +566,22 @@ blocked_reason
 - usage/cost видны;
 - Евгений объясняет agent loop.
 
-### Evidence Step 10 и открытая приёмка
+### Итоговая приёмка Week 3
 
 | Исходный критерий | Источник и проверка | Итог и открытая граница |
 |---|---|---|
-| Task запускает AgentRun | [Task API](backend/app/api/tasks.py), [AgentService](backend/app/services/agent_service.py), [E2E](backend/tests/test_agent_service_integration.py) | Внутренний flow подтверждён. После `TaskService.create_task()` тест явно создаёт queued AgentRun, затем передаёт `run_id` в `execute_run()`. `POST /tasks` создаёт Task. Трактовка первого критерия остаётся владельцу. |
+| Task запускает AgentRun | [Task API](backend/app/api/tasks.py), [AgentService](backend/app/services/agent_service.py), [E2E](backend/tests/test_agent_service_integration.py) | Владелец принял внутренний flow как достаточный для Week 3. После `TaskService.create_task()` тест явно создаёт queued AgentRun и передаёт его `run_id` в `AgentService.execute_run()`. `POST /tasks` сохраняет только Task. Публичная orchestration остаётся будущей задачей. |
 | AgentRun state сохраняется | [AgentRunService](backend/app/services/agent_runs.py), [переходы](backend/tests/test_agent_run_integration.py), [E2E](backend/tests/test_agent_service_integration.py) | Подтверждены durable `verifying`, точная история, fresh-engine read и отказ `succeeded` без evidence. Независимый verifier и durable resume остаются открытыми. |
 | output структурирован | [Finalizer](backend/app/agent_runtime/finalization.py), [codec](backend/app/services/agent_result_codec.py), [тесты результата](backend/tests/test_agent_result_persistence_integration.py) | Подтверждены предварительный типизированный результат, runtime observations и JSONB envelope. Наблюдения относятся к synthetic fixture. |
 | timeout/error корректно отражаются | [AgentService](backend/app/services/agent_service.py), [классификация](backend/app/services/agent_failure.py), [PG lifecycle suite](backend/tests/test_agent_service_integration.py) | Подтверждены deadline, failure metadata, отмена и rollback. Локальный сигнал кооперативен и действует в пределах процесса. |
 | usage/cost видны | [Стоимость](backend/app/services/agent_cost.py), [usage codec](backend/app/services/agent_usage_codec.py), [E2E](backend/tests/test_agent_service_integration.py) | Подтверждены JSON summary, исторические ставки и воспроизводимая оценка из PostgreSQL. Реальный billing не проверялся. |
-| Евгений объясняет agent loop | [Упражнения и самопроверка](docs/LEARNING_GUIDE_WEEK3.md#20-упражнения-самопроверка-и-вопросы-для-интервью) | Ожидается отдельное evidence владельца. Технические прогоны Step 10 не заменяют учебный checkpoint. |
+| Евгений объясняет agent loop | [Упражнения и самопроверка](docs/LEARNING_GUIDE_WEEK3.md#20-упражнения-самопроверка-и-вопросы-для-интервью) | Самостоятельный учебный checkpoint отложен. Объяснение владельцем пока не подтверждено. |
 
-Открытое evidence для приёмки Week 3 — review и merge Step 10, трактовка первого exit criterion и объяснение agent loop владельцем. Автоматический запуск через API, настоящий доступ к репозиторию, live provider и billing, production load, распределённая отмена и восстановление после сбоя выходят за пределы проверенного offline контура. Фактические часы не сообщены.
+**Deferred learning checkpoint.** Владелец продолжает изучать материалы параллельно с дальнейшей разработкой. Осталось самостоятельно объяснить agent loop, границы lifecycle и транзакций, а также сценарий отмены с rollback записи usage: какой статус уже закоммичен, какие события сохраняются и какое исключение получает вызывающий код.
+
+**Ограничения.** Автоматический запуск через API, настоящий доступ к репозиторию, live provider и billing, production load, распределённая отмена и восстановление после сбоя выходят за пределы проверенного offline контура. Фактические часы не сообщены.
+
+**Next step** — Week 4 — Tool System, Permissions & Audit. Статус `not started`.
 
 ---
 
