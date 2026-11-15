@@ -288,7 +288,38 @@ Caller владеет commit и rollback и держит короткую тра
 
 ## HTTP-логи
 
-Forge пишет одну JSON-строку в стандартный поток ошибок для каждого HTTP-запроса. Она содержит UTC-время, уровень, событие `http_request_completed`, UUID запроса, метод, шаблон маршрута, HTTP-статус и длительность в миллисекундах. Успешные и обработанные ответы содержат тот же UUID в `X-Request-ID`; при непредвиденном исключении заголовок не гарантирован. Для неизвестного маршрута в поле `route` записывается `unmatched`.
+Логгер `forge.http` пишет одну JSON-строку в стандартный поток ошибок для каждого HTTP-запроса. Она содержит UTC-время, уровень, событие `http_request_completed`, UUID запроса, метод, шаблон маршрута, HTTP-статус и длительность в миллисекундах. Успешные и обработанные ответы содержат тот же UUID в `X-Request-ID`. При непредвиденном исключении заголовок не гарантирован. Для неизвестного маршрута в поле `route` записывается `unmatched`.
+
+## Логи исполнения агента
+
+`forge.agent` пишет отдельные JSON-строки в `stderr` процесса, который вызывает `AgentService.execute_run()` или `AgentService.cancel_run()`. Каждый вызов получает новый `operation_id`. По `run_id` можно сопоставить исполнение и отмену одного запуска. У исполнения `task_id` появляется в логе завершения успешного claim. До claim и в операциях отмены поле равно `null`.
+
+Пары `agent_operation_started` / `agent_operation_finished` охватывают весь вызов, включая очистку локального handle. Пары `agent_phase_started` / `agent_phase_finished` ограничивают отдельные фазы, включая ожидание операций и соответствующую очистку. `timestamp` берётся по настенным часам UTC, `duration_ms` измеряется монотонными часами.
+
+В `outcome` записывается `completed` при нормальном возврате, `interrupted` при `CancelledError` и `error` при исключении. Даже `blocked`-результат может вернуть `completed`. Статус AgentRun и durable `AgentEvent` в PostgreSQL остаются источником истины. Успешная фаза `cancellation_signal` означает, что сервис обратился к локальному реестру. Ошибка `cancellation_persistence` возможна после commit, если закрытие сессии завершилось исключением.
+
+`agent_failure_classified` содержит стабильный `failure_code`, например `execution_deadline_exceeded`. Ошибки операции и фаз содержат только категорию `error_kind`: `run_not_found`, `stale_run_status`, `invalid_transition` или `operation_error`. Эти записи имеют уровень `WARNING`. Обычные, прерванные и usage-записи имеют уровень `INFO`. В схему входят только разрешённые поля. Prompts, ответы модели, параметры инструментов, исключения, traceback и credentials в лог не попадают.
+
+`agent_usage_observed` появляется перед отдельной записью usage. Он содержит наблюдавшиеся totals и известную часть стоимости, а флаги `usage_complete` и `cost_complete` показывают полноту. Сохранение подтверждает durable `agent_usage_recorded`. В локальном прогоне с синтетическими данными получены такие строки.
+
+```jsonl
+{"timestamp":"2026-11-15T15:02:12.396Z","level":"INFO","event":"agent_phase_finished","operation_id":"d3aa3c67-1b15-42db-a5c2-a7ddc97cb332","operation":"execute","run_id":"00000000-0000-0000-0000-000000000001","task_id":"00000000-0000-0000-0000-000000000002","phase":"claim","outcome":"completed","duration_ms":0.049417,"error_kind":null}
+{"timestamp":"2026-11-15T15:02:12.396Z","level":"INFO","event":"agent_usage_observed","operation_id":"d3aa3c67-1b15-42db-a5c2-a7ddc97cb332","operation":"execute","run_id":"00000000-0000-0000-0000-000000000001","task_id":"00000000-0000-0000-0000-000000000002","model_calls_started":2,"reported_calls":1,"unknown_usage_calls":1,"known_input_tokens":12,"known_output_tokens":8,"known_total_tokens":20,"usage_complete":false,"priced_calls":1,"unknown_cost_calls":1,"known_cost_usd":"0.000082","cost_complete":false}
+```
+
+Запись выполняется синхронно и может ждать медленный `stderr`. При сбое sink отдельная запись может потеряться, исход операции сохраняется. Логи остаются локальными, без distributed tracing и metrics exporter. Смотрите `stderr` процесса, который исполняет или отменяет run. HTTP health-запрос создаёт только запись `forge.http`.
+
+Из `backend` с проектным окружением можно проверить JSON, параллельные операции и отказ sink без вызовов провайдера.
+
+```bash
+.venv/bin/python -m pytest -v tests/test_agent_observability.py tests/test_logging.py
+```
+
+Тест `test_agent_service_observability_records_real_graph` из PostgreSQL набора ниже использует реальный StateGraph, `read_fixture` и синтетические ответы моделей. Чтобы выполнить только эти четыре сценария в существующей выделенной базе, задайте `POSTGRES_DB`, `POSTGRES_HOST` и `FORGE_TASK06_TEST_DB` и запустите команду.
+
+```bash
+.venv/bin/python -m pytest -v tests/test_agent_service_integration.py -k test_agent_service_observability_records_real_graph
+```
 
 ## Тесты
 

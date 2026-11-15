@@ -418,7 +418,7 @@ cancelled
 
 # WEEK 3 — First Single Agent
 
-**Status:** in progress — Step 09A принят, Step 09B подготовлен и ожидает review и учебной проверки
+**Status:** in progress — Step 09B принят, Step 09C подготовлен и ожидает review и ручной учебной проверки
 
 **Оценка:** 29–39 часов из-за дополнительного изучения LangChain и LangGraph; фактические часы не сообщены
 
@@ -484,12 +484,18 @@ cancelled
     - Явный `capture_agent_usage(run_id)` передаёт изолированный collector через `ContextVar`. Research и structured finalization учитываются на границе `ainvoke()` до валидации ответа. Snapshot сохраняет наблюдавшийся usage после ошибки графа, deadline или отмены. `reported`, `missing` и `invalid` различаются. Known totals суммируют валидные основные счётчики. Cost, PostgreSQL persistence и автоматическое владение scope остаются последующим этапам.
     - MockTransport подтвердил три вызова и 100 токенов (71 input, 29 output). Параллельные исполнения одного StateGraph подтвердили изоляцию scopes. Usage suite `64 passed`, связанные regression tests `168 passed`, обычный pytest `649 passed, 131 skipped`, PostgreSQL suite `125 passed` в `forge_task06_week3_result_20261114_123241` при `READ COMMITTED`, revision `1d972cc34fbe`. `pip check` и `alembic check` PASS. Во всех прогонах 0 failures и 0 pytest warnings.
     - Девять ручных учебных сценариев PASS по отчёту владельца. `git diff --check` PASS.
-  - [ ] 09B. Cost Estimation & Durable Usage Persistence — реализация подготовлена, ожидает review и учебной проверки.
+  - [x] 09B. Cost Estimation & Durable Usage Persistence — DONE. [PR #28](https://github.com/eva-tarasov/myFirstForge/pull/28) merged в `main` (`2266183`).
     - `AgentService` владеет usage scope только во время runner после успешного claim. Непустой snapshot и исторические тарифы хранятся одним versioned `agent_usage_recorded` в отдельной транзакции после lifecycle. Повтор идентичной записи идемпотентен. Чтение через новый engine воспроизводит `0.00034250 USD` по синтетическому тарифу, независимо от текущей конфигурации.
     - Usage сохраняется при ready, blocked, ошибках парсинга и финализации, deadline и отмене. При сбое записи usage lifecycle остаётся закоммиченным. Первичная ошибка сохраняет identity и cause, получая стабильную заметку. Crash и повторная внешняя отмена до commit могут оставить usage незаписанным. Оценка не сверяется с биллингом.
     - Python Deep Dives. Явный `Decimal.Context` сохраняет точность цен независимо от ambient context. Десятичные строки в JSONB сохраняют ставку и её scale. `ContextVar` восстанавливает внешний collector. `finally` выполняет отдельную запись usage и очистку handle, а `BaseException.add_note()` сохраняет первичный `CancelledError` при вторичной ошибке записи.
     - Cost/usage suite `144 passed`, связанные регрессии `137 passed`, обычный pytest `729 passed, 152 skipped`, PostgreSQL suite `146 passed` (21 новый и 125 прежних). В базе `forge_task06_week3_result_20261114_123241` подтверждены `READ COMMITTED`, revision `1d972cc34fbe` и `alembic check` PASS. Проверены rollback usage, запись после rollback completion и конкуренция с `pg_blocking_pids()`. `pip check` PASS. Во всех прогонах 0 failures и 0 pytest warnings.
-  - [ ] 09C. Observability — not started.
+    - Пять ручных учебных сценариев PASS по отчёту владельца. `git diff --check` PASS.
+  - [ ] 09C. Observability — реализация подготовлена, ожидает review и ручной учебной проверки владельца.
+    - `forge.agent` пишет безопасные JSON-события выполнения фаз и операций, классифицированные сбои и агрегаты наблюдаемого usage. `operation_id` выделяется для каждого вызова, `run_id` связывает исполнение и отмену, `task_id` берётся из успешного claim. PostgreSQL сохраняет историю AgentEvent по существующим правилам.
+    - Python `3.13.0`, `pip check` PASS. Observability/HTTP suite `26 passed` (20 новых и 6 прежних), связанные регрессии `164 passed`, обычный pytest `749 passed, 156 skipped` (PostgreSQL opt-in выключены). PostgreSQL suite `150 passed` (4 новых и 146 прежних), база `forge_task06_week3_result_20261114_123241`, `READ COMMITTED`, revision `1d972cc34fbe`, `alembic check` PASS. Во всех итоговых pytest-прогонах 0 failures и 0 warnings.
+    - В реальном StateGraph с синтетическими ответами и `read_fixture` проверены ready, deadline, явная отмена и rollback записи usage после PostgreSQL CHECK. Проверки подтверждают прежние последовательности AgentEvent и раздельные транзакции. Тесты отказа sink проверяют отсутствие утечек в JSON и stderr и сохранение исходных ошибок и отмены.
+    - BL-04 реализован для событий агента и ожидает приёмки. BL-02 и BL-03 остаются открыты.
+    - Python Deep Dives. `Handler` отвечает за запись в поток, а `Formatter` проверяет и сериализует поля. Синхронный context manager замеряет фазу вокруг `await` и пробрасывает исходное исключение. `perf_counter_ns()` измеряет длительность, а UTC timestamp задаёт время записи. Локальный контекст корреляции сохраняется при чередовании asyncio-задач.
 - [ ] 10. Integration & Week 3 Review — not started.
 
 ## Теория

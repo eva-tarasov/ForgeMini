@@ -17,6 +17,7 @@ from langsmith import tracing_context
 from model_test_support import TRACING_OFF
 from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
+from test_agent_observability import agent_log_capture, assert_agent_operation, read_agent_logs
 
 from app.agent_runtime.agent_graph import create_agent_graph
 from app.agent_runtime.fixture_tools import read_fixture
@@ -1894,5 +1895,157 @@ def test_agent_service_concurrent_claim_loser_does_not_record_usage(database):
             factory, request, workspace_id, Status.VERIFYING, CLAIM, (Status.RUNNING, Status.VERIFYING),
             result=result, usage=usage,
         )
+
+    database(check)
+
+@pytest.mark.parametrize("case", ["ready", "deadline", "explicit-cancel", "usage-rollback"])
+def test_agent_service_observability_records_real_graph(case, database, monkeypatch, agent_log_capture):
+    async def check(factory, request, workspace_id):
+        started, cleaned = asyncio.Event(), asyncio.Event()
+        status_at_cancellation = []
+        interrupted = case in {"deadline", "explicit-cancel"}
+        raw_canary = "SYNTHETIC_PRIVATE_PROVIDER_RESPONSE"
+        if case == "usage-rollback":
+            attempted, failed_writes = _fail_event_write(monkeypatch, "agent_usage_recorded")
+
+        async def finalizer_call(_messages):
+            if not interrupted:
+                return {
+                    "raw": _usage_message(raw_canary, TRAINING_TOKENS[2]),
+                    "parsed": TaskAnalysis(summary="Предварительный анализ", relevant_components=[],
+                                           assumptions=[], blocked_reason=None),
+                    "parsing_error": None,
+                }
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if case == "explicit-cancel":
+                    async with factory() as session:
+                        run = await session.get(AgentRunModel, request.run_id)
+                        status_at_cancellation.append(run.status)
+                raise
+            finally:
+                cleaned.set()
+
+        fixture = AsyncMock(wraps=read_fixture.coroutine)
+
+        @wraps(read_fixture.coroutine)
+        async def observe_fixture(**kwargs):
+            return await fixture(**kwargs)
+
+        monkeypatch.setattr(read_fixture, "coroutine", observe_fixture)
+        runner, research, finalizer = _training_usage_graph(finalizer_call=finalizer_call)
+        run = AsyncMock(wraps=runner.run)
+        monkeypatch.setattr(runner, "run", run)
+        registry = ActiveRunRegistry()
+        service = AgentService(factory, runner, active_runs=registry, pricing=TRAINING_PRICING,
+                               execution_timeout_seconds=0.5 if case == "deadline" else 60)
+        deadline_errors = []
+        original_deadline = service._run_with_deadline
+
+        async def observe_deadline(snapshot):
+            try:
+                return await original_deadline(snapshot)
+            except AgentRunnerError as error:
+                deadline_errors.append(error)
+                raise
+
+        if case == "deadline":
+            monkeypatch.setattr(service, "_run_with_deadline", observe_deadline)
+        code = None
+        result = None
+        target = Status.VERIFYING
+        outcome = "completed"
+        phases = [("claim", "completed")]
+        if interrupted:
+            execution = asyncio.create_task(service.execute_run(request.run_id))
+            try:
+                async with asyncio.timeout(8):
+                    await started.wait()
+                    if case == "deadline":
+                        with pytest.raises(AgentRunnerError, match="^execution_deadline_exceeded$") as caught:
+                            await execution
+                        assert len(deadline_errors) == 1 and caught.value is deadline_errors[0]
+                        assert isinstance(caught.value.__cause__, TimeoutError)
+                        assert isinstance(caught.value.__cause__.__cause__, asyncio.CancelledError)
+                        target, outcome, code = Status.FAILED, "error", AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED
+                        phases += [("runner", "error"), ("failure_persistence", "completed")]
+                    else:
+                        await service.cancel_run(request.run_id)
+                        with pytest.raises(asyncio.CancelledError):
+                            await execution
+                        assert execution.cancelled() and status_at_cancellation == ["cancelled"]
+                        target, outcome = Status.CANCELLED, "interrupted"
+                        phases.append(("runner", "interrupted"))
+                    await cleaned.wait()
+            finally:
+                await _cancel_and_join(execution)
+        else:
+            result = _result(observations=(
+                FixtureObservation(component="task_service", tool_call_id="fixture-1", content=FIXTURE_TEXT),
+            ))
+            if case == "ready":
+                assert await service.execute_run(request.run_id) == result
+            else:
+                with pytest.raises(AgentUsagePersistenceError, match="^usage_persistence_failed$") as caught:
+                    await service.execute_run(request.run_id)
+                write_error, = failed_writes
+                assert caught.value.__cause__ is write_error
+                _assert_sequence_constraint(write_error)
+                assert attempted == [
+                    "agent_run_status_changed", "agent_result_recorded", "agent_run_status_changed",
+                    "agent_usage_recorded",
+                ]
+                outcome = "error"
+            phases += [("runner", "completed"), ("result_validation", "completed"), ("result_persistence", "completed")]
+
+        phases.append(("usage_persistence", "error" if case == "usage-rollback" else "completed"))
+        run.assert_awaited_once_with(request)
+        fixture.assert_awaited_once_with(component="task_service")
+        assert research.ainvoke.await_count == 2
+        assert isinstance(research.ainvoke.await_args.args[0][-1], ToolMessage)
+        finalizer.ainvoke.assert_awaited_once()
+        assert request.run_id not in registry
+        expected_usage = None if case == "usage-rollback" else _training_usage(request, interrupted=interrupted)
+        assert await service.get_run_usage(request.run_id) == expected_usage
+        assert await service.get_run_result(request.run_id) == result
+        assert await service.get_run_failure(request.run_id) == (AgentFailure(code) if code is not None else None)
+        await _assert_persisted(factory, request, workspace_id, target, CLAIM, (Status.RUNNING, target),
+                                result=result, failure=code, usage=expected_usage)
+
+        groups = read_agent_logs(agent_log_capture)
+        execute_rows, = [rows for rows in groups.values() if rows[0]["operation"] == "execute"]
+        assert_agent_operation(
+            execute_rows, "execute", request.run_id, phases, task_id=request.task_id, outcome=outcome,
+            error="operation_error" if outcome == "error" else None,
+        )
+        if case == "explicit-cancel":
+            assert len(groups) == 2  # Per-operation assertions impose no order between the two tasks.
+            cancel_rows, = [rows for rows in groups.values() if rows[0]["operation"] == "cancel"]
+            assert_agent_operation(cancel_rows, "cancel", request.run_id, [
+                ("cancellation_persistence", "completed"), ("cancellation_signal", "completed"),
+            ])
+        else:
+            assert len(groups) == 1
+        assert [row["failure_code"] for row in execute_rows if "failure_code" in row] == ([code.value] if code else [])
+        usage, = [row for row in execute_rows if row["event"] == "agent_usage_observed"]
+        assert execute_rows[execute_rows.index(usage) + 1]["phase"] == "usage_persistence"
+        assert {key: usage[key] for key in (
+            "model_calls_started", "reported_calls", "unknown_usage_calls", "known_input_tokens", "known_output_tokens",
+            "known_total_tokens", "usage_complete", "priced_calls", "unknown_cost_calls", "known_cost_usd", "cost_complete",
+        )} == {
+            "model_calls_started": 3, "reported_calls": 2 if interrupted else 3,
+            "unknown_usage_calls": int(interrupted), "known_input_tokens": 36 if interrupted else 71,
+            "known_output_tokens": 18 if interrupted else 29, "known_total_tokens": 54 if interrupted else 100,
+            "usage_complete": not interrupted, "priced_calls": 2 if interrupted else 3,
+            "unknown_cost_calls": int(interrupted), "known_cost_usd": "0.0001995" if interrupted else "0.0003425",
+            "cost_complete": not interrupted,
+        }
+        logs = agent_log_capture.getvalue()
+        assert all(value not in logs for value in (
+            raw_canary, GOAL, *CRITERIA, "Предварительный анализ", FIXTURE_TEXT, "task_service",
+            "synthetic-model", "training-v1", "succeeded", "Traceback", "ck_agent_events_sequence_positive",
+        ))
 
     database(check)

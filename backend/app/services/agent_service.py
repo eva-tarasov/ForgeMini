@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.services.active_runs import ActiveExecution, ActiveRunRegistry
 from app.services.agent_cost import AgentPricing
 from app.services.agent_failure import AgentFailure, classify_execution_error
+from app.services.agent_observability import AgentLogContext, AgentObserver, AgentOperation, AgentPhase
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
 from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
@@ -54,61 +55,76 @@ class AgentService:
         self._pricing = pricing if pricing is not None else AgentPricing()
 
     async def execute_run(self, run_id: UUID) -> AgentFinalResult:
-        handle = self._active_runs.register(run_id)
-        collector: UsageCollector | None = None
-        primary_error: BaseException | None = None
-        try:
-            request = await self._claim(run_id)
-            initial_cancelling = handle.task.cancelling()
-            _check_interruption(handle, initial_cancelling)
+        observer = AgentObserver(AgentLogContext(run_id, AgentOperation.EXECUTE))
+        with observer.operation():
+            handle = self._active_runs.register(run_id)
+            collector: UsageCollector | None = None
+            primary_error: BaseException | None = None
             try:
-                with capture_agent_usage(run_id) as collector:
-                    handle.runner_active = True
+                with observer.phase(AgentPhase.CLAIM):
+                    request = await self._claim(run_id)
+                    observer.context.task_id = request.task_id
+                initial_cancelling = handle.task.cancelling()
+                _check_interruption(handle, initial_cancelling)
+                try:
+                    with capture_agent_usage(run_id) as collector:
+                        with observer.phase(AgentPhase.RUNNER):
+                            handle.runner_active = True
+                            try:
+                                result = await self._run_with_deadline(request)
+                            finally:
+                                handle.runner_active = False
+                    _check_interruption(handle, initial_cancelling)
+                    with observer.phase(AgentPhase.RESULT_VALIDATION):
+                        try:
+                            encode_agent_result(result)
+                        except AgentResultContractError:
+                            raise AgentRunnerError("invalid_runner_result") from None
+                except Exception as execution_error:
+                    _check_interruption(handle, initial_cancelling)
+                    failure = classify_execution_error(execution_error)
+                    observer.failure_classified(failure.code)
                     try:
-                        result = await self._run_with_deadline(request)
-                    finally:
-                        handle.runner_active = False
-                _check_interruption(handle, initial_cancelling)
-                try:
-                    encode_agent_result(result)
-                except AgentResultContractError:
-                    raise AgentRunnerError("invalid_runner_result") from None
-            except Exception as execution_error:
-                _check_interruption(handle, initial_cancelling)
-                failure = classify_execution_error(execution_error)
-                try:
-                    await self._fail(run_id, failure)
-                except Exception as transition_error:
-                    raise transition_error from execution_error
-                raise
+                        with observer.phase(AgentPhase.FAILURE_PERSISTENCE):
+                            await self._fail(run_id, failure)
+                    except Exception as transition_error:
+                        raise transition_error from execution_error
+                    raise
 
-            await self._complete(run_id, result)
-            return result
-        except BaseException as error:
-            primary_error = error
-            raise
-        finally:
-            try:
-                if collector is not None:
-                    snapshot = collector.snapshot()
-                    if snapshot.calls:
-                        await self._persist_usage(snapshot)
-            except Exception as write_error:
-                if primary_error is None:
-                    raise AgentUsagePersistenceError("usage_persistence_failed") from write_error
-                primary_error.add_note("agent_usage_persistence_failed")
+                with observer.phase(AgentPhase.RESULT_PERSISTENCE):
+                    await self._complete(run_id, result)
+                return result
+            except BaseException as error:
+                primary_error = error
+                raise
             finally:
-                self._active_runs.unregister(run_id, handle)
+                try:
+                    if collector is not None:
+                        snapshot = collector.snapshot()
+                        if snapshot.calls:
+                            observer.usage_observed(snapshot, self._pricing)
+                            with observer.phase(AgentPhase.USAGE_PERSISTENCE):
+                                await self._persist_usage(snapshot)
+                except Exception as write_error:
+                    if primary_error is None:
+                        raise AgentUsagePersistenceError("usage_persistence_failed") from write_error
+                    primary_error.add_note("agent_usage_persistence_failed")
+                finally:
+                    self._active_runs.unregister(run_id, handle)
 
     async def cancel_run(self, run_id: UUID) -> None:
-        committed = False
-        try:
-            async with self._session_factory() as session:
-                await AgentRunService(session).cancel_execution(run_id)
-                committed = True
-        finally:
-            if committed:
-                self._active_runs.request_cancel(run_id)
+        observer = AgentObserver(AgentLogContext(run_id, AgentOperation.CANCEL))
+        with observer.operation():
+            committed = False
+            try:
+                with observer.phase(AgentPhase.CANCELLATION_PERSISTENCE):
+                    async with self._session_factory() as session:
+                        await AgentRunService(session).cancel_execution(run_id)
+                        committed = True
+            finally:
+                if committed:
+                    with observer.phase(AgentPhase.CANCELLATION_SIGNAL):
+                        self._active_runs.request_cancel(run_id)
 
     async def _run_with_deadline(self, request: AgentRunRequest) -> AgentFinalResult:
         loop = asyncio.get_running_loop()
