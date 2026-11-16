@@ -134,6 +134,66 @@ def test_registry_rejects_non_callable_handler() -> None:
         ToolRegistry([definition])
 
 
+def test_registry_preserves_access_declarations() -> None:
+    def selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        pytest.fail("Registration and discovery must not invoke the selector")
+
+    path_tool = replace(make_tool(), path_selector=selector)
+    synthetic_tool = replace(make_tool(name="sample_synthetic"), synthetic=True)
+    registry = ToolRegistry([path_tool, synthetic_tool])
+
+    assert registry.get("sample_read").path_selector is selector
+    assert registry.get("sample_read").synthetic is False
+    assert registry.get("sample_synthetic").path_selector is None
+    assert registry.get("sample_synthetic").synthetic is True
+    assert registry.list_specs() == (path_tool.spec, synthetic_tool.spec)
+
+
+def test_registry_rejects_non_callable_path_selector() -> None:
+    with pytest.raises(TypeError, match="path selector must be a synchronous callable"):
+        ToolRegistry([replace(make_tool(), path_selector=object())])
+
+
+def test_registry_rejects_async_path_selectors() -> None:
+    async def coroutine_selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        return ("src/module.py",)
+
+    async def async_generator_selector(_tool_input: ToolInput):
+        yield "src/module.py"
+
+    class AsyncSelector:
+        async def __call__(self, _tool_input: ToolInput) -> tuple[str, ...]:
+            return ("src/module.py",)
+
+    for selector in (coroutine_selector, async_generator_selector, AsyncSelector()):
+        with pytest.raises(TypeError, match="path selector must be a synchronous callable"):
+            ToolRegistry([replace(make_tool(), path_selector=selector)])
+
+
+def test_registry_requires_boolean_synthetic_flag() -> None:
+    with pytest.raises(TypeError, match="synthetic flag must be a bool"):
+        ToolRegistry([replace(make_tool(), synthetic=1)])
+
+
+def test_registry_rejects_conflicting_access_declarations() -> None:
+    definition = replace(make_tool(), path_selector=lambda _: ("src/module.py",), synthetic=True)
+
+    with pytest.raises(ValueError, match="cannot declare a path selector"):
+        ToolRegistry([definition])
+
+
+def test_registry_rejects_synthetic_write_tool() -> None:
+    definition = make_tool(
+        capability=Capability.REPOSITORY_WRITE,
+        risk_level=ToolRiskLevel.HIGH,
+        side_effect=True,
+        requires_approval=True,
+    )
+
+    with pytest.raises(ValueError, match="Synthetic tools must be read-only"):
+        ToolRegistry([replace(definition, synthetic=True)])
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [

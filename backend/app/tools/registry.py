@@ -1,18 +1,23 @@
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from inspect import isasyncgenfunction, iscoroutinefunction
 from types import MappingProxyType
 from typing import TypeAlias
 
+from app.domain.capabilities import Capability
 from app.tools.contracts import ToolInput, ToolOutput, ToolSpec
 
 
 ToolHandler: TypeAlias = Callable[[ToolInput], Awaitable[ToolOutput]]
+PathSelector: TypeAlias = Callable[[ToolInput], tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
 class RegisteredTool:
     spec: ToolSpec
     handler: ToolHandler
+    path_selector: PathSelector | None = None
+    synthetic: bool = False
 
 
 class DuplicateToolError(ValueError):
@@ -44,6 +49,23 @@ class ToolRegistry:
             # Validate field values again because model_copy(update=...) bypasses validation.
             fields = {name: getattr(definition.spec, name) for name in ToolSpec.model_fields}
             spec = ToolSpec.model_validate(fields)
+
+            selector = definition.path_selector
+            if selector is not None:
+                if not callable(selector) or any(
+                    iscoroutinefunction(fn) or isasyncgenfunction(fn)
+                    for fn in (selector, type(selector).__call__)
+                ):
+                    raise TypeError("Tool path selector must be a synchronous callable")
+            if type(definition.synthetic) is not bool:
+                raise TypeError("Tool synthetic flag must be a bool")
+            if definition.synthetic and selector is not None:
+                raise ValueError("Synthetic tools cannot declare a path selector")
+            if definition.synthetic and (
+                spec.capability is not Capability.REPOSITORY_READ or spec.side_effect
+            ):
+                raise ValueError("Synthetic tools must be read-only")
+
             schemas = (("input_schema", spec.input_schema), ("output_schema", spec.output_schema))
             for field, schema in schemas:
                 config = schema.model_config
@@ -56,7 +78,12 @@ class ToolRegistry:
 
             if spec.name in tools:
                 raise DuplicateToolError(f"Tool '{spec.name}' is already registered")
-            tools[spec.name] = RegisteredTool(spec=spec, handler=definition.handler)
+            tools[spec.name] = RegisteredTool(
+                spec=spec,
+                handler=definition.handler,
+                path_selector=selector,
+                synthetic=definition.synthetic,
+            )
 
         self._tools = MappingProxyType(tools)
 

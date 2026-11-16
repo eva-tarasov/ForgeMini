@@ -6,6 +6,7 @@ class ToolErrorCode(StrEnum):
     UNKNOWN_TOOL = "unknown_tool"
     VERSION_MISMATCH = "version_mismatch"
     INVALID_INPUT = "invalid_input"
+    PERMISSION_DENIED = "permission_denied"
     EXECUTION_BLOCKED = "execution_blocked"
     INVALID_HANDLER = "invalid_handler"
     TOOL_TIMEOUT = "tool_timeout"

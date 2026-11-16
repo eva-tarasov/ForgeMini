@@ -4,16 +4,19 @@ from inspect import iscoroutinefunction
 from pydantic import ValidationError
 
 from app.domain.capabilities import Capability
+from app.permissions.context import PermissionContext
+from app.permissions.policy import PermissionOutcome, PermissionPolicy
 from app.tools.contracts import ToolOutput
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.registry import ToolRegistry, ToolVersionMismatchError, UnknownToolError
 
 
 class ToolExecutor:
-    """Execute trusted tools with the temporary read-only gate."""
+    """Authorize and execute trusted tools with the read-only gate."""
 
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
+        self._permission_policy = PermissionPolicy()
 
     async def execute(
         self,
@@ -21,6 +24,7 @@ class ToolExecutor:
         arguments: dict[str, object],
         *,
         version: int | None = None,
+        context: PermissionContext | None = None,
     ) -> ToolOutput:
         if not isinstance(name, str) or not name or not isinstance(arguments, dict):
             raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST)
@@ -41,6 +45,22 @@ class ToolExecutor:
             raise ToolExecutionError(ToolErrorCode.INVALID_INPUT) from None
         except Exception:
             raise ToolExecutionError(ToolErrorCode.INTERNAL_ERROR) from None
+
+        if type(context) is not PermissionContext:
+            raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
+
+        paths = None
+        if tool.path_selector is not None:
+            try:
+                paths = tool.path_selector(tool_input)
+            except Exception:
+                raise ToolExecutionError(ToolErrorCode.INTERNAL_ERROR) from None
+
+        decision = self._permission_policy.evaluate(spec, context, paths=paths, synthetic=tool.synthetic)
+        if decision.outcome is PermissionOutcome.APPROVAL_REQUIRED:
+            raise ToolExecutionError(ToolErrorCode.EXECUTION_BLOCKED)
+        if decision.outcome is not PermissionOutcome.ALLOW:
+            raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
 
         if (
             spec.capability is not Capability.REPOSITORY_READ

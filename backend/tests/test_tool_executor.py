@@ -1,18 +1,26 @@
 import asyncio
 import traceback
+from dataclasses import replace
+from uuid import UUID
 
 import pytest
 from pydantic import model_validator
 
 from app.domain.capabilities import Capability
+from app.permissions.context import PathScope, PermissionContext
 from app.tools.contracts import ToolInput, ToolOutput, ToolRiskLevel, ToolSpec
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
-from app.tools.registry import RegisteredTool, ToolHandler, ToolRegistry
+from app.tools.registry import PathSelector, RegisteredTool, ToolHandler, ToolRegistry
 
 
 TOOL_NAME = "sample_read"
 SYNTHETIC_SECRET = "synthetic-private-value"
+READ_CONTEXT = PermissionContext(
+    run_id=UUID(int=1),
+    workspace_id=UUID(int=2),
+    capabilities=frozenset({Capability.REPOSITORY_READ}),
+)
 
 
 class SampleInput(ToolInput):
@@ -31,7 +39,17 @@ class DerivedOutput(SampleOutput):
     pass
 
 
-def make_executor(handler: ToolHandler, **overrides: object) -> ToolExecutor:
+def select_path(tool_input: SampleInput) -> tuple[str, ...]:
+    return (tool_input.text,)
+
+
+def make_executor(
+    handler: ToolHandler,
+    *,
+    path_selector: PathSelector | None = None,
+    synthetic: bool = True,
+    **overrides: object,
+) -> ToolExecutor:
     fields = {
         "name": TOOL_NAME,
         "version": 1,
@@ -45,7 +63,8 @@ def make_executor(handler: ToolHandler, **overrides: object) -> ToolExecutor:
         "requires_approval": False,
     }
     spec = ToolSpec.model_validate(fields | overrides)
-    return ToolExecutor(ToolRegistry([RegisteredTool(spec=spec, handler=handler)]))
+    definition = RegisteredTool(spec, handler, path_selector=path_selector, synthetic=synthetic)
+    return ToolExecutor(ToolRegistry([definition]))
 
 
 @pytest.fixture
@@ -72,7 +91,7 @@ def test_executor_returns_validated_output() -> None:
         return original
 
     executor = make_executor(handler, version=2)
-    result = asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, version=2))
+    result = asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT, version=2))
 
     assert calls == [SampleInput(text="abc")]
     assert type(calls[0]) is SampleInput
@@ -95,7 +114,7 @@ def test_executor_translates_lookup_errors(
     executor = make_executor(forbidden_handler)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(name, {"text": "abc"}, version=version))
+        asyncio.run(executor.execute(name, {"text": "abc"}, context=READ_CONTEXT, version=version))
 
     assert_safe_error(exc_info.value, code)
 
@@ -110,7 +129,7 @@ def test_executor_rejects_invalid_request_shape(
     executor = make_executor(forbidden_handler)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(name, arguments))
+        asyncio.run(executor.execute(name, arguments, context=READ_CONTEXT))
 
     assert exc_info.value.code is ToolErrorCode.INVALID_REQUEST
 
@@ -120,7 +139,7 @@ def test_executor_rejects_invalid_version(forbidden_handler: ToolHandler, versio
     executor = make_executor(forbidden_handler)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, version=version))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT, version=version))
 
     assert exc_info.value.code is ToolErrorCode.INVALID_REQUEST
 
@@ -134,7 +153,7 @@ def test_executor_rejects_invalid_input_without_invoking_handler(
     executor = make_executor(forbidden_handler)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, arguments))
+        asyncio.run(executor.execute(TOOL_NAME, arguments, context=READ_CONTEXT))
 
     assert_safe_error(exc_info.value, ToolErrorCode.INVALID_INPUT)
 
@@ -150,7 +169,7 @@ def test_executor_translates_unexpected_input_validation_failure(
 
     executor = make_executor(forbidden_handler, input_schema=BrokenInput)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert_safe_error(exc_info.value, ToolErrorCode.INTERNAL_ERROR)
 
@@ -158,14 +177,21 @@ def test_executor_translates_unexpected_input_validation_failure(
 def test_executor_blocks_write_tool(forbidden_handler: ToolHandler) -> None:
     executor = make_executor(
         forbidden_handler,
+        path_selector=select_path,
+        synthetic=False,
         capability=Capability.REPOSITORY_WRITE,
         risk_level=ToolRiskLevel.HIGH,
         side_effect=True,
         requires_approval=True,
     )
+    context = replace(
+        READ_CONTEXT,
+        capabilities=frozenset({Capability.REPOSITORY_WRITE}),
+        write_scopes=(PathScope("src", recursive=True),),
+    )
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/module.py"}, context=context))
 
     assert exc_info.value.code is ToolErrorCode.EXECUTION_BLOCKED
 
@@ -174,9 +200,125 @@ def test_executor_blocks_read_tool_requiring_approval(forbidden_handler: ToolHan
     executor = make_executor(forbidden_handler, requires_approval=True)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert exc_info.value.code is ToolErrorCode.EXECUTION_BLOCKED
+
+
+def test_executor_executes_authorized_logical_path() -> None:
+    calls = []
+
+    def selector(tool_input: SampleInput) -> tuple[str, ...]:
+        calls.append(("selector", tool_input))
+        return select_path(tool_input)
+
+    async def handler(tool_input: SampleInput) -> SampleOutput:
+        calls.append(("handler", tool_input))
+        return SampleOutput(size=len(tool_input.text))
+
+    path = "src/module.py"
+    context = replace(READ_CONTEXT, read_scopes=(PathScope("src", recursive=True),))
+    executor = make_executor(handler, path_selector=selector, synthetic=False)
+
+    output = asyncio.run(executor.execute(TOOL_NAME, {"text": path}, context=context))
+
+    assert output == SampleOutput(size=len(path))
+    assert calls == [("selector", SampleInput(text=path)), ("handler", SampleInput(text=path))]
+    assert calls[0][1] is calls[1][1]
+
+
+@pytest.mark.parametrize("context_kwargs", [{}, {"context": {}}], ids=["missing", "invalid"])
+def test_executor_rejects_missing_or_invalid_context(
+    forbidden_handler: ToolHandler, context_kwargs: dict[str, object]
+) -> None:
+    def selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        pytest.fail("The selector requires a trusted permission context")
+
+    executor = make_executor(forbidden_handler, path_selector=selector, synthetic=False)
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/module.py"}, **context_kwargs))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+def test_executor_rejects_missing_capability(forbidden_handler: ToolHandler) -> None:
+    context = replace(READ_CONTEXT, capabilities=frozenset())
+    executor = make_executor(forbidden_handler)
+
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+def test_executor_rejects_missing_access_declaration(forbidden_handler: ToolHandler) -> None:
+    executor = make_executor(forbidden_handler, synthetic=False)
+    context = replace(READ_CONTEXT, read_scopes=(PathScope(".", recursive=True),))
+
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/module.py"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+@pytest.mark.parametrize("selection", [(), None, "src/module.py", ["src/module.py"], (4,), ("../x",)])
+def test_executor_rejects_empty_or_malformed_path_selection(
+    forbidden_handler: ToolHandler, selection: object
+) -> None:
+    executor = make_executor(forbidden_handler, path_selector=lambda _: selection, synthetic=False)
+    context = replace(READ_CONTEXT, read_scopes=(PathScope(".", recursive=True),))
+
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/module.py"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+def test_executor_rejects_unauthorized_path(forbidden_handler: ToolHandler) -> None:
+    executor = make_executor(forbidden_handler, path_selector=select_path, synthetic=False)
+    context = replace(READ_CONTEXT, read_scopes=(PathScope("src", recursive=True),))
+
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src_backup/module.py"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+def test_executor_rejects_protected_path_under_root_grant(forbidden_handler: ToolHandler) -> None:
+    executor = make_executor(forbidden_handler, path_selector=select_path, synthetic=False)
+    context = replace(READ_CONTEXT, read_scopes=(PathScope(".", recursive=True),))
+
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/.GIT/config"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+def test_executor_translates_selector_exception_safely(forbidden_handler: ToolHandler) -> None:
+    def selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        raise RuntimeError(SYNTHETIC_SECRET)
+
+    executor = make_executor(forbidden_handler, path_selector=selector, synthetic=False)
+    with pytest.raises(ToolExecutionError) as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "src/module.py"}, context=READ_CONTEXT))
+
+    assert_safe_error(exc_info.value, ToolErrorCode.INTERNAL_ERROR)
+
+
+def test_executor_rejects_permission_fields_in_tool_arguments(forbidden_handler: ToolHandler) -> None:
+    executor = make_executor(forbidden_handler)
+    arguments = {
+        "text": "abc",
+        "context": READ_CONTEXT,
+        "capabilities": ["repository.read"],
+        "paths": ["."],
+        "approved": True,
+    }
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, arguments))
+
+    assert_safe_error(exc_info.value, ToolErrorCode.INVALID_INPUT)
 
 
 def test_executor_rejects_synchronous_handler_without_invoking_it() -> None:
@@ -185,7 +327,7 @@ def test_executor_rejects_synchronous_handler_without_invoking_it() -> None:
 
     executor = make_executor(handler)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert exc_info.value.code is ToolErrorCode.INVALID_HANDLER
 
@@ -197,7 +339,7 @@ def test_executor_accepts_async_callable_object() -> None:
 
     executor = make_executor(Handler())
 
-    assert asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"})) == SampleOutput(size=3)
+    assert asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT)) == SampleOutput(size=3)
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
@@ -210,7 +352,7 @@ def test_executor_translates_handler_error_without_retry(error_type: type[Except
 
     executor = make_executor(handler)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert calls == [SampleInput(text="abc")]
     assert_safe_error(exc_info.value, ToolErrorCode.HANDLER_FAILED)
@@ -238,7 +380,7 @@ def test_executor_times_out_and_cleans_up(suppress_cancellation: bool) -> None:
         executor = make_executor(handler, timeout_ms=20)
         async with asyncio.timeout(3):
             with pytest.raises(ToolExecutionError) as exc_info:
-                await executor.execute(TOOL_NAME, {"text": "abc"})
+                await executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT)
 
         assert exc_info.value.code is ToolErrorCode.TOOL_TIMEOUT
         assert cleaned.is_set()
@@ -263,7 +405,7 @@ def test_executor_rejects_return_after_monotonic_deadline(monkeypatch: pytest.Mo
         with monkeypatch.context() as patch:
             patch.setattr(loop, "time", lambda: now)
             with pytest.raises(ToolExecutionError) as exc_info:
-                await executor.execute(TOOL_NAME, {"text": "abc"})
+                await executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT)
 
         assert exc_info.value.code is ToolErrorCode.TOOL_TIMEOUT
 
@@ -286,7 +428,7 @@ def test_executor_classifies_exception_after_monotonic_deadline_as_timeout(
         with monkeypatch.context() as patch:
             patch.setattr(loop, "time", lambda: now)
             with pytest.raises(ToolExecutionError) as exc_info:
-                await executor.execute(TOOL_NAME, {"text": "abc"})
+                await executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT)
 
         assert_safe_error(exc_info.value, ToolErrorCode.TOOL_TIMEOUT)
 
@@ -311,7 +453,7 @@ def test_executor_propagates_external_cancellation() -> None:
             return SampleOutput(size=3)
 
         executor = make_executor(handler, timeout_ms=30_000)
-        task = asyncio.create_task(executor.execute(TOOL_NAME, {"text": "abc"}))
+        task = asyncio.create_task(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
         try:
             await asyncio.wait_for(started.wait(), timeout=3)
             task.cancel("external cancellation")
@@ -347,7 +489,7 @@ def test_executor_preserves_swallowed_external_cancellation(raise_after_cancella
             return SampleOutput(size=3)
 
         executor = make_executor(handler, timeout_ms=30_000)
-        task = asyncio.create_task(executor.execute(TOOL_NAME, {"text": "abc"}))
+        task = asyncio.create_task(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
         try:
             await asyncio.wait_for(started.wait(), timeout=3)
             task.cancel()
@@ -385,7 +527,7 @@ def test_executor_rejects_invalid_output(output: object) -> None:
 
     executor = make_executor(handler)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert exc_info.value.code is ToolErrorCode.INVALID_OUTPUT
 
@@ -397,7 +539,7 @@ def test_executor_rejects_invalid_copied_output(updates: dict[str, object]) -> N
 
     executor = make_executor(handler)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert_safe_error(exc_info.value, ToolErrorCode.INVALID_OUTPUT)
 
@@ -410,7 +552,7 @@ def test_executor_rejects_output_with_extra_storage() -> None:
 
     executor = make_executor(handler)
     with pytest.raises(ToolExecutionError) as exc_info:
-        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}))
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT))
 
     assert exc_info.value.code is ToolErrorCode.INVALID_OUTPUT
     assert str(exc_info.value) == "invalid_output"
