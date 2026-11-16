@@ -583,3 +583,91 @@ def test_executor_rejects_output_with_extra_storage() -> None:
 
     assert exc_info.value.code is ToolErrorCode.INVALID_OUTPUT
     assert str(exc_info.value) == "invalid_output"
+
+
+def test_executor_get_tool_spec_is_lookup_only(forbidden_handler: ToolHandler) -> None:
+    def selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        pytest.fail("Metadata lookup must not execute selectors")
+
+    executor = make_executor(forbidden_handler, path_selector=selector, synthetic=False, version=3)
+
+    assert executor.get_tool_spec(TOOL_NAME).version == 3
+    assert executor.get_tool_spec(TOOL_NAME, version=3).name == TOOL_NAME
+    with pytest.raises(ToolExecutionError, match="^version_mismatch$"):
+        executor.get_tool_spec(TOOL_NAME, version=2)
+
+
+def test_executor_invokes_admission_once_before_handler_and_outside_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        trace = []
+
+        def selector(tool_input: SampleInput) -> tuple[str, ...]:
+            trace.append("select")
+            return (tool_input.text,)
+
+        async def admit() -> None:
+            nonlocal now
+            trace.append("admit")
+            now += 10
+
+        async def handler(_tool_input: ToolInput) -> ToolOutput:
+            trace.append("handler")
+            return SampleOutput(size=1)
+
+        executor = make_executor(handler, path_selector=selector, synthetic=False, timeout_ms=100)
+        context = replace(READ_CONTEXT, read_scopes=(PathScope("file.txt"),))
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "time", lambda: now)
+            output = await executor.execute(
+                TOOL_NAME, {"text": "file.txt"}, context=context, before_handler=admit,
+            )
+        assert trace == ["select", "admit", "handler"]
+        assert output == SampleOutput(size=1)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("case", ["permission", "handler-contract", "approval"])
+def test_executor_rejects_call_before_admission_callback(
+    forbidden_handler: ToolHandler, case: str,
+) -> None:
+    async def admit() -> None:
+        pytest.fail("Rejected execution must not invoke admission")
+
+    def sync_handler(_tool_input: ToolInput) -> ToolOutput:
+        pytest.fail("Invalid synchronous handler must not run")
+
+    context = READ_CONTEXT
+    if case == "permission":
+        context = replace(context, capabilities=frozenset())
+        executor = make_executor(forbidden_handler)
+        expected = ToolErrorCode.PERMISSION_DENIED
+    elif case == "handler-contract":
+        executor = make_executor(sync_handler)
+        expected = ToolErrorCode.INVALID_HANDLER
+    else:
+        executor = make_executor(forbidden_handler, requires_approval=True)
+        expected = ToolErrorCode.EXECUTION_BLOCKED
+
+    with pytest.raises(ToolExecutionError) as caught:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=context, before_handler=admit))
+    assert caught.value.code is expected
+
+
+@pytest.mark.parametrize("error_type", [TimeoutError, RuntimeError, asyncio.CancelledError])
+def test_executor_propagates_admission_error_unchanged(
+    forbidden_handler: ToolHandler, error_type: type[BaseException],
+) -> None:
+    original = error_type("synthetic admission error")
+
+    async def admit() -> None:
+        raise original
+
+    executor = make_executor(forbidden_handler)
+    with pytest.raises(error_type) as caught:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT, before_handler=admit))
+    assert caught.value is original

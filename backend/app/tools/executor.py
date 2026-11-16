@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from inspect import iscoroutinefunction
 
 from pydantic import ValidationError
@@ -6,9 +7,9 @@ from pydantic import ValidationError
 from app.domain.capabilities import Capability
 from app.permissions.context import PermissionContext
 from app.permissions.policy import PermissionOutcome, PermissionPolicy
-from app.tools.contracts import ToolOutput
+from app.tools.contracts import ToolOutput, ToolSpec
 from app.tools.errors import ToolErrorCode, ToolExecutionError
-from app.tools.registry import ToolRegistry, ToolVersionMismatchError, UnknownToolError
+from app.tools.registry import RegisteredTool, ToolRegistry, ToolVersionMismatchError, UnknownToolError
 
 
 class ToolExecutor:
@@ -18,19 +19,15 @@ class ToolExecutor:
         self._registry = registry
         self._permission_policy = PermissionPolicy()
 
-    async def execute(
-        self,
-        name: str,
-        arguments: dict[str, object],
-        *,
-        version: int | None = None,
-        context: PermissionContext | None = None,
-    ) -> ToolOutput:
-        if not isinstance(name, str) or not name or not isinstance(arguments, dict):
-            raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST)
+    def get_tool_spec(self, name: str, *, version: int | None = None) -> ToolSpec:
+        """Look up a registered descriptor without authorizing or executing the tool."""
+        return self._resolve_tool(name, version).spec
 
+    def _resolve_tool(self, name: str, version: int | None) -> RegisteredTool:
+        if not isinstance(name, str) or not name:
+            raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST)
         try:
-            tool = self._registry.get(name, version=version)
+            return self._registry.get(name, version=version)
         except UnknownToolError:
             raise ToolExecutionError(ToolErrorCode.UNKNOWN_TOOL) from None
         except ToolVersionMismatchError:
@@ -38,6 +35,18 @@ class ToolExecutor:
         except (TypeError, ValueError):
             raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST) from None
 
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        version: int | None = None,
+        context: PermissionContext | None = None,
+        before_handler: Callable[[], Awaitable[None]] | None = None,
+    ) -> ToolOutput:
+        if not isinstance(arguments, dict):
+            raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST)
+        tool = self._resolve_tool(name, version)
         spec = tool.spec
         try:
             tool_input = spec.input_schema.model_validate(arguments, strict=True)
@@ -79,6 +88,11 @@ class ToolExecutor:
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         initial_cancellations = task.cancelling() if task is not None else 0
+        if before_handler is not None:
+            await before_handler()
+            if task is not None and task.cancelling() > initial_cancellations:
+                raise asyncio.CancelledError
+
         timeout = asyncio.timeout(spec.timeout_ms / 1000)
         deadline = timeout.when()
 
