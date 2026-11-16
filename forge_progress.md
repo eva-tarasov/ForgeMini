@@ -36,8 +36,8 @@
 **Codex — внешний coding agent, который помогает строить Forge. Forge — отдельный продукт с собственными AgentRun, runtime, permissions, sandbox и verification.** Codex не является скрытой заменой этих компонентов.
 
 - **ChatGPT / чат текущей недели:** объяснение концепции, решение архитектуры, постановка задачи и acceptance criteria, review результатов, разбор незнакомого кода.
-- **Евгений:** product scope, архитектурные решения, одобрение scope/существенного diff, понимание control flow, data model и failure modes.
-- **Codex app / CLI / IDE:** исследование репозитория, точечные изменения, тесты, линт, подготовка diff, отчёт с evidence. Режим LEARNING / ENGINEERING / AGENTIC определяется знакомством с областью, а не возможностями Codex.
+- **Евгений:** product scope, архитектурные решения, одобрение scope/существенного diff, понимание control flow, data model и failure modes. Владелец делает commit, push, открывает PR и выполняет squash merge после приёмки.
+- **Codex app / CLI / IDE:** исследование репозитория, точечные изменения, тесты и линт. Codex предоставляет полный отчёт о реализации, точные команды, результаты автоматических проверок и diff для ревью. Режим LEARNING / ENGINEERING / AGENTIC определяется знакомством с областью, а не возможностями Codex.
 - Один шаг = одна ограниченная задача Codex. Не переходить к следующей фазе автоматически. После review и объяснения Евгений пишет **«продолжаем»** либо просит разобрать/изменить текущий шаг.
 - Для нетривиальной задачи Codex указываем: `Objective, Context, Scope, Allowed/Forbidden changes, Constraints, Acceptance criteria, Verification, Report format`.
 - Не принимать `done` без доказательств: команды, тесты, diff, ошибки, migration checks, screenshots или runtime output — в зависимости от задачи.
@@ -56,7 +56,9 @@
 ## 4. Weekly execution and status
 
 - Для каждой недели: `design/theory → one scoped implementation task → tests/verification → diff review → explanation → progress update`.
-- Codex выполняет routine unit/regression tests, dependency checks и обычные integration checks текущего scope. Владелец вручную запускает выбранные преподавателем критические учебные сценарии и существенные проверки lifecycle/security/failure modes. Результаты всех проверок фиксируются как evidence. Не требовать повторного ручного прогона всех routine tests без необходимости.
+- Codex выполняет routine unit/regression tests, dependency checks и обычные integration checks текущего scope. Для каждой implementation task Codex включает раздел **Owner Manual Verification** с исполняемыми командами по фактическим именам тестов, ожидаемым числом passed и объяснением критических учебных сценариев и проверок lifecycle, security и failure modes. Не требовать повторного ручного прогона всех routine tests без необходимости.
+- Владелец независимо выполняет выбранные проверки на чистом worktree с опубликованным HEAD PR. Он передаёт в ChatGPT ссылку на PR, полный отчёт Codex и вывод команд из терминала. Owner verification отмечается завершённой после получения evidence от владельца.
+- ChatGPT сверяет фактический diff в GitHub и evidence перед приёмкой к merge. Если ревью требует исправлений, Codex предоставляет обновлённые команды повторной проверки, покрывающие исправленные сценарии.
 - Статусы `not started / in progress / blocked / done` менять **по фактическому evidence**, не по календарю и не по отчёту агента без проверки.
 - Если встречена интересная новая технология — внести её в **Decisions to revisit**, не прерывая текущую неделю.
 - При отклонении от roadmap указывать: `why`, `trade-off`, `ADR`, `migration cost`, `effect on exit criteria`.
@@ -601,9 +603,12 @@ blocked_reason
 
 # WEEK 4 — Tool System, Permissions & Audit
 
-**Status:** not started  
-**Оценка:** 24–30 часов  
-**Codex:** LEARNING -> ENGINEERING
+**Status:** in progress\
+**Оценка:** 24–30 часов\
+**Codex:** LEARNING\
+**Фактические часы:** не зафиксированы
+
+Steps 01–05 завершены и вошли в `main`. Инженерный прогресс — **5 из 13**, осталось 8. **M1 остаётся открытым.** Следующий шаг — **Step 06 — Persisted ToolCall audit**. Владелец выбрал документационные checkpoints после Step 05 и Step 08. Дальнейшие checkpoints будут согласованы отдельно. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
 
 ## Цель
 
@@ -663,6 +668,83 @@ apply_patch
 - approval records.
 - fixture repository.
 - tests.
+
+### Прогресс Week 4
+
+| Step | Объём | Статус |
+|---|---|---|
+| 01 | Tool Contract & Capability Model | done · [PR #32](https://github.com/eva-tarasov/myFirstForge/pull/32) |
+| 02 | ToolRegistry | done · [PR #33](https://github.com/eva-tarasov/myFirstForge/pull/33) |
+| 03 | ToolExecutor | done · [PR #34](https://github.com/eva-tarasov/myFirstForge/pull/34) |
+| 04 | PermissionPolicy | done · [PR #35](https://github.com/eva-tarasov/myFirstForge/pull/35) |
+| 05 | Read-only Repository Tools | done · [PR #36](https://github.com/eva-tarasov/myFirstForge/pull/36) |
+| 06 | Persisted ToolCall audit | not started |
+| 07 | Controlled apply_patch в fixture-репозиториях | not started |
+| 08 | Approval gate и in-process pause/resume | not started |
+| 09 | Интеграция tools и permissions в LangGraph | not started |
+| 10 | Independent verification v1 | not started |
+| 11 | Public AgentRun API — create/start/show/events/result/cancel | not started |
+| 12 | Public approval и evidence API | not started |
+| 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
+
+### Принятые Steps 01–05
+
+Автоматические результаты относятся к моменту приёмки каждого PR. Ручные результаты и итоги независимого ревью записаны по evidence владельца в PR. Полные регрессии перекрываются по тестам. Последний обычный прогон и focused owner regression Step 05 — отдельные проверки.
+
+- **Step 01 — Tool Contract & Capability Model.** Строгие frozen-модели `ToolInput`, `ToolOutput` и `ToolSpec`, типизированные классы схем и capabilities `repository.read` / `repository.write`. Инварианты связывают capability, риск, side effects и обязательный approval. Контракт описывает требуемые права, их проверку выполняет отдельная policy. Merge `aa7fec3347dde36884f8dd5d6129ddbf4f74912f`. Контракты — 55 passed. Обычная регрессия — **804 passed, 157 skipped**. Owner verification — **6 passed**.
+- **Step 02 — ToolRegistry.** Реестр связывает проверенные неизменяемые снимки `ToolSpec` с доверенными handlers, отклоняет дубликаты имён и поддерживает точный lookup по имени и версии. Регистрация, lookup и discovery обходятся без вызова handlers. Merge `497cfd0e765a1ad14dde00072ef5209206955cae`. Реестр при приёмке — 31 passed. Обычная регрессия — **835 passed, 157 skipped**. Owner verification — **6 passed**.
+- **Step 03 — ToolExecutor.** Независимый async executor проверяет запрос, вход и выход, возвращает стабильные коды ошибок без payload и вызывает допущенный handler один раз без автоматического retry. Таймаут и отмена кооперативны. Временный read-only gate блокирует запись и вызовы с обязательным approval. Merge `f585835c645c7e63c2ca17231cc50db8193a0a3b`. Финальный executor suite — 42 passed. Обычная регрессия — **877 passed, 157 skipped**. Owner verification — **13 passed**.
+  - Ревью выявило два дефекта. Handler мог подавить внешнюю отмену и вернуть результат либо превратить отмену в `handler_failed`. Исключение после монотонного дедлайна могло дать `handler_failed` до срабатывания callback таймера. До исправления три регрессионных случая воспроизвели дефекты. После выхода из timeout scope executor проверяет оставшиеся запросы внешней отмены и дедлайн на обоих путях, при возврате и при исключении.
+- **Step 04 — PermissionPolicy.** Неизменяемый `PermissionContext` содержит явные capability grants и точные либо рекурсивные логические scopes. Доверенный `PathSelector` выбирает ресурсы из валидированных аргументов. Компоненты `.git`, `.env` и `.env.*` блокируются без учёта регистра. Policy возвращает `ALLOW`, `DENY` или `APPROVAL_REQUIRED`. Executor действует fail-closed. Approval не отменяет отказ в доступе. Запись и вызовы с обязательным approval остаются заблокированными. Merge `b61a199c8ce51db5488586e91088f2c9f1f2a732`. Policy — 61 passed, реестр — 37 passed, executor — 57 passed. Обычная регрессия — **959 passed, 157 skipped**. Owner verification — **20 passed**.
+- **Step 05 — Read-only Repository Tools.** `list_files`, `read_file`, `search_files` и `git_diff` работают на доверенных локальных fixture-репозиториях. Одна фабрика привязывает инструменты к одному reader, корню и точному экземпляру `PermissionContext`. Reader проверяет логический доступ для каждого ресурса. POSIX-доступ использует `dir_fd`, точное сравнение имён, `O_NOFOLLOW` и проверку device/inode. Symlink, специальные файлы и файлы с несколькими жёсткими ссылками не читаются. Обход, чтение, поиск и выдача ограничены бюджетами. `git_diff` сравнивает один файл с неизменяемым snapshot. Baseline проверен на реальном коммите во временном Git-репозитории. Во время вызова tool Git subprocess отсутствует.
+  - Reviewed feature HEAD `3b466a4e1b4a9d8559fe88074631fcb399498b1a`, merge `7de3d939f0477d6349d4c93ec5eca04890ccb4f3`. На macOS и Python `3.13.0` filesystem — 24 passed, repository tools — 41 passed, реестр — 39 passed, executor — 60 passed, policy — 61 passed, контракты — 55 passed. Последняя обычная регрессия — **1029 passed, 157 skipped**, 0 failures и 0 pytest warnings. `pip check` и `git diff --check` — PASS.
+  - Владелец подтвердил **31 passed** на worktree до коммита и **164 passed** в итоговой focused regression на чистом опубликованном HEAD. Архитектура, код и безопасность в пределах fixture threat model приняты на ревью.
+
+### Архитектурные решения и инварианты
+
+- Сохраняются модульный монолит, LangChain и собственный LangGraph `StateGraph` за `AgentRunner`. PostgreSQL остаётся источником бизнес-состояния. Steps 01–05 прошли без новых core-зависимостей. [ADR-001](docs/adr/ADR-001.md) · [ADR-002](docs/adr/ADR-002.md).
+- `ToolSpec` задаёт требования и схемы, `ToolRegistry` хранит проверенные определения, `ToolExecutor` контролирует вызов, а `PermissionPolicy` принимает решение о доступе. Capabilities и scopes поступают в доверенном контексте отдельно от model arguments. По умолчанию доступ запрещён. Approval применим только после прохождения проверок capability и scope.
+- Все реальные инструменты в рамках фабрики используют точный экземпляр доверенного контекста, выбранный backend fixture root и один `SafeRepositoryReader`. `git_diff` ограничен сравнением текста одного файла с переданным snapshot.
+- Новый tool system пока работает отдельно от `AgentRunner` и LangGraph. Текущий граф по-прежнему использует Week 3 `read_fixture`. Переход `AgentRun` в `succeeded` требует независимой verification с evidence даже после успешного tool call. Полный sandbox относится к Week 6, durable orchestration — к Week 7.
+
+### Технический долг и ограничения
+
+| Открытый вопрос | Где вернуться |
+|---|---|
+| Во всех обычных регрессиях Steps 01–05 пропущены 157 PostgreSQL opt-in тестов. Их отдельного прогона в Week 4 пока не было. PostgreSQL evidence Week 3 остаётся историческим. | При проверке persistence в Step 06 зафиксировать фактическое PostgreSQL-покрытие. |
+| Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
+| Фабрика связывает экземпляр per-run контекста и корень в пределах одного набора tools. Сквозная проверка соответствия workspace и физического корня пока отсутствует. | Step 09, привязка к AgentRunner. |
+| UUID в `PermissionContext` служат идентификаторами для доверенного backend-контекста. Личность пользователя, сохранённое владение и текущий статус `AgentRun` требуют отдельной проверки. | Интеграция контекста с run в Step 09 и границы публичных API в Steps 11–12. |
+| Reader рассчитан на доверенные локальные fixture roots и контролируемые предки. Произвольные конкурентные изменения файловой системы и полная sandbox-изоляция вне проверенного контура. | Fixture threat model в Steps 07–09, полноценная изоляция в Week 6. |
+| Подтверждён macOS-прогон. Linux — целевая платформа при наличии требуемых POSIX-примитивов, независимого Linux-прогона на checkpoint не было. | Отдельная проверка Linux-совместимости. |
+| Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Подключение инструментов к runtime в Step 09 и проектирование sandbox в Week 6. |
+| Output budgets применяются к полезному UTF-8 тексту. Полный сериализованный API envelope пока вне этих лимитов. | Публичные response DTO в Steps 11–12. |
+| Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
+| Нужен executor regression для многофайловой операции, в которой один ресурс вне scope. | Step 07, controlled apply_patch. |
+| Полный persisted `ToolCall` audit trail, write execution, approval workflow, интеграция с AgentRunner и независимая verification v1 ещё впереди. | Steps 06–10. |
+| Публичные AgentRun/approval/evidence API и live M1 smoke ещё впереди. | Steps 11–13 с существующими M1 exit criteria и CLI dependency gates. |
+
+Блокеров для Step 06 нет. Следующее обновление документации запланировано после Step 08.
+
+### Учебные checkpoints
+
+При реализации и ревью разобраны строгие схемы и runtime validation, контракты registry и handler, кооперативные `asyncio` timeout и отмена, отмена и rollback, capability grants и least privilege, явные решения policy, сравнение компонентов пути, логическая авторизация и физический доступ, POSIX-дескрипторы, symlink, hard link, inode и TOCTOU, бюджеты и неизменяемый Git baseline. На Step 03 показано воспроизведение дефектов до исправления и повторная проверка после него. Независимая verification с evidence остаётся условием успеха `AgentRun`.
+
+Самостоятельные объяснения владельца по Steps 01–05 остаются открытыми.
+
+- [ ] **01.** Объяснить, где строгие схемы проверяют вход и выход и почему `ToolSpec` не выдаёт права.
+- [ ] **02.** Объяснить, зачем реестр повторно валидирует снимок и где проходит граница lookup и вызова handler.
+- [ ] **03.** Разобрать оба дефекта ревью и объяснить различие между внешней отменой, таймаутом и rollback.
+- [ ] **04.** Объяснить least privilege на примере точного и рекурсивного scope, отказа для одного из нескольких путей и приоритета `DENY` над approval.
+- [ ] **05.** Проследить разрешённый вызов до физического чтения, объяснить владение дескрипторами, остаточные TOCTOU-ограничения, бюджеты и роль snapshot в `git_diff`.
+
+**Python Deep Dives на потом**
+
+- Pydantic model validation и `model_copy`.
+- Отмена в `asyncio` и монотонные дедлайны.
+- Dataclasses, неизменяемые коллекции, callable types и `functools.partial`.
+- `pathlib`, `os.open`, `dir_fd`, `stat` и context managers.
+- Владение файловыми дескрипторами и освобождение ресурсов.
 
 ## Verification v1
 
