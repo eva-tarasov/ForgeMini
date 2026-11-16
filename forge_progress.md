@@ -62,6 +62,17 @@
 - При отклонении от roadmap указывать: `why`, `trade-off`, `ADR`, `migration cost`, `effect on exit criteria`.
 - В архитектурном чате `00` сначала теория на английском, затем тот же блок по-русски.
 
+## 5. Parallel delivery — Week4CLI (approved 2026-11-15)
+
+- `Week4CLI` — параллельный клиентский трек к Week 4, не новая неделя основной программы. Основные Week 1–12 и M1/M2/M3 сохраняются; Week 5 остаётся MCP. Web/TUI/интерактивный чат не входят в scope. Apple Client Week 9–10 сохраняется.
+- Два независимых чата: `04 — Week 4 Tool System & Permissions` и `Week4CLI`. В каждом один согласованный шаг за раз и отдельный сигнал «продолжаем». Один владелец координирует интеграцию; не запускать два Codex в одном working tree.
+- CLI — отдельный Python-пакет `cli/`, HTTP-only client. Не импортирует `backend/app`, не подключается к PostgreSQL/LLM, не исполняет tools или permission decisions. Backend остаётся source of truth. Предложенный стек Typer + Rich + HTTPX + pytest; версии и зависимости CLI согласовать на CLI-01, не менять backend lock/dependencies.
+- Backend-команда владеет API-контрактами, application/domain, persistence, runtime, tools/permissions/verification. CLI-команда владеет `cli/` и CLI tests/docs. Shared API contract, README и progress changes — только отдельным согласованным handoff/PR; не редактировать один файл одновременно.
+- CLI-01–04 можно выполнять на уже существующих Workspace/Task API; команды запуска, events, approval, cancel, diff зависят от опубликованных и проверенных контрактов. Моки не доказывают готовность реального backend. HTTP polling до SSE; никакого обещания durable resume до Week 7.
+- Git: короткие feature branches от актуального `main`, отдельные worktrees, отдельные PR, sequential merge, re-sync после каждого merge; shared docs редактируются владельцем последовательно. Тестовые БД/порты/working copies раздельные при конкурентном запуске. Push/merge/deploy только после разрешения владельца.
+- Приоритет Week 4: CLI Foundation можно развивать параллельно, но M1 не зависит от завершения CLI. Нагрузка в пределах общего бюджета 24–30 ч/нед; ориентир 4–6 ч/нед на CLI при наличии времени, не обещание завершения за одну неделю. Если CLI ждёт backend, переключаемся на основную неделю, не придумываем endpoints.
+- Architecture Change Gate: ADOPT раннего CLI по явному решению владельца; ADR-001/002 сохраняются. Дополнительные public run API и live-provider smoke — согласованные предлагаемые handoff-задачи Week 4, подлежащие уточнению scope до реализации. Дальнейшие провайдеры, deployment, macOS worker и project planning не включаются в Week4CLI.
+
 ## Decisions to revisit
 
 | Decision | Planned gate | Current stance | Required evidence |
@@ -129,6 +140,8 @@ Flow:
 
 **Срок:** конец Week 4
 
+Параллельный клиентский deliverable: Week4CLI v0.1 (отдельный статус и acceptance criteria; не блокирует исходный M1).
+
 Forge умеет:
 
 - принимать Task;
@@ -168,6 +181,7 @@ Forge умеет:
 - approvals;
 - artifacts;
 - deployed backend;
+- documented CLI client with supported API commands;
 - security;
 - observability;
 - cost tracking;
@@ -658,6 +672,10 @@ apply_patch
 - запрещённые path не затронуты;
 - patch соответствует scope.
 
+## Additional integration handoff — Week4CLI
+
+Before exposing agent-control CLI commands, review and implement the narrow public AgentRun/approval API slice described in Week4CLI. Prioritize the original M1 exit criteria; record new contract scope and its verification separately. Plan a bounded real OpenAI smoke with owner-provided credentials (no secrets in Git/logs), distinguishing live model behavior from offline fixture tests. Week 3 acceptance stays historical; do not retroactively mark live or public orchestration complete. If handoff remains unfinished, report CLI integration as blocked, not as M1 success evidence. No durable restart guarantee until Week 7.
+
 ## Exit Criteria — M1
 
 - Task -> AgentRun -> ToolCall -> Result работает end-to-end;
@@ -667,6 +685,59 @@ apply_patch
 - audit trail полный;
 - path traversal закрыт тестами;
 - success требует evidence.
+
+---
+
+# WEEK4CLI — Forge CLI (parallel track)
+
+**Status:** not started — утверждено добавление трека, реализация не начата.  
+**Параллельно:** Week 4; при необходимости интеграционный хвост продолжается рядом с Week 5, без переименования трека.  
+**Codex:** LEARNING → ENGINEERING.  
+**Оценка:** предварительно 8–14 ч суммарно, уточнить после CLI-01; входит в общий бюджет, не обязательство уложиться в календарную неделю.
+
+## Цель и UX
+
+Читаемый developer CLI поверх Forge HTTP API: подкоманды и help, таблицы Workspace/Task, статус и timeline AgentRun, явные approval/reject/cancel, diff/evidence, usage/cost при наличии. Human-readable по умолчанию, machine-readable `--json`, `--no-color`, корректные stdout/stderr и exit codes; вывод не раскрывает secrets и безопасно обрабатывает строки из репозитория/модели (escape terminal controls/markup). No full-screen TUI, no chat, no direct database/model/tools.
+
+Предложенный стек: Typer + Rich + HTTPX + pytest. Отдельный `cli/pyproject.toml`, `cli/src/forge_cli/`, `cli/tests/`, CLI README. CLI-01 подтверждает package naming, dependency versions, entry point `forge` (проверить конфликт команды в окружении). Не менять backend package layout и зависимости.
+
+## Подшаги и dependency gates
+
+| Step | Scope | Dependency / evidence |
+|---|---|---|
+| CLI-01 | Theory: CLI vs TUI, HTTP-only, commands/help, UX, packaging, exit codes. Bootstrap `cli/`, config `--base-url` / `FORGE_BASE_URL`, default loopback; `forge --help`, `forge --version`. | Existing API, clean install, smoke, no backend edits. |
+| CLI-02 | HTTP client, typed transport DTOs, timeout, structured errors, no implicit retry of mutations, redacted output. | Mock HTTP tests, connection refused / timeout / HTTP validation and malformed response; compare real OpenAPI. |
+| CLI-03 | `health`, `workspace create/list`, `task create/get`; repeated acceptance-criteria flags, UUIDs, optional idempotency key, JSON output. | Actual existing endpoints; localhost smoke with isolated DB. Task listing/repository binding only when API supports them. |
+| CLI-04 | Rich tables/panels, readable status, help/examples, `--json`, `--no-color`, non-TTY behavior, exit codes, CLI unit/regression tests, user guide. | No fabricated fields or statuses; output snapshots / tests and manual terminal check. Foundation can be accepted independently. |
+| CLI-05 | Integrate run create/start/show/events/cancel via backend contracts; polling with bounded timeout and clean Ctrl-C (stop watching, not automatic cancellation). Show preliminary result, errors, estimated cost/usage and evidence only if exposed. | Week 4 backend handoff: reviewed real API, status semantics, duplicate-start safety, live integration smoke. No assumption of scheduler, durable recovery or instant cancellation. |
+| CLI-06 | Integrate approval list/show/approve/reject and diff/evidence if supported; explicit decision on exact approval, conflict handling, no implicit auto-approve. | Week 4 approval/verification and public API handoff; verify pause/decision/resume in actual supported execution mode; deny/late cancellation scenarios. |
+| CLI-07 | CLI v0.1 review, installation/docs, local E2E demo, regression and progress. | Real model + fixture flow and backend M1 prerequisites for full agent demo; report unsupported operations separately. |
+
+CLI-01–04 form Foundation. CLI-05–07 may be `blocked` awaiting backend without blocking Week 4. Optional `task list`, `run watch`, `run diff` and artifact viewing only when supported. Command spelling in this table is a design proposal, not a claim about implemented routes. Document actual endpoint, request/response, errors and verification for each enabled command.
+
+## Backend handoff (Week 4 ownership)
+
+Keep existing Week 4 Tool System/M1 criteria. After contracts are agreed, add a narrowly scoped API slice for explicit Task → AgentRun creation/start, read status/result/events and cancel, approval list/show/decision, evidence/diff where appropriate. Backend owns state, authorization/policy and transaction boundaries. Define IDs, idempotency/duplicate start, 409 for stale transitions, response timing, error mapping, and polling semantics. Do not hold a DB transaction or HTTP request open while waiting for human approval; choose an explicit supported execution/pause mechanism for Week 4 without claiming crash recovery. Define local single-process limits and reject unsupported operations. No new framework or queue by default; durable recovery remains Week 7. Test HTTP integration and cancellation/approval races. CLI must not bypass the API or invent a resume mechanism.
+
+## Exit criteria (independent from M1)
+
+- [ ] Clean CLI install and `forge --help`/`--version`; config, typed client, deterministic exit codes.
+- [ ] Existing Workspace/Task endpoints work from CLI against local backend; readable tables/panels and machine output; no-color/non-TTY tests; stderr separated from JSON stdout.
+- [ ] Backend public AgentRun/approval/evidence contracts accepted and CLI commands exercised end-to-end on an isolated fixture; no implied success before independent evidence, no unsafe auto-approval.
+- [ ] Live provider checked in a bounded real smoke (not just MockTransport); failures/status honest; no secret leakage. If live/API prerequisites are blocked, Foundation may be complete but full CLI v0.1 remains blocked/not done.
+- [ ] Docs include startup, commands, examples, limitations, polling and cancellation semantics; CLI unit + HTTP integration checks and review evidence recorded.
+- [ ] Owner can explain HTTP boundary, DTO mapping, error handling and why CLI does not own business state.
+
+## Progress record
+
+Completed: none. Decisions: separate HTTP-only client; preserve ADR-001/002; separate worktrees and PRs. Technical debt: public execution API, live provider, approvals and verification not yet proven (Week 4 handoff). Lessons / Python Deep Dives / verification evidence / hours: not yet recorded. Next: CLI-01 and Week 4 Step 01 in separate chats, after roadmap update accepted. Status only by evidence.
+
+## Later increments (no automatic scope expansion)
+
+- Week 5–6: expose sandbox command/test artifacts via existing API when ready; no local CLI shell executor.
+- Week 7–8: durable recovery and verification reporting; model-provider spike only after live baseline and separate decision.
+- Week 9–10: Apple Client remains; share API contracts, not UI code. SSE for CLI is optional after backend SSE exists; no extra framework by default.
+- Week 11–12: remote base URL and auth only with backend security/deployment; CLI install/demo docs included in release. Web, macOS worker and project orchestration remain separate future decisions.
 
 ---
 
