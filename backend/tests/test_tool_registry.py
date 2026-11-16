@@ -1,10 +1,12 @@
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from pydantic import ConfigDict, ValidationError
 
 from app.domain.capabilities import Capability
+from app.permissions.context import PermissionContext
 from app.tools.contracts import ToolInput, ToolOutput, ToolRiskLevel, ToolSpec
 from app.tools.registry import (
     DuplicateToolError,
@@ -152,6 +154,22 @@ def test_registry_preserves_access_declarations() -> None:
 def test_registry_rejects_non_callable_path_selector() -> None:
     with pytest.raises(TypeError, match="path selector must be a synchronous callable"):
         ToolRegistry([replace(make_tool(), path_selector=object())])
+
+
+def test_registry_preserves_bound_context_identity() -> None:
+    context = PermissionContext(UUID(int=1), UUID(int=2), frozenset({Capability.REPOSITORY_READ}))
+    tool = replace(make_tool(), bound_context=context)
+
+    assert ToolRegistry([tool]).get(tool.spec.name).bound_context is context
+
+
+def test_registry_requires_exact_permission_context_type_for_binding() -> None:
+    class OtherContext(PermissionContext):
+        pass
+
+    for context in ({}, OtherContext(UUID(int=1), UUID(int=2), frozenset())):
+        with pytest.raises(TypeError, match="Bound tool context"):
+            ToolRegistry([replace(make_tool(), bound_context=context)])
 
 
 def test_registry_rejects_async_path_selectors() -> None:

@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import TypeAlias
 
 from app.domain.capabilities import Capability
+from app.permissions.context import PermissionContext
 from app.tools.contracts import ToolInput, ToolOutput, ToolSpec
 
 
@@ -18,6 +19,7 @@ class RegisteredTool:
     handler: ToolHandler
     path_selector: PathSelector | None = None
     synthetic: bool = False
+    bound_context: PermissionContext | None = None
 
 
 class DuplicateToolError(ValueError):
@@ -45,6 +47,8 @@ class ToolRegistry:
                 raise TypeError("Registered tool spec must be a ToolSpec instance")
             if not callable(definition.handler):
                 raise TypeError("Registered tool handler must be callable")
+            if definition.bound_context is not None and type(definition.bound_context) is not PermissionContext:
+                raise TypeError("Bound tool context must be a PermissionContext")
 
             # Validate field values again because model_copy(update=...) bypasses validation.
             fields = {name: getattr(definition.spec, name) for name in ToolSpec.model_fields}
@@ -83,6 +87,7 @@ class ToolRegistry:
                 handler=definition.handler,
                 path_selector=selector,
                 synthetic=definition.synthetic,
+                bound_context=definition.bound_context,
             )
 
         self._tools = MappingProxyType(tools)

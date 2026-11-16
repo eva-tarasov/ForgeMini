@@ -48,6 +48,7 @@ def make_executor(
     *,
     path_selector: PathSelector | None = None,
     synthetic: bool = True,
+    bound_context: PermissionContext | None = None,
     **overrides: object,
 ) -> ToolExecutor:
     fields = {
@@ -63,7 +64,9 @@ def make_executor(
         "requires_approval": False,
     }
     spec = ToolSpec.model_validate(fields | overrides)
-    definition = RegisteredTool(spec, handler, path_selector=path_selector, synthetic=synthetic)
+    definition = RegisteredTool(
+        spec, handler, path_selector=path_selector, synthetic=synthetic, bound_context=bound_context
+    )
     return ToolExecutor(ToolRegistry([definition]))
 
 
@@ -247,6 +250,30 @@ def test_executor_rejects_missing_capability(forbidden_handler: ToolHandler) -> 
 
     with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
         asyncio.run(executor.execute(TOOL_NAME, {"text": "abc"}, context=context))
+
+    assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(replace(READ_CONTEXT, run_id=UUID(int=3)), id="other-run"),
+        pytest.param(replace(READ_CONTEXT, workspace_id=UUID(int=3)), id="other-workspace"),
+        pytest.param(replace(READ_CONTEXT), id="equal-but-distinct"),
+    ],
+)
+def test_executor_rejects_mismatched_binding_before_selector(
+    forbidden_handler: ToolHandler, context: PermissionContext
+) -> None:
+    def selector(_tool_input: ToolInput) -> tuple[str, ...]:
+        pytest.fail("A mismatched bound context must be rejected before selection")
+
+    executor = make_executor(
+        forbidden_handler, path_selector=selector, synthetic=False, bound_context=READ_CONTEXT
+    )
+    assert context is not READ_CONTEXT
+    with pytest.raises(ToolExecutionError, match="^permission_denied$") as exc_info:
+        asyncio.run(executor.execute(TOOL_NAME, {"text": "."}, context=context))
 
     assert exc_info.value.code is ToolErrorCode.PERMISSION_DENIED
 

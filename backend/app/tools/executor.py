@@ -48,6 +48,8 @@ class ToolExecutor:
 
         if type(context) is not PermissionContext:
             raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
+        if tool.bound_context is not None and context is not tool.bound_context:
+            raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
 
         paths = None
         if tool.path_selector is not None:
