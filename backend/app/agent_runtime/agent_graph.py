@@ -1,5 +1,5 @@
 import operator
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Annotated, Literal, NotRequired, TypeVar, TypedDict
 from uuid import uuid4
 
@@ -71,8 +71,14 @@ def _prepare_message(
 
 
 def initialize(state: AgentGraphInput) -> dict[str, list[AnyMessage] | list[FixtureObservation] | int]:
+    return _initialize(state, _SYSTEM_INSTRUCTIONS)
+
+
+def _initialize(
+    state: AgentGraphInput, instructions: str,
+) -> dict[str, list[AnyMessage] | list[FixtureObservation] | int]:
     messages = build_task_messages(state["goal"], state["acceptance_criteria"])
-    messages[0] = SystemMessage(content=_SYSTEM_INSTRUCTIONS)
+    messages[0] = SystemMessage(content=instructions)
     return {
         "messages": messages,
         "model_calls": 0,
@@ -171,6 +177,15 @@ async def call_finalizer(
 
 
 def create_agent_graph(tool_model: Runnable, structured_model: Runnable) -> CompiledStateGraph:
+    return _compile_agent_graph(tool_model, structured_model, initialize, call_tool)
+
+
+def _compile_agent_graph(
+    tool_model: Runnable,
+    structured_model: Runnable,
+    initialize_node: Callable[[AgentGraphInput], Mapping[str, object]],
+    tool_node: Callable[[AgentGraphState], Awaitable[Mapping[str, object]]],
+) -> CompiledStateGraph:
     async def model_node(state: AgentGraphState) -> dict[str, list[AnyMessage] | int]:
         return await call_model(state, tool_model)
 
@@ -178,9 +193,9 @@ def create_agent_graph(tool_model: Runnable, structured_model: Runnable) -> Comp
         return await call_finalizer(state, structured_model)
 
     builder = StateGraph(AgentGraphState, input_schema=AgentGraphInput)
-    builder.add_node("initialize", initialize)
+    builder.add_node("initialize", initialize_node)
     builder.add_node("model", model_node)
-    builder.add_node("tool", call_tool)
+    builder.add_node("tool", tool_node)
     builder.add_node("finalize", finalize_node)
     builder.add_edge(START, "initialize")
     builder.add_edge("initialize", "model")
