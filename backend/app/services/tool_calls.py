@@ -1,11 +1,13 @@
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import AgentRunModel
+from app.db.models import AgentEventModel, AgentRunModel, ToolCallModel
 from app.domain.execution import AgentRunStatus, ToolCallStatus
 from app.domain.tool_call_transitions import InvalidToolCallTransition, validate_tool_call_transition
 from app.permissions.context import PermissionContext
@@ -21,6 +23,15 @@ from app.services.tool_call_audit import (
 )
 from app.tools.contracts import ToolSpec
 from app.tools.errors import ToolErrorCode, ToolExecutionError
+
+
+async def _finish_interrupted_proposal(cleanup: Awaitable[None], error: BaseException) -> None:
+    # Повторная отмена прерывает cleanup, но исходное исключение остаётся основным.
+    try:
+        async with asyncio.timeout(2):
+            await cleanup
+    except (asyncio.CancelledError, Exception):
+        error.add_note("tool_call_audit_finalization_failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,12 +52,47 @@ class ToolCallService:
     async def propose(self, context: PermissionContext, spec: ToolSpec) -> ToolCallTicket:
         if type(context) is not PermissionContext:
             raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
-        async with self._transaction() as session:
-            await self._lock_run(session, context.run_id, context.workspace_id, require_running=True)
-            ticket = ToolCallTicket(uuid4(), context.run_id, context.workspace_id, spec.name, spec.version)
-            ToolCallRepository(session).add_proposed(ticket.run_id, ticket.tool_call_id, ticket.tool_name)
-            await self._append(session, ticket, ToolCallStatus.PROPOSED)
+        ticket = ToolCallTicket(uuid4(), context.run_id, context.workspace_id, spec.name, spec.version)
+        commit_attempted = False
+        try:
+            async with self._transaction() as session:
+                await self._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=True)
+                ToolCallRepository(session).add_proposed(ticket.run_id, ticket.tool_call_id, ticket.tool_name)
+                await self._append(session, ticket, ToolCallStatus.PROPOSED)
+                commit_attempted = True
+        except (asyncio.CancelledError, ToolCallAuditError) as error:
+            if commit_attempted:
+                code = ToolCallErrorCode.CANCELLED if isinstance(error, asyncio.CancelledError) else error.code
+                await _finish_interrupted_proposal(self._reconcile_proposal(ticket, code), error)
+            raise
         return ticket
+
+    async def _reconcile_proposal(self, ticket: ToolCallTicket, code: ToolCallErrorCode) -> None:
+        async with self._transaction() as session:
+            await self._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=False)
+            call = await self._lock_proposed_call(session, ticket)
+            if call is not None:
+                validate_tool_call_transition(ToolCallStatus.PROPOSED, ToolCallStatus.FAILED)
+                call.status = ToolCallStatus.FAILED.value
+                await self._append(session, ticket, ToolCallStatus.FAILED, error_code=code)
+
+    @staticmethod
+    async def _lock_proposed_call(session: AsyncSession, ticket: ToolCallTicket) -> ToolCallModel | None:
+        """Проверить proposal под уже взятой блокировкой AgentRun."""
+        call = await ToolCallRepository(session).get_for_update(ticket.run_id, ticket.tool_call_id)
+        if call is None or call.status != ToolCallStatus.PROPOSED.value:
+            return None
+        expected = encode_tool_call_event(
+            ToolCallAudit(ticket.tool_call_id, ticket.tool_name, ticket.tool_version, ToolCallStatus.PROPOSED),
+        )
+        statement = select(AgentEventModel.event_type, AgentEventModel.payload).where(
+            AgentEventModel.agent_run_id == ticket.run_id,
+            AgentEventModel.payload["tool_call_id"].astext == str(ticket.tool_call_id),
+            AgentEventModel.event_type.in_(("tool_call_proposed", "tool_call_started", "tool_call_finished")),
+        ).limit(2)
+        if call.tool_name != ticket.tool_name or (await session.execute(statement)).all() != [expected]:
+            raise ToolCallAuditError(ToolCallErrorCode.AUDIT_PERSISTENCE_FAILED)
+        return call
 
     async def start(self, ticket: ToolCallTicket) -> None:
         await self._transition(ticket, ToolCallStatus.RUNNING)

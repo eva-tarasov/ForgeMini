@@ -11,6 +11,7 @@ from app.services.approval_contracts import ApprovalDecision, ApprovalReference,
 from app.services.approval_gate import ApprovalGate
 from app.services.pending_approvals import PendingApprovals
 from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
+from app.services.tool_calls import _finish_interrupted_proposal
 from app.tools.contracts import ToolOutput
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
@@ -77,7 +78,16 @@ class ApprovedToolExecutor:
         self._pending.reserve(operation)
         started_at: int | None = None
         try:
-            await self._gate.request(operation)
+            try:
+                await self._gate.request(operation)
+            except (asyncio.CancelledError, ToolCallAuditError) as error:
+                if isinstance(error, asyncio.CancelledError) or error.code is ToolCallErrorCode.AUDIT_PERSISTENCE_FAILED:
+                    code = ToolCallErrorCode.CANCELLED if isinstance(error, asyncio.CancelledError) else error.code
+                    sink = _approval_failure_sink.get()
+                    if sink is not None:
+                        sink(_ApprovalTerminalFailure(operation.reference, code, interrupted_request=True))
+                    await _finish_interrupted_proposal(self._gate._reconcile_unpublished_request(operation, code), error)
+                raise
             try:
                 check_cancellation()
                 try:

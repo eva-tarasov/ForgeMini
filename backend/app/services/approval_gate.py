@@ -75,6 +75,30 @@ class ApprovalGate:
             )
         self._pending.publish(operation)
 
+    async def _reconcile_unpublished_request(self, operation: PendingOperation, code: ToolCallErrorCode) -> None:
+        self._pending.require_reserved(operation)
+        reference, ticket = operation.reference, operation.reference.ticket
+        async with self._tool_calls._transaction() as session:
+            run = await self._tool_calls._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=False)
+            call = await self._tool_calls._lock_proposed_call(session, ticket)
+            if call is None:
+                return
+            approvals = ApprovalRepository(session)
+            approval = await approvals.get_for_update(reference.approval_id, ticket.tool_call_id)
+            self._pending.require_reserved(operation)
+            if (
+                approval is None or approval.status != ApprovalStatus.PENDING.value or approval.decided_at is not None
+                or await approvals.event_payloads(ticket.run_id, reference.approval_id, APPROVAL_REQUESTED)
+                != [reference.requested_payload()]
+                or await approvals.event_payloads(ticket.run_id, reference.approval_id, APPROVAL_DECIDED)
+            ):
+                raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
+            await self._record_decision(session, reference, approval, ApprovalStatus.REJECTED, reason=code)
+            await self._change_call(session, operation, call, ToolCallStatus.FAILED, error=code)
+            if run.status == AgentRunStatus.WAITING_APPROVAL.value:
+                target = AgentRunStatus.CANCELLED if code is ToolCallErrorCode.CANCELLED else AgentRunStatus.FAILED
+                await AgentRunService(session)._transition_locked(run, AgentRunStatus.WAITING_APPROVAL, target)
+
     async def decide(
         self, reference: ApprovalReference, decision: ApprovalDecision, *, context: PermissionContext,
     ) -> None:

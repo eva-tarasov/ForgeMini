@@ -41,6 +41,7 @@ from app.services.tool_call_audit import ToolCallErrorCode
 class _ApprovalTerminalFailure:
     reference: ApprovalReference
     code: ToolCallErrorCode
+    interrupted_request: bool = False
 
 
 # The callback belongs to one AgentService invocation and is inherited by graph nodes.

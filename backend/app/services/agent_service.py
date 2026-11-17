@@ -100,7 +100,10 @@ class AgentService:
                             else:
                                 await self._fail(run_id, failure, approval_failure=approval_failure)
                     except Exception as transition_error:
-                        raise transition_error from execution_error
+                        if approval_failure is None or not approval_failure.interrupted_request:
+                            raise transition_error from execution_error
+                        # Неподтверждённый outcome не разрешает переход и не подменяет исходную ошибку.
+                        execution_error.add_note("agent_failure_persistence_failed")
                     raise
 
                 with observer.phase(AgentPhase.RESULT_PERSISTENCE):
