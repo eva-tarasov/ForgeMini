@@ -20,7 +20,7 @@ from test_agent_observability import agent_log_capture
 
 from app.agent_runtime.structured_output import TaskAnalysis
 from app.core.settings import Settings
-from app.db.models import AgentEventModel, AgentRunModel, TaskModel, ToolCallModel, WorkspaceModel
+from app.db.models import AgentEventModel, AgentRunModel, ApprovalModel, TaskModel, ToolCallModel, WorkspaceModel
 from app.db.session import create_engine, create_session_factory
 from app.domain.capabilities import Capability
 from app.domain.execution import AgentRunStatus
@@ -125,6 +125,8 @@ def database(tmp_path, monkeypatch):
                 if seeded:
                     async with asyncio.timeout(5), setup.begin() as session:
                         assert await session.scalar(text("SELECT current_database()")) == name
+                        call_ids = select(ToolCallModel.id).where(ToolCallModel.agent_run_id == run_id)
+                        await session.execute(delete(ApprovalModel).where(ApprovalModel.tool_call_id.in_(call_ids)))
                         await session.execute(delete(ToolCallModel).where(ToolCallModel.agent_run_id == run_id))
                         await session.execute(delete(AgentEventModel).where(AgentEventModel.agent_run_id == run_id))
                         await session.execute(delete(AgentRunModel).where(AgentRunModel.id == run_id))

@@ -1,11 +1,12 @@
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from time import perf_counter_ns
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.permissions.context import PermissionContext
+from app.services.agent_runs import _ApprovalTerminalFailure, _approval_failure_sink
 from app.services.approval_contracts import ApprovalDecision, ApprovalReference, PendingOperation, validate_patch_proposal
 from app.services.approval_gate import ApprovalGate
 from app.services.pending_approvals import PendingApprovals
@@ -15,6 +16,12 @@ from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 from app.tools.repository.schemas import ApplyPatchInput
 from app.tools.repository.writer import PatchApplyError
+
+
+@dataclass(frozen=True, slots=True)
+class _ApprovalPreview:
+    reference: ApprovalReference
+    patch: str = field(repr=False)
 
 
 class ApprovedToolExecutor:
@@ -33,6 +40,12 @@ class ApprovedToolExecutor:
 
     def pending_request(self, context: PermissionContext) -> ApprovalReference | None:
         return self._pending.request_for(context)
+
+    def _pending_preview(self, context: PermissionContext) -> _ApprovalPreview | None:
+        operation = self._pending._undecided_operation_for(context)
+        if operation is None:
+            return None
+        return _ApprovalPreview(operation.reference, operation.patch)
 
     async def decide(
         self, reference: ApprovalReference, decision: ApprovalDecision, *, context: PermissionContext,
@@ -110,16 +123,19 @@ class ApprovedToolExecutor:
     ) -> None:
         if isinstance(error, asyncio.CancelledError):
             code = ToolCallErrorCode.CANCELLED
-        elif error.code is ToolErrorCode.APPROVAL_REJECTED:
-            return  # Rejection already committed the terminal lifecycle.
         elif error.code in (ToolErrorCode.PERMISSION_DENIED, ToolErrorCode.EXECUTION_BLOCKED):
             code = ToolCallErrorCode.APPROVAL_INVALID
         else:
             code = ToolCallErrorCode(error.code.value)
         try:
-            await self._gate.finish(operation, error=code, duration_ms=_duration(started_at))
+            if code is not ToolCallErrorCode.APPROVAL_REJECTED:
+                await self._gate.finish(operation, error=code, duration_ms=_duration(started_at))
         except Exception:
             error.add_note("tool_call_audit_finalization_failed")
+        else:
+            sink = _approval_failure_sink.get()
+            if sink is not None:
+                sink(_ApprovalTerminalFailure(operation.reference, code))
 
 
 def _duration(started_at: int | None) -> int | None:

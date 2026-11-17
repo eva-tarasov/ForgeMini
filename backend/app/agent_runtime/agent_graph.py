@@ -88,8 +88,10 @@ def _initialize(
     }
 
 
-async def call_model(state: AgentGraphState, tool_model: Runnable) -> dict[str, list[AnyMessage] | int]:
-    if state["model_calls"] >= MAX_MODEL_CALLS:
+async def call_model(
+    state: AgentGraphState, tool_model: Runnable, *, max_model_calls: int = MAX_MODEL_CALLS,
+) -> dict[str, list[AnyMessage] | int]:
+    if state["model_calls"] >= max_model_calls:
         raise AgentGraphError("model_budget_exceeded")
 
     response = await invoke_observed_model(tool_model, state["messages"], stage=ModelCallStage.RESEARCH)
@@ -185,9 +187,10 @@ def _compile_agent_graph(
     structured_model: Runnable,
     initialize_node: Callable[[AgentGraphInput], Mapping[str, object]],
     tool_node: Callable[[AgentGraphState], Awaitable[Mapping[str, object]]],
+    *, max_model_calls: int = MAX_MODEL_CALLS,
 ) -> CompiledStateGraph:
     async def model_node(state: AgentGraphState) -> dict[str, list[AnyMessage] | int]:
-        return await call_model(state, tool_model)
+        return await call_model(state, tool_model, max_model_calls=max_model_calls)
 
     async def finalize_node(state: AgentGraphState) -> dict[str, AgentFinalResult | AIMessage | int]:
         return await call_finalizer(state, structured_model)

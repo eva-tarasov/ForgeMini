@@ -19,6 +19,7 @@ from app.agent_runtime.repository_tool_schemas import READ_TOOL_NAMES
 from app.permissions.context import PermissionContext
 from app.services.audited_tool_executor import AuditedToolExecutor
 from app.services.tool_call_audit import ToolCallAuditError
+from app.tools.contracts import ToolOutput
 from app.tools.errors import ToolExecutionError
 
 
@@ -49,7 +50,18 @@ async def _call_repository_tool(
     if state["model_calls"] >= MAX_MODEL_CALLS:
         raise AgentGraphError("model_budget_exceeded")
 
-    requests = history[-1].tool_calls
+    name, arguments, call_id = _repository_request(history[-1], READ_TOOL_NAMES)
+    try:
+        output = await executor.execute(name, arguments, context=context)
+    except (ToolExecutionError, ToolCallAuditError) as exc:
+        raise AgentGraphError(exc.code.value) from None
+
+    message = _repository_tool_message(output, name, call_id)
+    return {"messages": [_prepare_message(message, history)], "tool_calls": 1}
+
+
+def _repository_request(message: AIMessage, names: tuple[str, ...]) -> tuple[str, dict[str, object], str]:
+    requests = message.tool_calls
     if len(requests) != 1:
         raise AgentGraphError("invalid_tool_call_count")
     request = requests[0]
@@ -59,24 +71,22 @@ async def _call_repository_tool(
     if not isinstance(call_id, str) or not call_id.strip() or len(call_id) > MAX_TOOL_CALL_ID_LENGTH:
         raise AgentGraphError("invalid_tool_call_id")
     name = request.get("name")
-    if not isinstance(name, str) or name not in READ_TOOL_NAMES:
+    if not isinstance(name, str) or name not in names:
         raise AgentGraphError("unknown_tool")
     arguments = request.get("args")
     if not isinstance(arguments, dict):
         raise AgentGraphError("invalid_tool_arguments")
 
-    try:
-        output = await executor.execute(name, arguments, context=context)
-    except (ToolExecutionError, ToolCallAuditError) as exc:
-        raise AgentGraphError(exc.code.value) from None
+    return name, arguments, call_id
 
+
+def _repository_tool_message(output: ToolOutput, name: str, call_id: str) -> ToolMessage:
     content = json.dumps(
         output.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
     )
     if len(content.encode("utf-8")) > MAX_TOOL_MESSAGE_BYTES:
         raise AgentGraphError("tool_message_too_large")
-    message = ToolMessage(content=content, name=name, tool_call_id=call_id, status="success")
-    return {"messages": [_prepare_message(message, history)], "tool_calls": 1}
+    return ToolMessage(content=content, name=name, tool_call_id=call_id, status="success")
 
 
 def create_repository_graph(

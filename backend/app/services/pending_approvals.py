@@ -61,12 +61,20 @@ class PendingApprovals:
     def publish(self, operation: PendingOperation) -> None:
         self._slot(operation).published = True
 
-    def request_for(self, context: PermissionContext) -> ApprovalReference | None:
+    def _published_slot_for(self, context: PermissionContext) -> _Wait | None:
         self._check_loop()
         for slot in self._entries.values():
             if slot.published and slot.operation.context is context:
-                return slot.operation.reference
+                return slot
         return None
+
+    def request_for(self, context: PermissionContext) -> ApprovalReference | None:
+        slot = self._published_slot_for(context)
+        return slot.operation.reference if slot is not None else None
+
+    def _undecided_operation_for(self, context: PermissionContext) -> PendingOperation | None:
+        slot = self._published_slot_for(context)
+        return slot.operation if slot is not None and slot.decision is None else None
 
     def resolve(self, reference: ApprovalReference, context: PermissionContext) -> PendingOperation:
         self._check_loop()

@@ -11,7 +11,7 @@ from app.services.agent_observability import AgentLogContext, AgentObserver, Age
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
 from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
-from app.services.agent_runs import AgentRunService
+from app.services.agent_runs import AgentRunService, _ApprovalTerminalFailure, _approval_failure_sink
 from app.services.agent_usage import AgentUsageSnapshot, UsageCollector, capture_agent_usage
 from app.services.agent_usage_codec import AgentUsageRecord
 
@@ -60,6 +60,13 @@ class AgentService:
             handle = self._active_runs.register(run_id)
             collector: UsageCollector | None = None
             primary_error: BaseException | None = None
+            approval_failure: _ApprovalTerminalFailure | None = None
+
+            def record_approval_failure(evidence: _ApprovalTerminalFailure) -> None:
+                nonlocal approval_failure
+                if evidence.reference.ticket.run_id == run_id:
+                    approval_failure = evidence
+
             try:
                 with observer.phase(AgentPhase.CLAIM):
                     request = await self._claim(run_id)
@@ -70,9 +77,11 @@ class AgentService:
                     with capture_agent_usage(run_id) as collector:
                         with observer.phase(AgentPhase.RUNNER):
                             handle.runner_active = True
+                            token = _approval_failure_sink.set(record_approval_failure)
                             try:
                                 result = await self._run_with_deadline(request)
                             finally:
+                                _approval_failure_sink.reset(token)
                                 handle.runner_active = False
                     _check_interruption(handle, initial_cancelling)
                     with observer.phase(AgentPhase.RESULT_VALIDATION):
@@ -86,7 +95,10 @@ class AgentService:
                     observer.failure_classified(failure.code)
                     try:
                         with observer.phase(AgentPhase.FAILURE_PERSISTENCE):
-                            await self._fail(run_id, failure)
+                            if approval_failure is None:
+                                await self._fail(run_id, failure)
+                            else:
+                                await self._fail(run_id, failure, approval_failure=approval_failure)
                     except Exception as transition_error:
                         raise transition_error from execution_error
                     raise
@@ -165,6 +177,8 @@ class AgentService:
         async with self._session_factory() as session:
             await AgentRunService(session).complete_execution(run_id, result)
 
-    async def _fail(self, run_id: UUID, failure: AgentFailure) -> None:
+    async def _fail(
+        self, run_id: UUID, failure: AgentFailure, *, approval_failure: _ApprovalTerminalFailure | None = None,
+    ) -> None:
         async with self._session_factory() as session:
-            await AgentRunService(session).fail_execution(run_id, failure)
+            await AgentRunService(session).fail_execution(run_id, failure, approval_failure=approval_failure)
