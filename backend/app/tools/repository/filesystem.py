@@ -31,7 +31,8 @@ class _UnsupportedText(RepositoryError):
 @dataclass(slots=True)
 class _WorkBudget:
     examined_entries: int = 0
-    search_bytes_remaining: int | None = None
+    read_bytes_remaining: int | None = None
+    read_limit_error: str = "repository_read_byte_budget_exceeded"
 
     def examine_entry(self) -> None:
         self.examined_entries += 1
@@ -131,7 +132,9 @@ class SafeRepositoryReader:
     def search_texts(
         self, directory: str, *, spec: ToolSpec
     ) -> Iterator[Iterator[tuple[str, str | None]]]:
-        budget = _WorkBudget(search_bytes_remaining=MAX_SEARCH_BYTES)
+        budget = _WorkBudget(
+            read_bytes_remaining=MAX_SEARCH_BYTES, read_limit_error="repository_search_byte_budget_exceeded",
+        )
         with self._file_entries(directory, spec, budget) as entries:
             with closing(self._read_candidates(entries, budget)) as texts:
                 yield texts
@@ -249,6 +252,15 @@ class SafeRepositoryReader:
         )
 
     def _read_entry(self, entry: _FileEntry, budget: _WorkBudget) -> tuple[str, int]:
+        data, _ = self._read_entry_bytes(entry, budget)
+        if b"\0" in data:
+            raise _UnsupportedText("repository_text_contains_nul")
+        try:
+            return data.decode("utf-8", errors="strict"), len(data)
+        except UnicodeDecodeError:
+            raise _UnsupportedText("repository_text_not_utf8") from None
+
+    def _read_entry_bytes(self, entry: _FileEntry, budget: _WorkBudget) -> tuple[bytes, os.stat_result]:
         if not self._is_readable_file(entry.info):
             raise RepositoryError("repository_file_refused")
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -257,36 +269,31 @@ class SafeRepositoryReader:
             if not self._is_readable_file(opened) or _identity(opened) != _identity(entry.info):
                 raise RepositoryError("repository_file_changed")
             data = self._read_bytes(fd, opened.st_size, budget)
-            if not self._is_readable_file(os.fstat(fd)):
+            current = os.fstat(fd)
+            if not self._is_readable_file(current):
                 raise RepositoryError("repository_file_changed")
-
-        if b"\0" in data:
-            raise _UnsupportedText("repository_text_contains_nul")
-        try:
-            return data.decode("utf-8", errors="strict"), len(data)
-        except UnicodeDecodeError:
-            raise _UnsupportedText("repository_text_not_utf8") from None
+        return bytes(data), current
 
     @staticmethod
     def _read_bytes(fd: int, size: int, budget: _WorkBudget) -> bytearray:
         if size > MAX_FILE_BYTES:
             raise _UnsupportedText("repository_file_budget_exceeded")
-        if budget.search_bytes_remaining is not None and size > budget.search_bytes_remaining:
-            raise RepositoryError("repository_search_byte_budget_exceeded")
+        if budget.read_bytes_remaining is not None and size > budget.read_bytes_remaining:
+            raise RepositoryError(budget.read_limit_error)
 
         data = bytearray()
         while True:
             remaining = MAX_FILE_BYTES - len(data)
-            if budget.search_bytes_remaining is not None:
-                remaining = min(remaining, budget.search_bytes_remaining)
+            if budget.read_bytes_remaining is not None:
+                remaining = min(remaining, budget.read_bytes_remaining)
             # A one-byte probe distinguishes exact-limit EOF from growth beyond the limit.
             chunk = os.read(fd, min(8192, remaining + 1))
             if not chunk:
                 return data
-            if budget.search_bytes_remaining is not None:
-                budget.search_bytes_remaining -= len(chunk)
-                if budget.search_bytes_remaining < 0:
-                    raise RepositoryError("repository_search_byte_budget_exceeded")
+            if budget.read_bytes_remaining is not None:
+                budget.read_bytes_remaining -= len(chunk)
+                if budget.read_bytes_remaining < 0:
+                    raise RepositoryError(budget.read_limit_error)
             if len(data) + len(chunk) > MAX_FILE_BYTES:
                 raise _UnsupportedText("repository_file_budget_exceeded")
             data.extend(chunk)

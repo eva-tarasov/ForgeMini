@@ -5,6 +5,8 @@ from app.tools.contracts import ToolSpec
 from app.tools.repository.baseline import FixtureBaseline, diff_lines
 from app.tools.repository.filesystem import RepositoryError, SafeRepositoryReader, check_output_size
 from app.tools.repository.schemas import (
+    ApplyPatchInput,
+    ApplyPatchOutput,
     GitDiffInput,
     GitDiffOutput,
     ListFilesInput,
@@ -14,6 +16,7 @@ from app.tools.repository.schemas import (
     SearchFilesInput,
     SearchFilesOutput,
 )
+from app.tools.repository.writer import SafeRepositoryWriter
 
 
 MAX_SEARCH_MATCHES = 100
@@ -82,3 +85,8 @@ async def git_diff(
         check_output_size(payload_size)
         diff.append(line)
     return GitDiffOutput(path=path, revision=baseline.revision, diff="".join(diff), changed=bool(diff))
+
+
+async def apply_patch(arguments: ApplyPatchInput, *, writer: SafeRepositoryWriter) -> ApplyPatchOutput:
+    paths = writer.apply(arguments.patch)
+    return ApplyPatchOutput(changed_paths=paths, changed_files=len(paths))

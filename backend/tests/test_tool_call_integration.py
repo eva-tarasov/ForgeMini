@@ -30,9 +30,10 @@ from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 from app.tools.registry import RegisteredTool, ToolRegistry
 from app.tools.repository.baseline import FixtureBaseline
-from app.tools.repository.factory import create_fixture_executor
+from app.tools.repository.factory import create_fixture_executor, create_fixture_patch_tool
 from app.tools.repository.filesystem import SafeRepositoryReader
 from app.tools.repository.schemas import ReadFileOutput
+from app.tools.repository.writer import SafeRepositoryWriter
 
 
 pytestmark = pytest.mark.skipif(
@@ -222,6 +223,36 @@ def test_postgres_audit_denies_unauthorized_fixture_before_read(database, tmp_pa
         with pytest.raises(ToolExecutionError, match="^permission_denied$"):
             await wrapper.execute("read_file", {"path": SENTINEL}, context=case.context)
         assert_audit(await snapshot(case), ["proposed", "denied"], error="permission_denied", name="read_file", version=1)
+
+    database(check)
+
+
+def test_postgres_audit_blocks_actual_patch_tool_without_starting_or_writing(database, tmp_path, monkeypatch):
+    async def check(case):
+        file = tmp_path / "allowed.txt"
+        file.write_bytes(b"before\n")
+        context = replace(
+            case.context,
+            capabilities=frozenset({Capability.REPOSITORY_READ, Capability.REPOSITORY_WRITE}),
+            write_scopes=(PathScope("allowed.txt"),),
+        )
+        tool = create_fixture_patch_tool(root=tmp_path, context=context)
+        wrapper = AuditedToolExecutor(ToolExecutor(ToolRegistry([tool])), ToolCallService(case.factory))
+
+        def no_write(*_args, **_kwargs):
+            pytest.fail("An audited write proposal must not execute its handler")
+
+        monkeypatch.setattr(SafeRepositoryWriter, "apply", no_write)
+        patch = f"--- a/allowed.txt\n+++ b/allowed.txt\n@@ -1,1 +1,1 @@\n-before\n+{SENTINEL}\n"
+        with pytest.raises(ToolExecutionError, match="^execution_blocked$"):
+            await wrapper.execute("apply_patch", {"patch": patch}, context=context)
+
+        view = await snapshot(case, fresh_engine=True)
+        assert view[0] == "running"
+        assert_audit(view, ["proposed", "denied"], error="execution_blocked", name="apply_patch", version=1)
+        assert [event.event_type for event in view[3]] == ["tool_call_proposed", "tool_call_finished"]
+        assert all("allowed.txt" not in json.dumps(event.payload) for event in view[3])
+        assert file.read_bytes() == b"before\n" and list(tmp_path.iterdir()) == [file]
 
     database(check)
 

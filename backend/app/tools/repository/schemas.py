@@ -1,6 +1,7 @@
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.tools.contracts import ToolInput, ToolOutput
+from app.tools.repository.patch import MAX_PATCH_BYTES, parse_patch
 
 
 class ReadFileInput(ToolInput):
@@ -40,3 +41,18 @@ class GitDiffOutput(ToolOutput):
     revision: str
     diff: str
     changed: bool
+
+
+class ApplyPatchInput(ToolInput):
+    patch: str = Field(min_length=1, max_length=MAX_PATCH_BYTES)
+
+    @field_validator("patch")
+    @classmethod
+    def validate_patch(cls, text: str) -> str:
+        parse_patch(text)
+        return text
+
+
+class ApplyPatchOutput(ToolOutput):
+    changed_paths: tuple[str, ...]
+    changed_files: int
