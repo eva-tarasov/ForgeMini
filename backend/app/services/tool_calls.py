@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.models import AgentRunModel
 from app.domain.execution import AgentRunStatus, ToolCallStatus
 from app.domain.tool_call_transitions import InvalidToolCallTransition, validate_tool_call_transition
 from app.permissions.context import PermissionContext
@@ -92,7 +93,7 @@ class ToolCallService:
     @staticmethod
     async def _lock_run(
         session: AsyncSession, run_id: UUID, workspace_id: UUID, *, require_running: bool
-    ) -> None:
+    ) -> AgentRunModel:
         run = await AgentRunRepository(session).get_for_update(run_id)
         if run is None:
             raise ToolCallAuditError(ToolCallErrorCode.RUN_NOT_RUNNING)
@@ -101,6 +102,7 @@ class ToolCallService:
             raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
         if require_running and run.status != AgentRunStatus.RUNNING.value:
             raise ToolCallAuditError(ToolCallErrorCode.RUN_NOT_RUNNING)
+        return run
 
     async def _transition(
         self,

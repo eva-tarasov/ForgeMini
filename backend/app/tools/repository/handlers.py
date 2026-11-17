@@ -16,7 +16,7 @@ from app.tools.repository.schemas import (
     SearchFilesInput,
     SearchFilesOutput,
 )
-from app.tools.repository.writer import SafeRepositoryWriter
+from app.tools.repository.writer import SafeRepositoryWriter, SourceFingerprint
 
 
 MAX_SEARCH_MATCHES = 100
@@ -87,6 +87,9 @@ async def git_diff(
     return GitDiffOutput(path=path, revision=baseline.revision, diff="".join(diff), changed=bool(diff))
 
 
-async def apply_patch(arguments: ApplyPatchInput, *, writer: SafeRepositoryWriter) -> ApplyPatchOutput:
-    paths = writer.apply(arguments.patch)
+async def apply_patch(
+    arguments: ApplyPatchInput, *, writer: SafeRepositoryWriter,
+    expected_sources: tuple[SourceFingerprint, ...] | None = None,
+) -> ApplyPatchOutput:
+    paths = writer.apply(arguments.patch, expected_sources=expected_sources)
     return ApplyPatchOutput(changed_paths=paths, changed_files=len(paths))

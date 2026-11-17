@@ -7,8 +7,8 @@ from pydantic import ValidationError
 from app.domain.capabilities import Capability
 from app.permissions.context import PermissionContext
 from app.permissions.policy import PermissionOutcome, PermissionPolicy
-from app.tools.contracts import ToolOutput, ToolSpec
-from app.tools.errors import ToolErrorCode, ToolExecutionError
+from app.tools.contracts import ToolInput, ToolOutput, ToolSpec
+from app.tools.errors import PartialSideEffectError, ToolErrorCode, ToolExecutionError
 from app.tools.registry import RegisteredTool, ToolRegistry, ToolVersionMismatchError, UnknownToolError
 
 
@@ -44,6 +44,20 @@ class ToolExecutor:
         context: PermissionContext | None = None,
         before_handler: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolOutput:
+        tool, tool_input, outcome, _ = self._prepare_call(name, arguments, version=version, context=context)
+        spec = tool.spec
+        if (
+            outcome is not PermissionOutcome.ALLOW
+            or spec.capability is not Capability.REPOSITORY_READ
+            or spec.side_effect is not False
+            or spec.requires_approval is not False
+        ):
+            raise ToolExecutionError(ToolErrorCode.EXECUTION_BLOCKED)
+        return await self._invoke_handler(tool, tool_input, before_handler=before_handler)
+
+    def _prepare_call(
+        self, name: str, arguments: dict[str, object], *, version: int | None, context: PermissionContext | None,
+    ) -> tuple[RegisteredTool, ToolInput, PermissionOutcome, tuple[str, ...] | None]:
         if not isinstance(arguments, dict):
             raise ToolExecutionError(ToolErrorCode.INVALID_REQUEST)
         tool = self._resolve_tool(name, version)
@@ -68,23 +82,23 @@ class ToolExecutor:
                 raise ToolExecutionError(ToolErrorCode.INTERNAL_ERROR) from None
 
         decision = self._permission_policy.evaluate(spec, context, paths=paths, synthetic=tool.synthetic)
-        if decision.outcome is PermissionOutcome.APPROVAL_REQUIRED:
-            raise ToolExecutionError(ToolErrorCode.EXECUTION_BLOCKED)
-        if decision.outcome is not PermissionOutcome.ALLOW:
+        if decision.outcome is PermissionOutcome.DENY:
             raise ToolExecutionError(ToolErrorCode.PERMISSION_DENIED)
+        return tool, tool_input, decision.outcome, paths
 
-        if (
-            spec.capability is not Capability.REPOSITORY_READ
-            or spec.side_effect is not False
-            or spec.requires_approval is not False
-        ):
-            raise ToolExecutionError(ToolErrorCode.EXECUTION_BLOCKED)
-
+    @staticmethod
+    def _validate_handler(tool: RegisteredTool) -> None:
         handler = tool.handler
         # Python's implicit call looks up __call__ on the handler's type.
         if not (iscoroutinefunction(handler) or iscoroutinefunction(type(handler).__call__)):
             raise ToolExecutionError(ToolErrorCode.INVALID_HANDLER)
 
+    async def _invoke_handler(
+        self, tool: RegisteredTool, tool_input: ToolInput, *,
+        before_handler: Callable[[], Awaitable[None]] | None = None,
+    ) -> ToolOutput:
+        self._validate_handler(tool)
+        handler, spec = tool.handler, tool.spec
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         initial_cancellations = task.cancelling() if task is not None else 0
@@ -96,16 +110,22 @@ class ToolExecutor:
         timeout = asyncio.timeout(spec.timeout_ms / 1000)
         deadline = timeout.when()
 
-        def check_completion() -> None:
+        def check_cancellation() -> None:
             # After exit, the timeout scope has removed its own cancellation request.
             if task is not None and task.cancelling() > initial_cancellations:
                 raise asyncio.CancelledError from None
+
+        def check_completion() -> None:
+            check_cancellation()
             if timeout.expired() or (deadline is not None and loop.time() >= deadline):
                 raise ToolExecutionError(ToolErrorCode.TOOL_TIMEOUT) from None
 
         try:
             async with timeout:
                 output = await handler(tool_input)
+        except PartialSideEffectError:
+            check_cancellation()
+            raise ToolExecutionError(ToolErrorCode.PARTIAL_SIDE_EFFECT) from None
         except Exception:
             check_completion()
             raise ToolExecutionError(ToolErrorCode.HANDLER_FAILED) from None

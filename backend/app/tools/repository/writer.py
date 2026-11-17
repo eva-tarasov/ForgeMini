@@ -4,6 +4,7 @@ import os
 import stat
 from contextlib import ExitStack
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from app.domain.capabilities import Capability
 from app.permissions.context import PermissionContext
 from app.permissions.policy import PermissionOutcome, PermissionPolicy
 from app.tools.contracts import ToolSpec
+from app.tools.errors import PartialSideEffectError
 from app.tools.repository.filesystem import (
     RepositoryError,
     SafeRepositoryReader,
@@ -38,6 +40,19 @@ class PatchApplyError(RuntimeError):
         self.code = code
         self.replaced_paths = replaced_paths
         super().__init__(code)
+
+
+class _PartialPatchApplyError(PatchApplyError, PartialSideEffectError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFingerprint:
+    path: str
+    parent_identity: tuple[int, int]
+    identity: tuple[int, int]
+    mode: int
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +91,32 @@ class SafeRepositoryWriter:
         self._read_spec = read_spec
         self._write_spec = write_spec
 
-    def apply(self, text: str) -> tuple[str, ...]:
+    def preview(self, text: str) -> tuple[SourceFingerprint, ...]:
+        """Prepare the same targets and capture their original bytes without staging."""
+        try:
+            patch = parse_patch(text)
+            self._authorize(patch.paths)
+            with ExitStack() as directories:
+                budget = _WorkBudget(read_bytes_remaining=MAX_TOTAL_PATCH_FILE_BYTES)
+                return self._fingerprints(self._prepare(patch, directories, budget))
+        except (OSError, RepositoryError):
+            raise PatchApplyError("patch_io_failed") from None
+        except PatchTextError as error:
+            raise PatchApplyError(error.code) from None
+
+    @staticmethod
+    def _fingerprints(plan: tuple[_PreparedFile, ...]) -> tuple[SourceFingerprint, ...]:
+        return tuple(
+            SourceFingerprint(
+                target.patch.path, _identity(os.fstat(target.parent)), target.identity,
+                target.mode, sha256(target.original).hexdigest(),
+            )
+            for target in plan
+        )
+
+    def apply(
+        self, text: str, *, expected_sources: tuple[SourceFingerprint, ...] | None = None,
+    ) -> tuple[str, ...]:
         """Prepare, stage and replace in patch order. A failure after replacement is partial."""
         pending: _StagedFiles = {}
         replaced: list[str] = []
@@ -88,6 +128,8 @@ class SafeRepositoryWriter:
             budget = _WorkBudget(read_bytes_remaining=3 * MAX_TOTAL_PATCH_FILE_BYTES)
             with ExitStack() as directories:
                 plan = self._prepare(patch, directories, budget)
+                if expected_sources is not None and self._fingerprints(plan) != expected_sources:
+                    raise PatchApplyError("patch_conflict")
                 try:
                     staging_names = tuple(self._stage(target, pending) for target in plan)
                     for target in plan:
@@ -111,7 +153,8 @@ class SafeRepositoryWriter:
                 code = "patch_partial_apply"
             elif isinstance(error, (PatchTextError, PatchApplyError)):
                 code = error.code
-            failure = PatchApplyError(code, tuple(replaced))
+            error_type = _PartialPatchApplyError if replaced else PatchApplyError
+            failure = error_type(code, tuple(replaced))
             if cleanup_failed:
                 failure.add_note("patch_staging_cleanup_failed")
             raise failure from None

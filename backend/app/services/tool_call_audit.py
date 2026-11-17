@@ -21,6 +21,11 @@ class ToolCallErrorCode(StrEnum):
     HANDLER_FAILED = ToolErrorCode.HANDLER_FAILED.value
     INVALID_OUTPUT = ToolErrorCode.INVALID_OUTPUT.value
     INTERNAL_ERROR = ToolErrorCode.INTERNAL_ERROR.value
+    APPROVAL_INVALID = ToolErrorCode.APPROVAL_INVALID.value
+    APPROVAL_REJECTED = ToolErrorCode.APPROVAL_REJECTED.value
+    APPROVAL_TIMEOUT = ToolErrorCode.APPROVAL_TIMEOUT.value
+    APPROVAL_SOURCE_CHANGED = ToolErrorCode.APPROVAL_SOURCE_CHANGED.value
+    PARTIAL_SIDE_EFFECT = ToolErrorCode.PARTIAL_SIDE_EFFECT.value
     CANCELLED = "cancelled"
     RUN_NOT_RUNNING = "run_not_running"
     AUDIT_PERSISTENCE_FAILED = "audit_persistence_failed"
@@ -34,7 +39,9 @@ class ToolCallAuditError(RuntimeError):
         super().__init__(code.value)
 
 
-_DENIALS = frozenset({ToolCallErrorCode.PERMISSION_DENIED, ToolCallErrorCode.EXECUTION_BLOCKED})
+_DENIALS = frozenset({
+    ToolCallErrorCode.PERMISSION_DENIED, ToolCallErrorCode.EXECUTION_BLOCKED, ToolCallErrorCode.APPROVAL_REJECTED,
+})
 _EVENT_TYPES = {
     ToolCallStatus.PROPOSED: "tool_call_proposed",
     ToolCallStatus.RUNNING: "tool_call_started",

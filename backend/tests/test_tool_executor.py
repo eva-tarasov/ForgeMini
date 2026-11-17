@@ -9,7 +9,7 @@ from pydantic import model_validator
 from app.domain.capabilities import Capability
 from app.permissions.context import PathScope, PermissionContext
 from app.tools.contracts import ToolInput, ToolOutput, ToolRiskLevel, ToolSpec
-from app.tools.errors import ToolErrorCode, ToolExecutionError
+from app.tools.errors import PartialSideEffectError, ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 from app.tools.registry import PathSelector, RegisteredTool, ToolHandler, ToolRegistry
 
@@ -462,6 +462,30 @@ def test_executor_classifies_exception_after_monotonic_deadline_as_timeout(
     asyncio.run(check())
 
 
+def test_executor_preserves_partial_side_effect_after_monotonic_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+
+        async def handler(_tool_input: ToolInput) -> ToolOutput:
+            nonlocal now
+            # Advance the clock without yielding to the timeout callback.
+            now += 2
+            raise PartialSideEffectError from OSError(SYNTHETIC_SECRET)
+
+        executor = make_executor(handler, timeout_ms=1000)
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "time", lambda: now)
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await executor.execute(TOOL_NAME, {"text": "abc"}, context=READ_CONTEXT)
+
+        assert_safe_error(exc_info.value, ToolErrorCode.PARTIAL_SIDE_EFFECT)
+
+    asyncio.run(check())
+
+
 def test_executor_propagates_external_cancellation() -> None:
     async def check() -> None:
         started, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -500,8 +524,14 @@ def test_executor_propagates_external_cancellation() -> None:
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("raise_after_cancellation", [False, True], ids=["returns-output", "raises-error"])
-def test_executor_preserves_swallowed_external_cancellation(raise_after_cancellation: bool) -> None:
+@pytest.mark.parametrize(
+    "error_after_cancellation",
+    [None, RuntimeError, PartialSideEffectError],
+    ids=["returns-output", "raises-error", "raises-partial-side-effect"],
+)
+def test_executor_preserves_swallowed_external_cancellation(
+    error_after_cancellation: type[Exception] | None,
+) -> None:
     async def check() -> None:
         started, release, swallowed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -511,8 +541,8 @@ def test_executor_preserves_swallowed_external_cancellation(raise_after_cancella
                 await release.wait()
             except asyncio.CancelledError:
                 swallowed.set()
-                if raise_after_cancellation:
-                    raise RuntimeError(SYNTHETIC_SECRET)
+                if error_after_cancellation is not None:
+                    raise error_after_cancellation(SYNTHETIC_SECRET)
             return SampleOutput(size=3)
 
         executor = make_executor(handler, timeout_ms=30_000)
