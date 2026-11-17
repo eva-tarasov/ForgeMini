@@ -608,7 +608,7 @@ blocked_reason
 **Codex:** LEARNING\
 **Фактические часы:** не зафиксированы
 
-Steps 01–05 завершены и вошли в `main`. Инженерный прогресс — **5 из 13**, осталось 8. **M1 остаётся открытым.** Следующий шаг — **Step 06 — Persisted ToolCall audit**. Владелец выбрал документационные checkpoints после Step 05 и Step 08. Дальнейшие checkpoints будут согласованы отдельно. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
+Steps 01–08 завершены и вошли в `main`. Инженерный прогресс — **8/13**, осталось 5. **M1 остаётся открытым.** Следующий шаг — **Step 09 — LangGraph Tool Integration**. Документационные checkpoints после Step 05 и Step 08 фиксируют принятые результаты. Дальнейшие checkpoints будут согласованы отдельно. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
 
 ## Цель
 
@@ -678,9 +678,9 @@ apply_patch
 | 03 | ToolExecutor | done · [PR #34](https://github.com/eva-tarasov/myFirstForge/pull/34) |
 | 04 | PermissionPolicy | done · [PR #35](https://github.com/eva-tarasov/myFirstForge/pull/35) |
 | 05 | Read-only Repository Tools | done · [PR #36](https://github.com/eva-tarasov/myFirstForge/pull/36) |
-| 06 | Persisted ToolCall audit | not started |
-| 07 | Controlled apply_patch в fixture-репозиториях | not started |
-| 08 | Approval gate и in-process pause/resume | not started |
+| 06 | Persisted ToolCall audit | done · [PR #38](https://github.com/eva-tarasov/myFirstForge/pull/38) |
+| 07 | Controlled apply_patch в fixture-репозиториях | done · [PR #39](https://github.com/eva-tarasov/myFirstForge/pull/39) |
+| 08 | Approval gate и in-process pause/resume | done · [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40) |
 | 09 | Интеграция tools и permissions в LangGraph | not started |
 | 10 | Independent verification v1 | not started |
 | 11 | Public AgentRun API — create/start/show/events/result/cancel | not started |
@@ -700,43 +700,79 @@ apply_patch
   - Reviewed feature HEAD `3b466a4e1b4a9d8559fe88074631fcb399498b1a`, merge `7de3d939f0477d6349d4c93ec5eca04890ccb4f3`. На macOS и Python `3.13.0` filesystem — 24 passed, repository tools — 41 passed, реестр — 39 passed, executor — 60 passed, policy — 61 passed, контракты — 55 passed. Последняя обычная регрессия — **1029 passed, 157 skipped**, 0 failures и 0 pytest warnings. `pip check` и `git diff --check` — PASS.
   - Владелец подтвердил **31 passed** на worktree до коммита и **164 passed** в итоговой focused regression на чистом опубликованном HEAD. Архитектура, код и безопасность в пределах fixture threat model приняты на ревью.
 
+### Принятые Steps 06–08
+
+**Step 06 — Persisted ToolCall audit.** `ToolCallRepository` и `ToolCallService` используют существующую схему PostgreSQL. Домен разрешает переходы `proposed → running | denied | failed` и `running → succeeded | failed`. Терминальные записи остаются закрытыми. Каждый этап проходит в короткой транзакции с атомарной записью статуса `ToolCall` и соответствующего `AgentEvent`. Сервис сначала блокирует родительский `AgentRun`, сверяет workspace через связанный Task и требует `running` при создании предложения и допуске.
+
+- `AuditedToolExecutor` передаёт доверенный callback `before_handler`. Callback коммитит допуск `running` до вызова handler. Во время handler сессия аудита закрыта. В событиях хранятся идентификаторы, имя и версия tool, статус, код ошибки и длительность при наличии. Сырые аргументы, содержимое файлов и сообщения исключений остаются вне аудита.
+- При отмене executor пытается записать `failed` с кодом `cancelled` и пробрасывает отмену. Финальная ошибка аудита при уже возникшей ошибке добавляет диагностическую пометку к исходному исключению. Результат успешного handler возвращается только после успешного финального коммита. `AgentRunner` пока работает отдельно.
+- Squash merge `5066d556570e729aabdf93dfdc2634f1e9893574`. Схема, миграции и зависимости сохранены. [PR #38](https://github.com/eva-tarasov/myFirstForge/pull/38)
+
+**Step 07 — Controlled apply_patch.** Restricted unified diff v1 применяет hunks по указанным позициям с точным совпадением строк. Операция поддерживает до четырёх существующих файлов, 32 hunks и 64 КиБ текста patch. Writer проверяет read и write для всех путей до чтения содержимого. Регрессия подтверждает отказ всей многофайловой операции, если одному из путей не хватает доступа.
+
+- `SafeRepositoryWriter` готовит изменения для всех файлов, создаёт все временные файлы, перепроверяет исходники и выполняет descriptor-relative `os.replace` с повторной проверкой непосредственно перед каждой заменой. Атомарность действует на одну замену. Если ошибка возникла после первой замены, writer сообщает `patch_partial_apply`. Уже заменённые файлы остаются изменёнными, автоматический откат и retry отсутствуют.
+- Прямые записи проверены только на одноразовых fixture-репозиториях через доверенный тестовый вызов. `ToolExecutor` и `AuditedToolExecutor` блокируют запись.
+- Squash merge `1bbe6849311cebf14a133f111939cdbdc8c13a77`. Миграции и новые зависимости отсутствуют. [PR #39](https://github.com/eva-tarasov/myFirstForge/pull/39)
+
+**Step 08 — Approval Gate.** `ApprovalRepository` и `ApprovalGate` используют существующую `ApprovalModel` и переходы `AgentRun`. Короткие транзакции фиксируют запрос, решение, допуск к исполнению (`claim`) и завершение. После коммита запроса `AgentRun` находится в `waiting_approval`. `PendingApprovals` ограничивает число ожидающих операций и время ожидания в одном процессе через `asyncio.Event` и монотонный дедлайн. Во время ожидания и выполнения handler транзакции БД закрыты.
+
+- `ApprovedToolExecutor` связывает запрос с workspace, `AgentRun`, конкретным `ToolCall`, именем и версией tool, неизменяемым patch и fingerprints исходных файлов. В аудит попадают идентификаторы, статусы, хеши и стабильные коды ошибок. Доверенный код в процессе явно передаёт approve или reject. Timeout и отмена обрабатываются отдельными путями.
+- После approve executor перепроверяет fingerprints исходников. Под блокировками PostgreSQL `claim` проверяет сохранённую привязку и переводит тот же `ToolCall` из `proposed` в `running` один раз. Лишь после коммита handler получает связанный patch и исходные fingerprints для повторной проверки перед записью. Интеграционный тест подтвердил реальную запись в fixture после такого допуска. Обычный и аудируемый executors по-прежнему блокируют запись.
+- Интеграционный тест частичной записи проверил сохранённый код `patch_partial_apply` без текста patch, путей и содержимого файлов в аудите. Первая замена осталась на диске, повторное использование approval было отклонено.
+- **Исправление ревью.** Codex зафиксировал RED → GREEN для теста с подменой монотонных часов. На HEAD `e56f319274a7fd70ebcc48994ac9e298d822fb2d` он получил `tool_timeout` после сообщения handler о частичном эффекте (1 failed). После исправления, вошедшего в HEAD `bae10d3b571ffaa64a75585df10eda506dbe8a49`, тест получил `patch_partial_apply` (1 passed). При конкурирующей внешней отмене сохраняется приоритет `CancelledError`. Владелец проверил исправленный опубликованный HEAD до merge.
+- Squash merge `b59ef1b35803da161de85ce9643ced59c0f83008`. Миграции и новые core-зависимости отсутствуют. [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40)
+
+#### Результаты проверок и фактические часы
+
+| Step | Обычная локальная регрессия | Отдельные PostgreSQL opt-in прогоны | Независимая проверка владельца |
+|---|---|---|---|
+| 06 | 1123 passed, 182 skipped | 182 passed: 25 новых для ToolCall и 157 ранее существовавших | 27 passed на чистом опубликованном HEAD. [PR #38](https://github.com/eva-tarasov/myFirstForge/pull/38) |
+| 07 | 1222 passed, 183 skipped | ToolCall integration — 26 passed, включая новый тест блокировки записи | 41 passed на опубликованном HEAD. [PR #39](https://github.com/eva-tarasov/myFirstForge/pull/39) |
+| 08 | 1235 passed, 216 skipped | 216 passed: 33 новых для approval и 183 ранее существовавших | 36 passed на ранее опубликованном feature HEAD. После исправления — ToolExecutor 70 passed, PostgreSQL approval 33 passed, дополнительные focused проверки PASS. [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40) |
+
+PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COMMITTED` и Alembic revision `1d972cc34fbe`. Отдельные прогоны Step 06 закрыли прежний пробел по 157 opt-in тестам, пропущенным в обычных регрессиях Steps 01–05. На Step 08 обычный и отдельный opt-in прогоны покрыли 1451 тест. Полные регрессии разных шагов перекрываются. Результаты владельца и дополнительные focused прогоны фиксируются отдельно, поскольку их случаи входят в соответствующие suites. Источник результатов — локальные прогоны Codex и владельца, указанные в PR. GitHub CI ещё отсутствует. Фактические часы не зафиксированы.
+
 ### Архитектурные решения и инварианты
 
-- Сохраняются модульный монолит, LangChain и собственный LangGraph `StateGraph` за `AgentRunner`. PostgreSQL остаётся источником бизнес-состояния. Steps 01–05 прошли без новых core-зависимостей. [ADR-001](docs/adr/ADR-001.md) · [ADR-002](docs/adr/ADR-002.md).
+- Сохраняются модульный монолит, LangChain и собственный LangGraph `StateGraph` за `AgentRunner`. PostgreSQL остаётся источником бизнес-состояния. Steps 01–08 прошли без новых core-зависимостей. [ADR-001](docs/adr/ADR-001.md) · [ADR-002](docs/adr/ADR-002.md).
 - `ToolSpec` задаёт требования и схемы, `ToolRegistry` хранит проверенные определения, `ToolExecutor` контролирует вызов, а `PermissionPolicy` принимает решение о доступе. Capabilities и scopes поступают в доверенном контексте отдельно от model arguments. По умолчанию доступ запрещён. Approval применим только после прохождения проверок capability и scope.
-- Все реальные инструменты в рамках фабрики используют точный экземпляр доверенного контекста, выбранный backend fixture root и один `SafeRepositoryReader`. `git_diff` ограничен сравнением текста одного файла с переданным snapshot.
+- Read-only фабрика связывает tools с точным экземпляром доверенного контекста, выбранным backend fixture root и одним `SafeRepositoryReader`. `git_diff` ограничен сравнением текста одного файла с переданным snapshot. Отдельная фабрика привязывает `apply_patch` к `SafeRepositoryWriter`.
+- `ToolCall` фиксирует жизненный цикл отдельного вызова, `AgentRun` — жизненный цикл всего запуска. `PermissionPolicy` проверяет права на ресурсы. Approval фиксирует решение по одной неизменяемой операции, прошедшей проверку прав.
+- Сохранённый audit фиксирует переходы и наблюдаемые результаты. Коммит `running` подтверждает допуск, а факт side effect устанавливается отдельно. Блокировки обеспечивают однократный допуск данного `ToolCall` в поддерживаемом in-process сценарии. Durable resume и гарантии распределённого исполнения остаются за его пределами.
 - Новый tool system пока работает отдельно от `AgentRunner` и LangGraph. Текущий граф по-прежнему использует Week 3 `read_fixture`. Переход `AgentRun` в `succeeded` требует независимой verification с evidence даже после успешного tool call. Полный sandbox относится к Week 6, durable orchestration — к Week 7.
 
 ### Технический долг и ограничения
 
 | Открытый вопрос | Где вернуться |
 |---|---|
-| Во всех обычных регрессиях Steps 01–05 пропущены 157 PostgreSQL opt-in тестов. Их отдельного прогона в Week 4 пока не было. PostgreSQL evidence Week 3 остаётся историческим. | При проверке persistence в Step 06 зафиксировать фактическое PostgreSQL-покрытие. |
 | Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
 | Фабрика связывает экземпляр per-run контекста и корень в пределах одного набора tools. Сквозная проверка соответствия workspace и физического корня пока отсутствует. | Step 09, привязка к AgentRunner. |
-| UUID в `PermissionContext` служат идентификаторами для доверенного backend-контекста. Личность пользователя, сохранённое владение и текущий статус `AgentRun` требуют отдельной проверки. | Интеграция контекста с run в Step 09 и границы публичных API в Steps 11–12. |
-| Reader рассчитан на доверенные локальные fixture roots и контролируемые предки. Произвольные конкурентные изменения файловой системы и полная sandbox-изоляция вне проверенного контура. | Fixture threat model в Steps 07–09, полноценная изоляция в Week 6. |
+| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval пока поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Привязка контекста к runtime в Step 09 и публичные API в Steps 11–12. |
+| Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. Между проверкой и операцией остаются TOCTOU-окна при конкурентных изменениях файловой системы. | Интеграция с учётом fixture threat model в Step 09, изоляция в Week 6. |
 | Подтверждён macOS-прогон. Linux — целевая платформа при наличии требуемых POSIX-примитивов, независимого Linux-прогона на checkpoint не было. | Отдельная проверка Linux-совместимости. |
 | Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Подключение инструментов к runtime в Step 09 и проектирование sandbox в Week 6. |
 | Output budgets применяются к полезному UTF-8 тексту. Полный сериализованный API envelope пока вне этих лимитов. | Публичные response DTO в Steps 11–12. |
 | Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
-| Нужен executor regression для многофайловой операции, в которой один ресурс вне scope. | Step 07, controlled apply_patch. |
-| Полный persisted `ToolCall` audit trail, write execution, approval workflow, интеграция с AgentRunner и независимая verification v1 ещё впереди. | Steps 06–10. |
-| Публичные AgentRun/approval/evidence API и live M1 smoke ещё впереди. | Steps 11–13 с существующими M1 exit criteria и CLI dependency gates. |
-
-Блокеров для Step 06 нет. Следующее обновление документации запланировано после Step 08.
+| Сбой процесса, неоднозначный commit или повторная отмена могут оставить незавершённые записи. In-process ожидание теряется при перезапуске. | Durable approval resume и восстановление в Week 7. |
+| Отмена может конкурировать с уже выполненной записью. При сбое многофайловой замены требуется сверка фактического состояния файлов с аудитом и решение о восстановлении. | Независимая verification в Step 10 и проектирование восстановления в Week 7. |
+| Интеграция tools с активным LangGraph runtime и независимая verification v1 остаются открытыми. | Steps 09–10. |
+| Публичные AgentRun API, approval и evidence API, bounded live OpenAI smoke и проверка M1 exit criteria остаются открытыми. | Steps 11–13 с действующими CLI dependency gates. |
+| GitHub CI ещё отсутствует. | [Backlog](backlog.md), BL-05. |
 
 ### Учебные checkpoints
 
 При реализации и ревью разобраны строгие схемы и runtime validation, контракты registry и handler, кооперативные `asyncio` timeout и отмена, отмена и rollback, capability grants и least privilege, явные решения policy, сравнение компонентов пути, логическая авторизация и физический доступ, POSIX-дескрипторы, symlink, hard link, inode и TOCTOU, бюджеты и неизменяемый Git baseline. На Step 03 показано воспроизведение дефектов до исправления и повторная проверка после него. Независимая verification с evidence остаётся условием успеха `AgentRun`.
 
-Самостоятельные объяснения владельца по Steps 01–05 остаются открытыми.
+Самостоятельные объяснения владельца по Steps 01–08 остаются открытыми.
 
 - [ ] **01.** Объяснить, где строгие схемы проверяют вход и выход и почему `ToolSpec` не выдаёт права.
 - [ ] **02.** Объяснить, зачем реестр повторно валидирует снимок и где проходит граница lookup и вызова handler.
 - [ ] **03.** Разобрать оба дефекта ревью и объяснить различие между внешней отменой, таймаутом и rollback.
 - [ ] **04.** Объяснить least privilege на примере точного и рекурсивного scope, отказа для одного из нескольких путей и приоритета `DENY` над approval.
 - [ ] **05.** Проследить разрешённый вызов до физического чтения, объяснить владение дескрипторами, остаточные TOCTOU-ограничения, бюджеты и роль snapshot в `git_diff`.
+- [ ] **06.** Объяснить роли `ToolCall` и `AgentEvent`, границы транзакций и атомарность аудита. Разобрать, что известно о вызове после сбоя до или после коммита допуска.
+- [ ] **07.** Разобрать restricted unified diff, проверку прав на все пути, атомарность одной замены через `os.replace` и состояние файлов при частичном применении.
+- [ ] **08.** Объяснить роли approval и permission checks, привязку к неизменяемой операции, блокировки PostgreSQL, in-process ожидание, однократный допуск и ограничения отмены.
 
 **Python Deep Dives на потом**
 
@@ -745,6 +781,11 @@ apply_patch
 - Dataclasses, неизменяемые коллекции, callable types и `functools.partial`.
 - `pathlib`, `os.open`, `dir_fd`, `stat` и context managers.
 - Владение файловыми дескрипторами и освобождение ресурсов.
+- Владение транзакциями в SQLAlchemy и блокировки строк в PostgreSQL.
+- PostgreSQL `READ COMMITTED` и видимость состояния между транзакциями.
+- `asyncio.Event`, `timeout_at` и отмена при ожидании и после допуска.
+- POSIX `os.replace`, оптимистическая проверка исходников и границы TOCTOU.
+- SHA-256 fingerprints и неизменяемые snapshots patch и исходников.
 
 ## Verification v1
 
