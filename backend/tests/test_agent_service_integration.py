@@ -645,6 +645,37 @@ def test_agent_service_deadline_preserves_domain_cancellation(database):
     database(check)
 
 
+def test_agent_service_persists_single_deadline_failure_for_late_exception(database, monkeypatch, agent_log_capture):
+    async def check(factory, request, workspace_id):
+        error = RuntimeError("synthetic late runner exception detail")
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        offset = 0
+
+        async def run(_snapshot):
+            nonlocal offset
+            # Сдвиг внутри runner сохраняет живые часы для запросов к PostgreSQL.
+            offset = 2
+            raise error
+
+        runner = SimpleNamespace(run=AsyncMock(side_effect=run))
+        service = AgentService(factory, runner, execution_timeout_seconds=1)
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "time", lambda: real_time() + offset)
+            with pytest.raises(AgentRunnerError, match="^execution_deadline_exceeded$") as exc:
+                await service.execute_run(request.run_id)
+
+        assert exc.value.__cause__ is error
+        runner.run.assert_awaited_once_with(request)
+        await _assert_persisted(
+            factory, request, workspace_id, Status.FAILED, CLAIM, (Status.RUNNING, Status.FAILED),
+            failure=AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED,
+        )
+        assert str(error) not in agent_log_capture.getvalue()
+
+    database(check)
+
+
 @pytest.mark.parametrize("error,code", [
     (AgentRunnerError("provider_timeout"), AgentFailureCode.PROVIDER_TIMEOUT),
     (AgentRunnerError("provider_quota_exhausted"), AgentFailureCode.PROVIDER_QUOTA_EXHAUSTED),

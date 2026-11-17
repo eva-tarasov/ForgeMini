@@ -148,8 +148,8 @@ class AgentService:
         try:
             async with timeout:
                 result = await self._runner.run(request)
-        except TimeoutError as exc:
-            if timeout.expired():
+        except Exception as exc:
+            if timeout.expired() or loop.time() >= deadline:
                 raise AgentRunnerError("execution_deadline_exceeded") from exc
             raise
         if timeout.expired() or loop.time() >= deadline:

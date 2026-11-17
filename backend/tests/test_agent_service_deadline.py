@@ -204,6 +204,44 @@ def test_agent_service_deadline_rejects_late_return_before_timer_callback(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize(("error", "on_time_code"), [
+    pytest.param(RuntimeError("synthetic private detail"), AgentFailureCode.EXECUTION_FAILED, id="runtime-error"),
+    pytest.param(TimeoutError("synthetic inner timeout"), AgentFailureCode.RUNNER_TIMEOUT, id="inner-timeout"),
+    pytest.param(AgentRunnerError("provider_timeout"), AgentFailureCode.PROVIDER_TIMEOUT, id="provider-timeout"),
+])
+@pytest.mark.parametrize("late", [False, True], ids=["before-deadline", "after-deadline"])
+def test_agent_service_deadline_classifies_exception_before_timer_callback(
+    make_service, request_snapshot, monkeypatch, error, on_time_code, late,
+):
+    async def check():
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+
+        async def run(_request):
+            nonlocal now
+            # Сдвигаем часы без await, чтобы callback таймера не выполнился.
+            now += 2 if late else 0.5
+            raise error
+
+        service, runner = make_service(run=run, execution_timeout_seconds=1)
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "time", lambda: now)
+            with pytest.raises(AgentRunnerError if late else type(error)) as exc:
+                await service.execute_run(request_snapshot.run_id)
+
+        if late:
+            assert exc.value.reason == "execution_deadline_exceeded"
+            assert exc.value.__cause__ is error
+        else:
+            assert exc.value is error
+        expected = AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED if late else on_time_code
+        runner.run.assert_awaited_once_with(request_snapshot)
+        service._fail.assert_awaited_once_with(request_snapshot.run_id, AgentFailure(expected))
+        service._complete.assert_not_called()
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("persistence_fails", [False, True])
 def test_agent_service_deadline_excludes_claim_and_completion(
     make_service, request_snapshot, ready_result, monkeypatch, persistence_fails,
