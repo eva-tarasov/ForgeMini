@@ -1,3 +1,4 @@
+from asyncio import CancelledError
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,8 +17,11 @@ class WorkspaceService:
         try:
             await self.repository.add(workspace)
             await self.session.commit()
-        except Exception:
-            await self.session.rollback()
+        except BaseException as error:
+            try:
+                await self.session.rollback()
+            except (Exception, CancelledError):
+                error.add_note("workspace_rollback_failed")
             raise
         return workspace
 

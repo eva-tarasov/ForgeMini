@@ -65,6 +65,28 @@ def test_different_payload_rejects_and_rolls_back(changes):
     session.rollback.assert_awaited_once()
 
 
+@pytest.mark.parametrize("field", ["goal", "criterion"])
+@pytest.mark.parametrize("control_first", [True, False], ids=["control-first", "plain-first"])
+def test_direct_replay_rejects_control_separator_difference(field, control_first):
+    workspace, key = uuid4(), uuid4()
+    service, session, tasks = service_with_mock_repositories()
+    plain = ("Build API", ["criterion"])
+    control = ("\x1cBuild API", ["criterion"]) if field == "goal" else ("Build API", ["criterion\x1f"])
+    first, second = (control, plain) if control_first else (plain, control)
+
+    async def check():
+        created = await service.create_task(workspace, *first, key)
+        assert (created.goal, created.acceptance_criteria) == (first[0], tuple(first[1]))
+        tasks.add_with_idempotency_key.return_value = False
+        tasks.get_by_idempotency_key.return_value = created
+        with pytest.raises(IdempotencyKeyConflictError):
+            await service.create_task(workspace, *second, key)
+
+    asyncio.run(check())
+    session.commit.assert_awaited_once()
+    session.rollback.assert_awaited_once()
+
+
 def test_missing_conflict_record_is_an_error():
     service, session, _ = service_with_mock_repositories(False)
     with pytest.raises(IdempotencyRecordNotFoundError):

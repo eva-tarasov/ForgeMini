@@ -112,6 +112,17 @@ def test_maximum_lengths_are_accepted(client: TestClient, workspace_id: str) -> 
     assert response.json()["acceptance_criteria"] == ["c" * 300] * 10
 
 
+def test_non_keyed_create_preserves_http_control_separator(client: TestClient, workspace_id: str) -> None:
+    goal = "\x1c" + "g" * 499
+    criterion = "c" * 299 + "\x1f"
+    response = client.post("/tasks", json={
+        "workspace_id": workspace_id, "goal": f" {goal} ", "acceptance_criteria": [f" {criterion} "],
+    })
+    assert response.status_code == 201
+    assert response.json()["goal"] == goal
+    assert response.json()["acceptance_criteria"] == [criterion]
+
+
 def test_multiple_tasks_can_share_workspace(client: TestClient, workspace_id: str) -> None:
     first = client.post("/tasks", json=task_payload(workspace_id))
     second = client.post("/tasks", json=task_payload(workspace_id))
@@ -140,6 +151,36 @@ def test_idempotent_http_replay_and_conflicts(client: TestClient, workspace_id: 
     other_workspace = client.post("/workspaces", json={"name": "other"}).json()["id"]
     other = client.post("/tasks", json=task_payload(other_workspace), headers=headers)
     assert other.status_code == 201 and other.json()["id"] != first.json()["id"]
+
+
+@pytest.mark.parametrize("change", [
+    pytest.param({"goal": "\x1cBuild API"}, id="goal"),
+    pytest.param({"acceptance_criteria": ["Returns 201\x1f", "Can be retrieved"]}, id="criterion"),
+])
+@pytest.mark.parametrize("control_first", [True, False], ids=["control-first", "plain-first"])
+def test_http_replay_rejects_control_separator_difference(client, workspace_id, change, control_first):
+    headers = {"Idempotency-Key": str(uuid4())}
+    plain = {"workspace_id": workspace_id, "goal": "Build API", "acceptance_criteria": ["Returns 201", "Can be retrieved"]}
+    control = {**plain, **change}
+    first, second = (control, plain) if control_first else (plain, control)
+    created = client.post("/tasks", json=first, headers=headers)
+    assert created.status_code == 201
+    assert created.json()["goal"] == first["goal"]
+    assert created.json()["acceptance_criteria"] == first["acceptance_criteria"]
+
+    padded = {
+        **first,
+        "goal": f"\u00a0{first['goal']}\u3000",
+        "acceptance_criteria": [f"\u2003{criterion}\u202f" for criterion in first["acceptance_criteria"]],
+    }
+    replay = client.post("/tasks", json=padded, headers=headers)
+    assert replay.status_code == 201 and replay.json() == created.json()
+
+    conflict = client.post("/tasks", json=second, headers=headers)
+    assert conflict.status_code == 409
+    assert conflict.json() == {"error": {"code": "IDEMPOTENCY_KEY_CONFLICT",
+                                         "message": "Idempotency key already used with different task data",
+                                         "details": []}}
 
 
 def test_idempotency_header_validation_and_missing_workspace(client: TestClient, workspace_id: str) -> None:

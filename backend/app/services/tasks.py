@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.task import Task, TaskStatus
+from app.domain.task_input import normalize_task_input
 from app.domain.task_transitions import validate_task_transition
 from app.repositories.tasks import TaskRepository
 from app.repositories.workspaces import WorkspaceRepository
@@ -48,14 +49,12 @@ class TaskService:
         idempotency_key: UUID | None = None,
     ) -> Task:
         try:
+            goal, criteria = normalize_task_input(goal, acceptance_criteria)
             if await self.workspaces.get(workspace_id) is None:
                 raise WorkspaceNotFoundError(workspace_id)
-            if idempotency_key is not None:
-                goal = goal.strip()
-                acceptance_criteria = [criterion.strip() for criterion in acceptance_criteria]
             task = Task(
                 id=uuid4(), workspace_id=workspace_id, goal=goal,
-                acceptance_criteria=tuple(acceptance_criteria),
+                acceptance_criteria=criteria,
             )
             if idempotency_key is None:
                 await self.tasks.add(task)
@@ -63,8 +62,11 @@ class TaskService:
                 existing = await self.tasks.get_by_idempotency_key(workspace_id, idempotency_key)
                 if existing is None:
                     raise IdempotencyRecordNotFoundError("Conflicting task was not found")
-                if (existing.goal.strip() != goal or
-                        tuple(criterion.strip() for criterion in existing.acceptance_criteria) != task.acceptance_criteria):
+                try:
+                    existing_payload = normalize_task_input(existing.goal, list(existing.acceptance_criteria))
+                except ValueError:
+                    existing_payload = None
+                if existing_payload != (goal, criteria):
                     raise IdempotencyKeyConflictError("Idempotency key already used with different task data")
                 task = existing
             await self.session.commit()

@@ -106,15 +106,75 @@ def test_first_creation_and_replay(database):
     async def check():
         async with database() as (factory, (workspace, _), task_ids):
             key = uuid4()
-            first = await create(factory, task_ids, workspace, key)
+            first = await create(factory, task_ids, workspace, key, " synthetic goal ", [" first ", "second"])
             replay = await create(factory, task_ids, workspace, key, " synthetic goal ", [" first ", "second"])
+            unicode_replay = await create(
+                factory, task_ids, workspace, key, "\u00a0synthetic goal\u3000", ["\u2003first", "second\u202f"],
+            )
             result = await rows(factory, workspace)
-            assert first.id == replay.id
+            assert first.id == replay.id == unicode_replay.id
             assert len(result) == 1
             assert (result[0].id, result[0].idempotency_key, result[0].goal,
                     result[0].acceptance_criteria, result[0].status) == (
                 first.id, key, GOAL, CRITERIA, "queued"
             )
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("field", ["goal", "criterion"])
+@pytest.mark.parametrize("control_first", [True, False], ids=["control-first", "plain-first"])
+def test_postgres_replay_rejects_control_separator_difference(database, field, control_first):
+    async def check():
+        async with database() as (factory, (workspace, _), task_ids):
+            key = uuid4()
+            plain = ("Build API", ["criterion"])
+            control = ("\x1cBuild API", ["criterion"]) if field == "goal" else ("Build API", ["criterion\x1f"])
+            first, second = (control, plain) if control_first else (plain, control)
+
+            created = await create(factory, task_ids, workspace, key, *first)
+            before = await rows(factory, workspace)
+            assert len(before) == 1
+            assert (before[0].goal, before[0].acceptance_criteria) == first
+            replay = await create(factory, task_ids, workspace, key, *first)
+            assert replay.id == created.id
+
+            async with factory() as session:
+                with pytest.raises(IdempotencyKeyConflictError):
+                    await service_for(session, task_ids).create_task(workspace, *second, key)
+                assert not session.in_transaction()
+            assert await rows(factory, workspace) == before
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("stored", ["canonical", "padded", "invalid"])
+def test_historical_keyed_task_replay_uses_stored_payload(database, stored):
+    async def check():
+        async with database() as (factory, (workspace, _), task_ids):
+            task_id, key = uuid4(), uuid4()
+            task_ids.add(task_id)
+            goal, criteria = GOAL, CRITERIA
+            if stored == "padded":
+                goal, criteria = f"\u00a0{GOAL}\u3000", ["\u2003first", "second\u202f"]
+            elif stored == "invalid":
+                criteria = [None, "second"]
+            async with factory.begin() as session:
+                session.add(TaskModel(
+                    id=task_id, workspace_id=workspace, goal=goal, acceptance_criteria=criteria,
+                    status=TaskStatus.RUNNING.value, idempotency_key=key,
+                ))
+            before = await rows(factory, workspace)
+            async with factory() as session:
+                service = service_for(session, task_ids)
+                if stored == "invalid":
+                    with pytest.raises(IdempotencyKeyConflictError):
+                        await service.create_task(workspace, GOAL, CRITERIA, key)
+                else:
+                    original = await service.create_task(workspace, GOAL, CRITERIA, key)
+                    assert (original.id, original.status) == (task_id, TaskStatus.RUNNING)
+                assert not session.in_transaction()
+            assert await rows(factory, workspace) == before
 
     asyncio.run(check())
 
@@ -154,12 +214,50 @@ def test_replay_after_transition_preserves_status(database):
 def test_no_key_creates_independent_tasks(database):
     async def check():
         async with database() as (factory, (workspace, _), task_ids):
-            first = await create(factory, task_ids, workspace)
+            first = await create(factory, task_ids, workspace, goal=" synthetic goal ", criteria=[" first ", "second"])
             second = await create(factory, task_ids, workspace)
             result = await rows(factory, workspace)
             assert first.id != second.id
             assert {row.id for row in result} == {first.id, second.id}
             assert all(row.idempotency_key is None for row in result)
+            assert all((row.goal, row.acceptance_criteria) == (GOAL, CRITERIA) for row in result)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["without-key", "with-key"])
+def test_invalid_direct_task_input_does_not_create_rows(database, keyed):
+    async def check():
+        async with database() as (factory, (workspace, _), task_ids):
+            key = uuid4() if keyed else None
+            async with factory() as session:
+                service = service_for(session, task_ids)
+                for goal, criteria, code in (
+                    (" ", CRITERIA, "invalid_task_goal"),
+                    (GOAL, [" "], "invalid_task_acceptance_criterion"),
+                    (GOAL, ["c" * 301], "invalid_task_acceptance_criterion"),
+                ):
+                    with pytest.raises(ValueError, match=f"^{code}$"):
+                        await service.create_task(workspace, goal, criteria, key)
+                    assert not session.in_transaction()
+            assert await rows(factory, workspace) == []
+
+    asyncio.run(check())
+
+
+def test_historical_task_is_read_without_normalization(database):
+    async def check():
+        async with database() as (factory, (workspace, _), task_ids):
+            task_id = uuid4()
+            task_ids.add(task_id)
+            goal, criteria = "  historical goal  ", [" ", "c" * 301]
+            async with factory.begin() as session:
+                session.add(TaskModel(id=task_id, workspace_id=workspace, goal=goal, acceptance_criteria=criteria))
+            before = await rows(factory, workspace)
+            async with factory() as session:
+                loaded = await service_for(session, task_ids).get_task(task_id)
+                assert (loaded.id, loaded.goal, loaded.acceptance_criteria) == (task_id, goal, tuple(criteria))
+            assert await rows(factory, workspace) == before
 
     asyncio.run(check())
 
