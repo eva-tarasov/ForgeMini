@@ -53,6 +53,32 @@ plan = VerificationPlan(
 
 В production UUID binding подставляются из конкретных записей run, task и workspace. Ожидаемый digest задаётся из доверенной спецификации состояния, а observed digest вычисляется после независимого чтения.
 
-## Граница 10B
+## Step 10B — read-only observer
 
-Предлагаемый внутренний интерфейс `observe(plan, fixture_binding) -> VerificationObservationSet`. `fixture_binding` принадлежит backend и задаёт доверенный корень, revision и существующий read scope. Реализация должна сверить run/task/workspace и полный снимок критериев, читать через `SafeRepositoryReader`, применять бюджеты и возвращать только digest или закрытый код неопределённости. При отсутствии достоверного наблюдения критерий получает `INCONCLUSIVE`. Успешное сравнение ограничено перечисленными файлами и наблюдавшимся временем чтения. Snapshot между файлами, freshness и атомарная публикация evidence со сменой состояния требуют отдельного контракта. [Fixture filesystem](../backend/app/tools/repository/filesystem.py#L81)
+Внутренний интерфейс `await observe(plan, trusted_fixture_access) -> VerificationObservationSet`. Доверенный caller передаёт `TrustedFixtureAccess` с идентичностью выданного плана, binding, корнем fixture, независимыми read scopes и полным упорядоченным снимком критериев Task. Observer сверяет ID, fingerprint, run/task/workspace, revision и критерии до открытия корня. Тип объекта сам по себе не подтверждает полномочия caller. Задание корня, scopes и плана остаётся ответственностью доверенного backend. [Observer](../backend/app/services/verification_observer.py)
+
+Observer создаёт отдельный `PermissionContext` с `repository.read` и вызывает `read_file` через `create_fixture_executor()`. `SafeRepositoryReader` проверяет файловые границы. Каждый уникальный логический путь читается до одного раза за вызов, а наблюдения возвращаются в порядке checks. Digest вычисляется из точных UTF-8 байт без нормализации. Отказ доступа, недоступный корень или файл, ошибка чтения, timeout и исчерпание бюджета дают `READ_ERROR`. Executor сворачивает ошибки handler в `handler_failed`, который тоже даёт `READ_ERROR`. Неожиданные ошибки протокола executor завершают наблюдение контрактной ошибкой.
+
+Reader ограничивает файл 64 КиБ. У `read_file` также есть действующий лимит размера выходного документа с учётом имени файла. На вызов observer выделяется 256 КиБ. Перед новым чтением требуется резерв в 64 КиБ плюс один байт для проверки EOF при росте файла. При успехе списывается фактическое число байт. При отказе до handler байты не списываются. При ошибке после допуска списывается весь резерв, поскольку executor не сообщает фактический объём чтения. Пути, для которых резерва уже нет, не открываются.
+
+```python
+from app.permissions.context import PathScope
+from app.services.verification_contract import aggregate_verification
+from app.services.verification_observer import TrustedFixtureAccess, observe
+
+async def verify_fixture(plan, fixture_root, task_criteria):
+    access = TrustedFixtureAccess(
+        plan_id=plan.plan_id,
+        plan_fingerprint=plan.fingerprint,
+        binding=plan.binding,
+        root=fixture_root,
+        read_scopes=(PathScope("fixtures/output.txt"),),
+        acceptance_criteria=task_criteria,
+    )
+    observations = await observe(plan, access)
+    return aggregate_verification(plan, observations)
+```
+
+Отмена доставляется кооперативно между чтениями. Синхронный системный вызов может задержать и отмену, и deadline. Observer фиксирует содержимое, увиденное при каждом чтении. Согласованный snapshot нескольких файлов и отсутствие изменений после чтения остаются открытыми условиями изоляции fixture.
+
+Для 10C доверенный оркестратор должен получить binding и критерии из действительных SQL-записей, выбрать fixture access на стороне backend, наблюдать снаружи транзакции и повторно проверить состояние run и корреляцию перед публикацией. Атомарность записи evidence и перехода состояния относится к 10C. [Текущий success gate](../backend/app/services/agent_runs.py#L67)
