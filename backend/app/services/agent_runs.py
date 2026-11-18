@@ -1,6 +1,3 @@
-from collections.abc import Callable
-from contextvars import ContextVar
-from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy import select
@@ -32,22 +29,9 @@ from app.services.agent_usage_codec import (
     decode_agent_usage,
     encode_agent_usage,
 )
-from app.services.approval_contracts import ApprovalReference
+from app.services.approval_outcome import ApprovalOutcome
 from app.services.tasks import TaskNotFoundError
 from app.services.tool_call_audit import ToolCallErrorCode
-
-
-@dataclass(frozen=True, slots=True)
-class _ApprovalTerminalFailure:
-    reference: ApprovalReference
-    code: ToolCallErrorCode
-    interrupted_request: bool = False
-
-
-# The callback belongs to one AgentService invocation and is inherited by graph nodes.
-_approval_failure_sink: ContextVar[Callable[[_ApprovalTerminalFailure], None] | None] = ContextVar(
-    "approval_failure_sink", default=None,
-)
 
 
 class AgentRunNotFoundError(Exception):
@@ -198,7 +182,7 @@ class AgentRunService:
         return decode_agent_failure(events[0].payload)
 
     async def fail_execution(
-        self, run_id: UUID, failure: AgentFailure, *, approval_failure: _ApprovalTerminalFailure | None = None,
+        self, run_id: UUID, failure: AgentFailure, *, approval_failure: ApprovalOutcome | None = None,
     ) -> None:
         try:
             payload = encode_agent_failure(failure)
@@ -229,7 +213,7 @@ class AgentRunService:
             raise
 
     async def _matches_approval_failure(
-        self, run: AgentRunModel, failure: AgentFailure, evidence: _ApprovalTerminalFailure,
+        self, run: AgentRunModel, failure: AgentFailure, evidence: ApprovalOutcome,
     ) -> bool:
         """Confirm a terminal outcome while holding the same parent lock as ApprovalGate."""
         reference, code = evidence.reference, evidence.code

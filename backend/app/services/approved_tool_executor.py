@@ -6,9 +6,9 @@ from time import perf_counter_ns
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.permissions.context import PermissionContext
-from app.services.agent_runs import _ApprovalTerminalFailure, _approval_failure_sink
 from app.services.approval_contracts import ApprovalDecision, ApprovalReference, PendingOperation, validate_patch_proposal
 from app.services.approval_gate import ApprovalGate
+from app.services.approval_outcome import ApprovalOutcome, ApprovalOutcomePort
 from app.services.pending_approvals import PendingApprovals
 from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
 from app.services.tool_calls import _finish_interrupted_proposal
@@ -30,12 +30,13 @@ class ApprovedToolExecutor:
 
     def __init__(
         self, executor: ToolExecutor, session_factory: async_sessionmaker[AsyncSession], *,
-        wait_seconds: float = 60, capacity: int = 32,
+        wait_seconds: float = 60, capacity: int = 32, outcome: ApprovalOutcomePort | None = None,
     ) -> None:
         if type(wait_seconds) not in (int, float) or not 0 < wait_seconds <= 300:
             raise ValueError("invalid_approval_wait_seconds")
         self._executor = executor
         self._wait_seconds = wait_seconds
+        self._outcome = outcome
         self._pending = PendingApprovals(capacity)
         self._gate = ApprovalGate(executor, session_factory, self._pending)
 
@@ -78,14 +79,14 @@ class ApprovedToolExecutor:
         self._pending.reserve(operation)
         started_at: int | None = None
         try:
+            if self._outcome is not None and not self._outcome.bind(operation.reference):
+                raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
             try:
                 await self._gate.request(operation)
             except (asyncio.CancelledError, ToolCallAuditError) as error:
                 if isinstance(error, asyncio.CancelledError) or error.code is ToolCallErrorCode.AUDIT_PERSISTENCE_FAILED:
                     code = ToolCallErrorCode.CANCELLED if isinstance(error, asyncio.CancelledError) else error.code
-                    sink = _approval_failure_sink.get()
-                    if sink is not None:
-                        sink(_ApprovalTerminalFailure(operation.reference, code, interrupted_request=True))
+                    self._publish_outcome(operation.reference, code, error, interrupted_request=True)
                     await _finish_interrupted_proposal(self._gate._reconcile_unpublished_request(operation, code), error)
                 raise
             try:
@@ -143,9 +144,18 @@ class ApprovedToolExecutor:
         except Exception:
             error.add_note("tool_call_audit_finalization_failed")
         else:
-            sink = _approval_failure_sink.get()
-            if sink is not None:
-                sink(_ApprovalTerminalFailure(operation.reference, code))
+            self._publish_outcome(operation.reference, code, error)
+
+    def _publish_outcome(
+        self, reference: ApprovalReference, code: ToolCallErrorCode, error: BaseException, *,
+        interrupted_request: bool = False,
+    ) -> None:
+        if self._outcome is not None:
+            try:
+                self._outcome.publish(ApprovalOutcome(reference, code, interrupted_request))
+            except (asyncio.CancelledError, Exception):
+                # Синхронная запись метаданных сохраняет исходную ошибку и путь cleanup.
+                error.add_note("approval_outcome_publication_failed")
 
 
 def _duration(started_at: int | None) -> int | None:

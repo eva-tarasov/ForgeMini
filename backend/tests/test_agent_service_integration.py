@@ -1997,9 +1997,9 @@ def test_agent_service_observability_records_real_graph(case, database, monkeypa
         deadline_errors = []
         original_deadline = service._run_with_deadline
 
-        async def observe_deadline(snapshot):
+        async def observe_deadline(snapshot, invoke):
             try:
-                return await original_deadline(snapshot)
+                return await original_deadline(snapshot, invoke)
             except AgentRunnerError as error:
                 deadline_errors.append(error)
                 raise

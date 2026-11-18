@@ -6,17 +6,17 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from test_agent_observability import agent_log_capture
 from test_approval_contracts import patch_for
 from test_repository_agent_integration import FILE, _offline_model, _snapshot, database
 
 from app.agent_runtime.structured_output import TaskAnalysis
-from app.db.models import ApprovalModel
+from app.db.models import AgentEventModel, AgentRunModel, ApprovalModel, ToolCallModel
 from app.db.session import create_engine, create_session_factory
 from app.domain.capabilities import Capability
 from app.domain.execution import AgentRunStatus
@@ -26,16 +26,15 @@ from app.services import agent_service as agent_service_module, pending_approval
 from app.services.agent_cost import AgentPricing, ModelTariff
 from app.services.agent_failure import AgentFailure, AgentFailureCode
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
-from app.services.agent_runs import (
-    AgentRunService, StaleAgentRunStatusError, VerificationEvidenceRequiredError, _ApprovalTerminalFailure,
-)
+from app.services.agent_runs import AgentRunService, StaleAgentRunStatusError, VerificationEvidenceRequiredError
 from app.services.agent_service import AgentService
 from app.services.approval_contracts import ApprovalDecision, patch_fingerprint
 from app.services.approval_gate import ApprovalGate
+from app.services.approval_outcome import ApprovalOutcome, ApprovalOutcomeHolder, ApprovalOutcomePort
 from app.services.approved_repository_agent_runner import ApprovedRepositoryAgentRunner, ApprovedRepositoryFixtureBinding
 from app.services.pending_approvals import PendingApprovals
 from app.services.tool_call_audit import ToolCallErrorCode
-from app.tools.errors import ToolExecutionError
+from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 from app.tools.repository.writer import SafeRepositoryWriter
 
@@ -149,15 +148,16 @@ def test_postgres_approved_graph_rejection_preserves_original_failure(database, 
         async with case.factory() as session:
             runs = AgentRunService(session)
             failure = AgentFailure(AgentFailureCode.GRAPH_EXECUTION_FAILED)
-            forged = replace(preview.reference, approval_id=uuid4())
-            with pytest.raises(StaleAgentRunStatusError):
-                await runs.fail_execution(
-                    case.run_id, failure,
-                    approval_failure=_ApprovalTerminalFailure(forged, ToolCallErrorCode.APPROVAL_REJECTED),
-                )
+            for forged in (
+                ApprovalOutcome(replace(preview.reference, approval_id=uuid4()), ToolCallErrorCode.APPROVAL_REJECTED),
+                ApprovalOutcome(replace(preview.reference, patch_sha256="a" * 64), ToolCallErrorCode.APPROVAL_REJECTED),
+                ApprovalOutcome(preview.reference, ToolCallErrorCode.HANDLER_FAILED),
+            ):
+                with pytest.raises(StaleAgentRunStatusError):
+                    await runs.fail_execution(case.run_id, failure, approval_failure=forged)
             await runs.fail_execution(
                 case.run_id, failure,
-                approval_failure=_ApprovalTerminalFailure(preview.reference, ToolCallErrorCode.APPROVAL_REJECTED),
+                approval_failure=ApprovalOutcome(preview.reference, ToolCallErrorCode.APPROVAL_REJECTED),
             )
         run, parent, (call,), events, (approval,) = await _approval_state(case.factory, case)
         assert (run.status, parent.status, call.status, approval.status) == ("failed", "queued", "denied", "rejected")
@@ -165,6 +165,40 @@ def test_postgres_approved_graph_rejection_preserves_original_failure(database, 
         assert [event.payload["code"] for event in events if event.event_type == "agent_execution_failed"] == [
             "graph_execution_failed",
         ]
+
+    database(check)
+
+
+def test_postgres_approved_graph_refused_outcome_binding_leaves_no_records(database, monkeypatch):
+    async def check(case, idle):
+        patch = _fixture_patch(case)
+        async with case.factory() as session:
+            request = await AgentRunService(session).claim_for_execution(case.run_id)
+        holder = ApprovalOutcomeHolder(case.run_id)
+        assert holder.take_and_close() is None
+        # Если request всё же закоммитится, остановить граф после commit, не дожидаясь approval timeout.
+        publish = Mock(side_effect=ToolExecutionError(ToolErrorCode.APPROVAL_INVALID))
+        handler = AsyncMock()
+        monkeypatch.setattr(PendingApprovals, "publish", publish)
+        monkeypatch.setattr(ToolExecutor, "_invoke_handler", handler)
+
+        reading = create_engine(case.settings)
+        try:
+            observer = create_session_factory(reading)
+            _, _, _, before, _ = await _approval_state(observer, case)
+            async with _offline_model(_patch_reply(patch, idle)) as (model, calls):
+                runner = _runner(case, model)
+                await _graph_failure(runner.run_with_approval_outcome(request, outcome=holder.port()), "approval_invalid")
+                assert runner._approval_preview() is None
+            run, task, tool_calls, after, approvals = await _approval_state(observer, case)
+            assert (len(tool_calls), len(approvals), len(after) - len(before)) == (0, 0, 0)
+            assert (run.status, task.status) == ("running", "queued")
+            assert [(event.id, event.payload) for event in after] == [(event.id, event.payload) for event in before]
+        finally:
+            await reading.dispose()
+        assert len(calls) == 1 and (case.binding.root / FILE).read_text() == ORIGINAL
+        publish.assert_not_called()
+        handler.assert_not_awaited()
 
     database(check)
 
@@ -202,6 +236,63 @@ def _expect_write_outcome(state, *, run_status, call_status, approval_status, er
     failures = [event for event in events if event.event_type == "agent_execution_failed"]
     assert len(failures) == (1 if run_status == "failed" else 0)
     return audit
+
+
+@pytest.mark.parametrize("publication", ["duplicate", "foreign", "conflict"])
+def test_postgres_approved_graph_outcome_guards_terminal_failure(database, monkeypatch, publication):
+    async def check(case, idle):
+        patch = _fixture_patch(case)
+        original_port = ApprovalOutcomeHolder.port
+        observed, accepted = [], []
+
+        def port_for(holder):
+            port = original_port(holder)
+
+            def publish(outcome):
+                observed.append(outcome)
+                if publication == "foreign":
+                    forged = replace(outcome.reference, sources_sha256="b" * 64)
+                    accepted.append(port.publish(replace(outcome, reference=forged)))
+                else:
+                    accepted.append(port.publish(outcome))
+                    repeated = replace(outcome) if publication == "duplicate" else replace(
+                        outcome, code=ToolCallErrorCode.CANCELLED,
+                    )
+                    accepted.append(port.publish(repeated))
+                    accepted.append(port.publish(outcome))
+                return accepted[-1]
+
+            return ApprovalOutcomePort(port.bind, publish)
+
+        monkeypatch.setattr(ApprovalOutcomeHolder, "port", port_for)
+        async with _offline_model(_patch_reply(patch, idle)) as (model, calls):
+            async with _run_agent(case, model, monkeypatch) as (_, runner, task, published):
+                preview = await _wait_for_preview(runner, task, published)
+                await runner._decide(preview, ApprovalDecision.REJECT)
+                if publication == "duplicate":
+                    await _graph_failure(task, "approval_rejected")
+                else:
+                    with pytest.raises(StaleAgentRunStatusError) as stale:
+                        await task
+                    assert isinstance(stale.value.__cause__, AgentRunnerError)
+                    assert stale.value.__cause__.reason == "graph_execution_failed"
+                    assert stale.value.__cause__.__cause__.args == ("approval_rejected",)
+        assert observed == [ApprovalOutcome(preview.reference, ToolCallErrorCode.APPROVAL_REJECTED)]
+        assert accepted == {"duplicate": [True, True, True], "foreign": [False], "conflict": [True, False, False]}[publication]
+        reading = create_engine(case.settings)
+        try:
+            run, task, (call,), events, (approval,) = await _approval_state(create_session_factory(reading), case)
+            assert (run.status, task.status, call.status, approval.status) == ("failed", "queued", "denied", "rejected")
+            finished = [event.payload["error_code"] for event in events if event.event_type == "tool_call_finished"]
+            failures = [event.payload["code"] for event in events if event.event_type == "agent_execution_failed"]
+            assert finished == ["approval_rejected"]
+            assert failures == (["graph_execution_failed"] if publication == "duplicate" else [])
+            assert run.final_result is None
+        finally:
+            await reading.dispose()
+        assert (case.binding.root / FILE).read_text() == ORIGINAL and len(calls) == 1
+
+    database(check)
 
 
 def test_postgres_approved_graph_reads_then_writes_and_persists_verifying(database, monkeypatch, agent_log_capture):
@@ -359,6 +450,91 @@ class _TimeoutProbe:
     async def expire(self):
         await self.armed.wait()
         self.timer.reschedule(asyncio.get_running_loop().time())
+
+
+def test_postgres_parallel_approved_runs_keep_their_own_outcomes(database, monkeypatch):
+    async def check(case, _idle):
+        second = replace(case, run_id=uuid4())
+        published = {entry.run_id: asyncio.Event() for entry in (case, second)}
+        publish = PendingApprovals.publish
+        timers = {}
+
+        def observe_publish(pending, operation):
+            publish(pending, operation)
+            published[operation.reference.ticket.run_id].set()
+
+        class PerTaskTimeouts:
+            def __getattr__(self, name):
+                return getattr(asyncio, name)
+
+            def timeout_at(self, deadline):
+                timer = asyncio.timeout_at(deadline)
+                timers[asyncio.current_task()] = timer
+                return timer
+
+        monkeypatch.setattr(PendingApprovals, "publish", observe_publish)
+        monkeypatch.setattr(agent_service_module, "asyncio", PerTaskTimeouts())
+        patch = _fixture_patch(case)
+        async with case.factory.begin() as session:
+            session.add(AgentRunModel(
+                id=second.run_id, task_id=second.task_id, attempt_number=2, status=AgentRunStatus.QUEUED.value,
+            ))
+        reading = create_engine(case.settings)
+        try:
+            async with _offline_model(_patch_reply(patch, lambda: None)) as (left_model, left_calls):
+                async with _offline_model(_patch_reply(patch, lambda: None)) as (right_model, right_calls):
+                    left, right = _runner(case, left_model), _runner(second, right_model)
+                    first_service, second_service = AgentService(case.factory, left), AgentService(case.factory, right)
+                    first_task = asyncio.create_task(first_service.execute_run(case.run_id))
+                    second_task = asyncio.create_task(second_service.execute_run(second.run_id))
+                    try:
+                        first_preview, second_preview = await asyncio.gather(
+                            _wait_for_preview(left, first_task, published[case.run_id]),
+                            _wait_for_preview(right, second_task, published[second.run_id]),
+                        )
+                        assert first_preview.reference.ticket.run_id == case.run_id
+                        assert second_preview.reference.ticket.run_id == second.run_id
+                        assert first_preview.reference.approval_id != second_preview.reference.approval_id
+                        await left._decide(first_preview, ApprovalDecision.REJECT)
+                        timers[second_task].reschedule(asyncio.get_running_loop().time())
+                        await _graph_failure(first_task, "approval_rejected")
+                        with pytest.raises(AgentRunnerError, match="^execution_deadline_exceeded$"):
+                            await second_task
+                    finally:
+                        for task in (first_task, second_task):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(first_task, second_task, return_exceptions=True)
+                    assert left._approval_preview() is None and right._approval_preview() is None
+            factory = create_session_factory(reading)
+            first_state, second_state = await asyncio.gather(
+                _approval_state(factory, case), _approval_state(factory, second),
+            )
+            _expect_write_outcome(
+                first_state, run_status="failed", call_status="denied", approval_status="rejected",
+                error="approval_rejected",
+            )
+            _expect_write_outcome(
+                second_state, run_status="cancelled", call_status="failed", approval_status="rejected",
+                error="cancelled",
+            )
+            assert [event.payload["code"] for event in first_state[3] if event.event_type == "agent_execution_failed"] == [
+                "graph_execution_failed",
+            ]
+            assert first_state[4][0].id == first_preview.reference.approval_id
+            assert second_state[4][0].id == second_preview.reference.approval_id
+            assert len(left_calls) == len(right_calls) == 1 and (case.binding.root / FILE).read_text() == ORIGINAL
+        finally:
+            await reading.dispose()
+            async with case.factory.begin() as session:
+                assert await session.scalar(text("SELECT current_database()")) == os.environ["POSTGRES_DB"]
+                call_ids = select(ToolCallModel.id).where(ToolCallModel.agent_run_id == second.run_id)
+                await session.execute(delete(ApprovalModel).where(ApprovalModel.tool_call_id.in_(call_ids)))
+                await session.execute(delete(ToolCallModel).where(ToolCallModel.agent_run_id == second.run_id))
+                await session.execute(delete(AgentEventModel).where(AgentEventModel.agent_run_id == second.run_id))
+                await session.execute(delete(AgentRunModel).where(AgentRunModel.id == second.run_id))
+
+    database(check)
 
 
 @pytest.mark.parametrize("cause", ["approval-timeout", "user-cancel", "global-deadline"])

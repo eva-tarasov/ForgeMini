@@ -1,8 +1,11 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.services.agent_result import AgentFinalResult
+
+if TYPE_CHECKING:
+    from app.services.approval_outcome import ApprovalOutcomePort
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +20,14 @@ class AgentRunRequest:
 
 class AgentRunner(Protocol):
     async def run(self, request: AgentRunRequest) -> AgentFinalResult:
+        ...
+
+
+@runtime_checkable
+class ApprovalOutcomeRunner(AgentRunner, Protocol):
+    async def run_with_approval_outcome(
+        self, request: AgentRunRequest, *, outcome: "ApprovalOutcomePort",
+    ) -> AgentFinalResult:
         ...
 
 

@@ -18,6 +18,7 @@ from app.services.agent_failure import AgentFailureCode
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 from app.services.approval_contracts import ApprovalDecision
+from app.services.approval_outcome import ApprovalOutcomePort
 from app.services.approved_tool_executor import ApprovedToolExecutor, _ApprovalPreview
 from app.services.audited_tool_executor import AuditedToolExecutor
 from app.services.repository_agent_runner import RepositoryFixtureBinding
@@ -76,6 +77,11 @@ class ApprovedRepositoryAgentRunner:
         await executor.decide(preview.reference, decision, context=context)
 
     async def run(self, request: AgentRunRequest) -> AgentFinalResult:
+        return await self.run_with_approval_outcome(request, outcome=None)
+
+    async def run_with_approval_outcome(
+        self, request: AgentRunRequest, *, outcome: ApprovalOutcomePort | None,
+    ) -> AgentFinalResult:
         self._check_loop()
         if request.run_id != self._run_id:
             raise AgentRunnerError(AgentFailureCode.EXECUTION_FAILED.value)
@@ -98,7 +104,9 @@ class ApprovedRepositoryAgentRunner:
         reader = create_fixture_executor(root=binding.root, context=context, baseline=binding.baseline)
         writer = ToolExecutor(ToolRegistry([create_fixture_patch_tool(root=binding.root, context=context)]))
         audited = AuditedToolExecutor(reader, ToolCallService(self._session_factory))
-        approved = ApprovedToolExecutor(writer, self._session_factory, wait_seconds=self._wait_seconds, capacity=1)
+        approved = ApprovedToolExecutor(
+            writer, self._session_factory, wait_seconds=self._wait_seconds, capacity=1, outcome=outcome,
+        )
         graph = create_approved_repository_graph(
             create_approved_repository_tool_model(self._model, reader, writer),
             create_structured_task_model(self._model),

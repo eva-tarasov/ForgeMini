@@ -1,5 +1,7 @@
 import asyncio
 import math
+from collections.abc import Awaitable, Callable
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -10,10 +12,11 @@ from app.services.agent_failure import AgentFailure, classify_execution_error
 from app.services.agent_observability import AgentLogContext, AgentObserver, AgentOperation, AgentPhase
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
-from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
-from app.services.agent_runs import AgentRunService, _ApprovalTerminalFailure, _approval_failure_sink
+from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest, ApprovalOutcomeRunner
+from app.services.agent_runs import AgentRunService
 from app.services.agent_usage import AgentUsageSnapshot, UsageCollector, capture_agent_usage
 from app.services.agent_usage_codec import AgentUsageRecord
+from app.services.approval_outcome import ApprovalOutcome, ApprovalOutcomeHolder
 
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60.0
@@ -60,12 +63,7 @@ class AgentService:
             handle = self._active_runs.register(run_id)
             collector: UsageCollector | None = None
             primary_error: BaseException | None = None
-            approval_failure: _ApprovalTerminalFailure | None = None
-
-            def record_approval_failure(evidence: _ApprovalTerminalFailure) -> None:
-                nonlocal approval_failure
-                if evidence.reference.ticket.run_id == run_id:
-                    approval_failure = evidence
+            approval_failure: ApprovalOutcome | None = None
 
             try:
                 with observer.phase(AgentPhase.CLAIM):
@@ -77,11 +75,16 @@ class AgentService:
                     with capture_agent_usage(run_id) as collector:
                         with observer.phase(AgentPhase.RUNNER):
                             handle.runner_active = True
-                            token = _approval_failure_sink.set(record_approval_failure)
+                            outcome_holder = None
                             try:
-                                result = await self._run_with_deadline(request)
+                                invoke = self._runner.run
+                                if isinstance(self._runner, ApprovalOutcomeRunner):
+                                    outcome_holder = ApprovalOutcomeHolder(run_id)
+                                    invoke = partial(self._runner.run_with_approval_outcome, outcome=outcome_holder.port())
+                                result = await self._run_with_deadline(request, invoke)
                             finally:
-                                _approval_failure_sink.reset(token)
+                                if outcome_holder is not None:
+                                    approval_failure = outcome_holder.take_and_close()
                                 handle.runner_active = False
                     _check_interruption(handle, initial_cancelling)
                     with observer.phase(AgentPhase.RESULT_VALIDATION):
@@ -141,13 +144,15 @@ class AgentService:
                     with observer.phase(AgentPhase.CANCELLATION_SIGNAL):
                         self._active_runs.request_cancel(run_id)
 
-    async def _run_with_deadline(self, request: AgentRunRequest) -> AgentFinalResult:
+    async def _run_with_deadline(
+        self, request: AgentRunRequest, invoke: Callable[[AgentRunRequest], Awaitable[AgentFinalResult]],
+    ) -> AgentFinalResult:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._execution_timeout_seconds
         timeout = asyncio.timeout_at(deadline)
         try:
             async with timeout:
-                result = await self._runner.run(request)
+                result = await invoke(request)
         except Exception as exc:
             if timeout.expired() or loop.time() >= deadline:
                 raise AgentRunnerError("execution_deadline_exceeded") from exc
@@ -181,7 +186,7 @@ class AgentService:
             await AgentRunService(session).complete_execution(run_id, result)
 
     async def _fail(
-        self, run_id: UUID, failure: AgentFailure, *, approval_failure: _ApprovalTerminalFailure | None = None,
+        self, run_id: UUID, failure: AgentFailure, *, approval_failure: ApprovalOutcome | None = None,
     ) -> None:
         async with self._session_factory() as session:
             await AgentRunService(session).fail_execution(run_id, failure, approval_failure=approval_failure)

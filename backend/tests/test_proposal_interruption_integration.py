@@ -26,6 +26,7 @@ from app.repositories.tool_calls import ToolCallRepository
 from app.services import agent_service as agent_service_module
 from app.services.agent_runner import AgentRunnerError
 from app.services.approval_gate import ApprovalGate
+from app.services.approval_outcome import ApprovalOutcome, ApprovalOutcomeHolder
 from app.services.pending_approvals import PendingApprovals
 from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
 from app.services.tool_calls import ToolCallService
@@ -160,6 +161,21 @@ def test_postgres_interrupted_committed_proposal_is_finalized(database, monkeypa
         _forbid_handler(monkeypatch)
         timer = _TimeoutProbe()
         monkeypatch.setattr(agent_service_module, "asyncio", timer)
+        emissions = []
+        publish = ApprovalOutcomeHolder._publish
+        reconcile = ApprovalGate._reconcile_unpublished_request
+
+        def observe_publication(holder, outcome):
+            accepted = publish(holder, outcome)
+            emissions.append((outcome, accepted))
+            return accepted
+
+        async def observe_cleanup(gate, operation, code):
+            assert emissions == [(ApprovalOutcome(operation.reference, code, interrupted_request=True), True)]
+            return await reconcile(gate, operation, code)
+
+        monkeypatch.setattr(ApprovalOutcomeHolder, "_publish", observe_publication)
+        monkeypatch.setattr(ApprovalGate, "_reconcile_unpublished_request", observe_cleanup)
         independent = create_engine(case.settings)
         try:
             fresh = create_session_factory(independent)
@@ -189,6 +205,7 @@ def test_postgres_interrupted_committed_proposal_is_finalized(database, monkeypa
                     assert pause.cancelled.is_set()
                     assert not published.is_set()
                     assert all(not registry._entries for registry, _ in slots)
+                    assert len(emissions) == (1 if kind == "write" else 0)
             assert len(responses) == 1 and (case.binding.root / FILE).read_text() == ORIGINAL
             _expect_abort(await _approval_state(fresh, case), kind=kind, deadline=cause == "deadline")
         finally:
