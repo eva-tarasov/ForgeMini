@@ -5,12 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import AgentRunModel, ApprovalModel, ToolCallModel
 from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
-from app.domain.tool_call_transitions import validate_tool_call_transition
 from app.permissions.context import PermissionContext
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.approvals import ApprovalRepository
 from app.repositories.tool_calls import ToolCallRepository
-from app.services.agent_runs import AgentRunService
+from app.services.agent_runs import transition_locked_agent_run
 from app.services.approval_contracts import (
     ApprovalDecision,
     ApprovalReference,
@@ -19,7 +18,13 @@ from app.services.approval_contracts import (
 )
 from app.services.pending_approvals import PendingApprovals
 from app.services.tool_call_audit import ToolCallErrorCode
-from app.services.tool_calls import ToolCallService
+from app.services.tool_calls import (
+    lock_proposed_tool_call,
+    lock_tool_call_run,
+    stage_tool_call_proposal,
+    tool_call_transaction,
+    transition_locked_tool_call,
+)
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 
@@ -35,7 +40,7 @@ class ApprovalGate:
         self, executor: ToolExecutor, session_factory: async_sessionmaker[AsyncSession], pending: PendingApprovals,
     ) -> None:
         self._executor = executor
-        self._tool_calls = ToolCallService(session_factory)
+        self._session_factory = session_factory
         self._pending = pending
 
     def _check_binding(self, operation: PendingOperation) -> None:
@@ -56,31 +61,30 @@ class ApprovalGate:
     async def request(self, operation: PendingOperation) -> None:
         self._pending.require_reserved(operation)
         reference, ticket = operation.reference, operation.reference.ticket
-        async with self._tool_calls._transaction() as session:
-            run = await self._tool_calls._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=True)
+        async with tool_call_transaction(self._session_factory) as session:
+            run = await lock_tool_call_run(session, ticket, require_running=True)
             self._pending.require_reserved(operation)
             self._check_binding(operation)
             self.check_deadline(operation)
             repository = ApprovalRepository(session)
             if await repository.has_active(ticket.run_id):
                 raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
-            ToolCallRepository(session).add_proposed(ticket.run_id, ticket.tool_call_id, ticket.tool_name)
-            await self._tool_calls._append(session, ticket, ToolCallStatus.PROPOSED)
+            await stage_tool_call_proposal(session, ticket)
             repository.add_pending(reference.approval_id, ticket.tool_call_id)
             await AgentEventRepository(session).append(
                 ticket.run_id, event_type=APPROVAL_REQUESTED, payload=reference.requested_payload(),
             )
-            await AgentRunService(session)._transition_locked(
-                run, AgentRunStatus.RUNNING, AgentRunStatus.WAITING_APPROVAL,
+            await transition_locked_agent_run(
+                AgentEventRepository(session), run, AgentRunStatus.RUNNING, AgentRunStatus.WAITING_APPROVAL,
             )
         self._pending.publish(operation)
 
     async def _reconcile_unpublished_request(self, operation: PendingOperation, code: ToolCallErrorCode) -> None:
         self._pending.require_reserved(operation)
         reference, ticket = operation.reference, operation.reference.ticket
-        async with self._tool_calls._transaction() as session:
-            run = await self._tool_calls._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=False)
-            call = await self._tool_calls._lock_proposed_call(session, ticket)
+        async with tool_call_transaction(self._session_factory) as session:
+            run = await lock_tool_call_run(session, ticket, require_running=False)
+            call = await lock_proposed_tool_call(session, ticket)
             if call is None:
                 return
             approvals = ApprovalRepository(session)
@@ -94,10 +98,12 @@ class ApprovalGate:
             ):
                 raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
             await self._record_decision(session, reference, approval, ApprovalStatus.REJECTED, reason=code)
-            await self._change_call(session, operation, call, ToolCallStatus.FAILED, error=code)
+            await transition_locked_tool_call(session, ticket, call, ToolCallStatus.FAILED, error_code=code)
             if run.status == AgentRunStatus.WAITING_APPROVAL.value:
                 target = AgentRunStatus.CANCELLED if code is ToolCallErrorCode.CANCELLED else AgentRunStatus.FAILED
-                await AgentRunService(session)._transition_locked(run, AgentRunStatus.WAITING_APPROVAL, target)
+                await transition_locked_agent_run(
+                    AgentEventRepository(session), run, AgentRunStatus.WAITING_APPROVAL, target,
+                )
 
     async def decide(
         self, reference: ApprovalReference, decision: ApprovalDecision, *, context: PermissionContext,
@@ -105,7 +111,7 @@ class ApprovalGate:
         if type(decision) is not ApprovalDecision:
             raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
         operation = self._pending.resolve(reference, context)
-        async with self._tool_calls._transaction() as session:
+        async with tool_call_transaction(self._session_factory) as session:
             run, call, approval = await self._load_locked(session, operation)
             self._pending.require_published(operation)
             self._check_binding(operation)
@@ -116,11 +122,12 @@ class ApprovalGate:
             status = ApprovalStatus.APPROVED if decision is ApprovalDecision.APPROVE else ApprovalStatus.REJECTED
             await self._record_decision(session, reference, approval, status)
             if decision is ApprovalDecision.REJECT:
-                await self._change_call(
-                    session, operation, call, ToolCallStatus.DENIED, error=ToolCallErrorCode.APPROVAL_REJECTED,
+                await transition_locked_tool_call(
+                    session, reference.ticket, call, ToolCallStatus.DENIED,
+                    error_code=ToolCallErrorCode.APPROVAL_REJECTED,
                 )
-                await AgentRunService(session)._transition_locked(
-                    run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.FAILED,
+                await transition_locked_agent_run(
+                    AgentEventRepository(session), run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.FAILED,
                 )
         self._pending.notify(operation, decision)
 
@@ -131,7 +138,7 @@ class ApprovalGate:
     async def claim(self, operation: PendingOperation) -> None:
         self._require_approved_waiter(operation)
         reference, ticket = operation.reference, operation.reference.ticket
-        async with self._tool_calls._transaction() as session:
+        async with tool_call_transaction(self._session_factory) as session:
             run, call, approval = await self._load_locked(session, operation)
             self._require_approved_waiter(operation)
             self._check_binding(operation)
@@ -144,16 +151,16 @@ class ApprovalGate:
             if decisions != [self._decision_payload(reference, ApprovalStatus.APPROVED)]:
                 raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
             self.check_deadline(operation)
-            await AgentRunService(session)._transition_locked(
-                run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.RUNNING,
+            await transition_locked_agent_run(
+                AgentEventRepository(session), run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.RUNNING,
             )
-            await self._change_call(session, operation, call, ToolCallStatus.RUNNING)
+            await transition_locked_tool_call(session, ticket, call, ToolCallStatus.RUNNING)
 
     async def finish(
         self, operation: PendingOperation, *, error: ToolCallErrorCode | None, duration_ms: int | None,
     ) -> None:
         self._pending.require_published(operation)
-        async with self._tool_calls._transaction() as session:
+        async with tool_call_transaction(self._session_factory) as session:
             run, call, approval = await self._load_locked(session, operation)
             current = ToolCallStatus(call.status)
             if error is not None and current not in (ToolCallStatus.PROPOSED, ToolCallStatus.RUNNING):
@@ -164,20 +171,21 @@ class ApprovalGate:
                 await self._record_decision(
                     session, operation.reference, approval, ApprovalStatus.REJECTED, reason=error,
                 )
-            await self._change_call(
-                session, operation, call, ToolCallStatus.SUCCEEDED if error is None else ToolCallStatus.FAILED,
-                error=error, duration_ms=duration_ms if current is ToolCallStatus.RUNNING else None,
+            await transition_locked_tool_call(
+                session, operation.reference.ticket, call,
+                ToolCallStatus.SUCCEEDED if error is None else ToolCallStatus.FAILED,
+                error_code=error, duration_ms=duration_ms if current is ToolCallStatus.RUNNING else None,
             )
             actual = AgentRunStatus(run.status)
             if error is not None and actual in (AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.RUNNING):
                 target = AgentRunStatus.CANCELLED if error is ToolCallErrorCode.CANCELLED else AgentRunStatus.FAILED
-                await AgentRunService(session)._transition_locked(run, actual, target)
+                await transition_locked_agent_run(AgentEventRepository(session), run, actual, target)
 
     async def _load_locked(
         self, session: AsyncSession, operation: PendingOperation,
     ) -> tuple[AgentRunModel, ToolCallModel, ApprovalModel]:
         reference, ticket = operation.reference, operation.reference.ticket
-        run = await self._tool_calls._lock_run(session, ticket.run_id, ticket.workspace_id, require_running=False)
+        run = await lock_tool_call_run(session, ticket, require_running=False)
         call = await ToolCallRepository(session).get_for_update(ticket.run_id, ticket.tool_call_id)
         if call is None or call.tool_name != ticket.tool_name:
             raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
@@ -192,16 +200,6 @@ class ApprovalGate:
     def _require_waiting(run: AgentRunModel, call: ToolCallModel) -> None:
         if run.status != AgentRunStatus.WAITING_APPROVAL.value or call.status != ToolCallStatus.PROPOSED.value:
             raise ToolExecutionError(ToolErrorCode.APPROVAL_INVALID)
-
-    async def _change_call(
-        self, session: AsyncSession, operation: PendingOperation, call: ToolCallModel, target: ToolCallStatus,
-        *, error: ToolCallErrorCode | None = None, duration_ms: int | None = None,
-    ) -> None:
-        validate_tool_call_transition(ToolCallStatus(call.status), target)
-        call.status = target.value
-        await self._tool_calls._append(
-            session, operation.reference.ticket, target, error_code=error, duration_ms=duration_ms,
-        )
 
     @staticmethod
     def _decision_payload(reference: ApprovalReference, target: ApprovalStatus) -> dict[str, str | int]:

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import Settings
@@ -21,10 +22,10 @@ from app.permissions.context import PathScope, PermissionContext
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tool_calls import ToolCallRepository
-from app.services.agent_runs import AgentRunService
+from app.services.agent_runs import AgentRunService, StaleAgentRunStatusError, transition_locked_agent_run
 from app.services.audited_tool_executor import AuditedToolExecutor
 from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
-from app.services.tool_calls import ToolCallService
+from app.services.tool_calls import ToolCallService, lock_tool_call_run, transition_locked_tool_call
 from app.tools.contracts import ToolInput, ToolOutput, ToolRiskLevel, ToolSpec
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
@@ -483,6 +484,65 @@ def test_postgres_locked_tool_call_is_run_scoped_and_refreshes_existing_state(da
             await AgentRunRepository(session).get_for_update(ticket.run_id)
             locked = await repository.get_for_update(ticket.run_id, ticket.tool_call_id)
             assert locked is stale and locked.status == "running"
+
+    database(check)
+
+
+@pytest.mark.parametrize("resolution", ["commit", "rollback", "event-error"])
+def test_postgres_transaction_local_transitions_are_atomic(database, monkeypatch, resolution):
+    async def check(case):
+        service = ToolCallService(case.factory)
+        spec = sample_executor(forbidden_handler).get_tool_spec("sample_read")
+        ticket = await service.propose(case.context, spec)
+        before = await snapshot(case, fresh_engine=True)
+
+        if resolution == "event-error":
+            original_append = AgentEventRepository.append
+
+            async def duplicate_sequence(repo, run_id, *, event_type, payload):
+                event = await original_append(repo, run_id, event_type=event_type, payload=payload)
+                if event_type == "tool_call_finished":
+                    event.sequence = 1
+                return event
+
+            monkeypatch.setattr(AgentEventRepository, "append", duplicate_sequence)
+
+        async with case.factory() as session:
+            transaction = await session.begin()
+            run = await lock_tool_call_run(session, ticket, require_running=True)
+            locked_call = await ToolCallRepository(session).get_for_update(ticket.run_id, ticket.tool_call_id)
+            assert locked_call is not None
+            events = AgentEventRepository(session)
+            await transition_locked_agent_run(events, run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
+            await transition_locked_tool_call(
+                session, ticket, locked_call, ToolCallStatus.FAILED, error_code=ToolCallErrorCode.HANDLER_FAILED,
+            )
+            with pytest.raises(StaleAgentRunStatusError):
+                await transition_locked_agent_run(events, run, AgentRunStatus.RUNNING, AgentRunStatus.CANCELLED)
+            with pytest.raises(InvalidToolCallTransition):
+                await transition_locked_tool_call(session, ticket, locked_call, ToolCallStatus.RUNNING)
+
+            assert session.get_transaction() is transaction and transaction.is_active
+            assert await snapshot(case, fresh_engine=True) == before
+            if resolution == "event-error":
+                with pytest.raises(IntegrityError):
+                    await session.flush()
+            if resolution == "commit":
+                await session.commit()
+            else:
+                await session.rollback()
+                await session.rollback()
+
+        after = await snapshot(case, fresh_engine=True)
+        if resolution == "commit":
+            assert after[0] == "failed"
+            assert_audit(after, ["proposed", "failed"], error="handler_failed")
+            assert [(event.sequence, event.event_type) for event in after[3]] == [
+                (1, "tool_call_proposed"), (2, "agent_run_status_changed"), (3, "tool_call_finished"),
+            ]
+            assert after[3][1].payload == {"from": "running", "to": "failed"}
+        else:
+            assert after == before
 
     database(check)
 

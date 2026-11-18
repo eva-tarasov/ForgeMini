@@ -73,6 +73,30 @@ class AgentRunResultRequiredError(Exception):
     pass
 
 
+def _check_expected_status(run: AgentRunModel, expected: AgentRunStatus) -> AgentRunStatus:
+    actual = AgentRunStatus(run.status)
+    if actual != expected:
+        raise StaleAgentRunStatusError(expected, actual)
+    return actual
+
+
+async def transition_locked_agent_run(
+    events: AgentEventRepository, locked_run: AgentRunModel, expected: AgentRunStatus, target: AgentRunStatus,
+) -> None:
+    """Stage a transition using the repository bound to the session holding the row lock."""
+    actual = _check_expected_status(locked_run, expected)
+    validate_agent_run_transition(actual, target)
+    if target is AgentRunStatus.SUCCEEDED:
+        raise VerificationEvidenceRequiredError("Independent verification evidence is required")
+    if target is AgentRunStatus.VERIFYING:
+        if locked_run.final_result is None:
+            raise AgentRunResultRequiredError("final_result_required")
+        if decode_agent_result(locked_run.final_result).status != "ready_for_verification":
+            raise AgentRunResultRequiredError("result_not_ready_for_verification")
+    locked_run.status = target.value
+    await events.add_status_changed(locked_run.id, actual, target)
+
+
 class AgentRunService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -91,7 +115,7 @@ class AgentRunService:
             run = await self.runs.get_for_update(run_id)
             if run is None:
                 raise AgentRunNotFoundError(run_id)
-            await self._transition_locked(run, expected_status, target_status)
+            await transition_locked_agent_run(self.events, run, expected_status, target_status)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
@@ -102,7 +126,7 @@ class AgentRunService:
             run = await self.runs.get_for_update(run_id)
             if run is None:
                 raise AgentRunNotFoundError(run_id)
-            self._check_expected_status(run, AgentRunStatus.QUEUED)
+            _check_expected_status(run, AgentRunStatus.QUEUED)
             task = await self.tasks.get(run.task_id)
             if task is None:
                 raise TaskNotFoundError(run.task_id)
@@ -112,7 +136,7 @@ class AgentRunService:
                 goal=task.goal,
                 acceptance_criteria=task.acceptance_criteria,
             )
-            await self._transition_locked(run, AgentRunStatus.QUEUED, AgentRunStatus.RUNNING)
+            await transition_locked_agent_run(self.events, run, AgentRunStatus.QUEUED, AgentRunStatus.RUNNING)
             await self.session.commit()
             return request
         except BaseException:
@@ -134,7 +158,7 @@ class AgentRunService:
                 raise AgentRunNotFoundError(run_id)
             actual = AgentRunStatus(run.status)
             if actual is not AgentRunStatus.CANCELLED:
-                await self._transition_locked(run, actual, AgentRunStatus.CANCELLED)
+                await transition_locked_agent_run(self.events, run, actual, AgentRunStatus.CANCELLED)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
@@ -146,7 +170,7 @@ class AgentRunService:
             run = await self.runs.get_for_update(run_id)
             if run is None:
                 raise AgentRunNotFoundError(run_id)
-            self._check_expected_status(run, AgentRunStatus.RUNNING)
+            _check_expected_status(run, AgentRunStatus.RUNNING)
             if run.final_result is not None:
                 raise AgentRunResultAlreadyRecordedError("result_already_recorded")
             result_status = document["result"]["status"]
@@ -157,7 +181,7 @@ class AgentRunService:
                 event_type="agent_result_recorded",
                 payload={"schema_version": document["schema_version"], "result_status": result_status},
             )
-            await self._transition_locked(run, AgentRunStatus.RUNNING, target)
+            await transition_locked_agent_run(self.events, run, AgentRunStatus.RUNNING, target)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
@@ -188,7 +212,7 @@ class AgentRunService:
                 and await self._matches_approval_failure(run, failure, approval_failure)
             )
             if not settled:
-                self._check_expected_status(run, AgentRunStatus.RUNNING)
+                _check_expected_status(run, AgentRunStatus.RUNNING)
             if run.final_result is not None:
                 raise AgentRunResultAlreadyRecordedError("result_already_recorded")
             if actual is not AgentRunStatus.CANCELLED:
@@ -198,7 +222,7 @@ class AgentRunService:
                 if not existing:
                     await self.events.append(run.id, event_type=AGENT_EXECUTION_FAILED_EVENT, payload=payload)
             if not settled:
-                await self._transition_locked(run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
+                await transition_locked_agent_run(self.events, run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
@@ -279,26 +303,3 @@ class AgentRunService:
         if not events:
             return None
         return decode_agent_usage(run_id, events[0].payload)
-
-    @staticmethod
-    def _check_expected_status(run: AgentRunModel, expected: AgentRunStatus) -> AgentRunStatus:
-        actual = AgentRunStatus(run.status)
-        if actual != expected:
-            raise StaleAgentRunStatusError(expected, actual)
-        return actual
-
-    async def _transition_locked(
-        self, run: AgentRunModel, expected: AgentRunStatus, target: AgentRunStatus
-    ) -> None:
-        """Apply a transition and append its event under the parent row lock."""
-        actual = self._check_expected_status(run, expected)
-        validate_agent_run_transition(actual, target)
-        if target is AgentRunStatus.SUCCEEDED:
-            raise VerificationEvidenceRequiredError("Independent verification evidence is required")
-        if target is AgentRunStatus.VERIFYING:
-            if run.final_result is None:
-                raise AgentRunResultRequiredError("final_result_required")
-            if decode_agent_result(run.final_result).status != "ready_for_verification":
-                raise AgentRunResultRequiredError("result_not_ready_for_verification")
-        run.status = target.value
-        await self.events.add_status_changed(run.id, actual, target)

@@ -1,11 +1,12 @@
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
 
-from app.db.models import ToolCallModel
+from app.db.models import AgentRunModel, ToolCallModel
 from app.domain.capabilities import Capability
 from app.domain.execution import AgentRunStatus, ToolCallStatus
 from app.permissions.context import PermissionContext
@@ -13,8 +14,9 @@ from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tasks import TaskRepository
 from app.repositories.tool_calls import ToolCallRepository
+from app.services.agent_runs import transition_locked_agent_run
 from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
-from app.services.tool_calls import ToolCallService
+from app.services.tool_calls import ToolCallService, ToolCallTicket, transition_locked_tool_call
 from app.tools.contracts import ToolInput, ToolOutput, ToolRiskLevel, ToolSpec
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 
@@ -146,3 +148,59 @@ def test_service_rolls_back_and_closes_on_audit_error_or_cancellation(audit_serv
         assert str(caught.value) == "audit_persistence_failed"
         assert caught.value.__suppress_context__
     assert trace[-3:] == ["tool_call_proposed", "rollback", "close"]
+
+
+def test_transaction_local_transitions_use_the_callers_session(monkeypatch):
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+    ticket = ToolCallTicket(UUID(int=4), CONTEXT.run_id, CONTEXT.workspace_id, SPEC.name, SPEC.version)
+    run = AgentRunModel(id=ticket.run_id, status="waiting_approval")
+    call = ToolCallModel(id=ticket.tool_call_id, agent_run_id=run.id, tool_name=SPEC.name, status="proposed")
+    recorded = []
+
+    async def append(repo, run_id, *, event_type, payload):
+        assert repo.session is session and run_id == run.id
+        recorded.append((event_type, payload["to"] if event_type == "agent_run_status_changed" else payload["status"]))
+
+    async def check():
+        await transition_locked_agent_run(
+            AgentEventRepository(session), run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.RUNNING,
+        )
+        await transition_locked_tool_call(session, ticket, call, ToolCallStatus.RUNNING)
+
+    monkeypatch.setattr(AgentEventRepository, "append", append)
+    asyncio.run(check())
+    assert (run.status, call.status) == ("running", "running")
+    assert recorded == [("agent_run_status_changed", "running"), ("tool_call_started", "running")]
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+    session.close.assert_not_called()
+
+
+@pytest.mark.parametrize("field, value", [
+    ("tool_call_id", UUID(int=7)),
+    ("run_id", UUID(int=8)),
+    ("tool_name", "other_tool"),
+])
+def test_transaction_local_tool_call_rejects_mismatched_ticket(monkeypatch, field, value):
+    ticket = ToolCallTicket(UUID(int=4), CONTEXT.run_id, CONTEXT.workspace_id, SPEC.name, SPEC.version)
+    call = ToolCallModel(id=ticket.tool_call_id, agent_run_id=ticket.run_id, tool_name=SPEC.name, status="proposed")
+    append = AsyncMock()
+    monkeypatch.setattr(AgentEventRepository, "append", append)
+    with pytest.raises(ToolCallAuditError, match="^audit_persistence_failed$"):
+        asyncio.run(transition_locked_tool_call(object(), replace(ticket, **{field: value}), call, ToolCallStatus.RUNNING))
+    assert call.status == "proposed"
+    append.assert_not_called()
+
+
+def test_standalone_finish_rejects_duration_before_start(audit_service):
+    service, state, trace, _, payloads = audit_service
+
+    async def check():
+        ticket = await service.propose(CONTEXT, SPEC)
+        with pytest.raises(ToolCallAuditError, match="^audit_persistence_failed$"):
+            await service.finish(ticket, ToolCallStatus.FAILED, error_code=ToolCallErrorCode.CANCELLED, duration_ms=4)
+
+    asyncio.run(check())
+    assert state.call.status == "proposed"
+    assert [payload["status"] for payload in payloads] == ["proposed"]
+    assert trace[-3:] == ["tool-lock", "rollback", "close"]

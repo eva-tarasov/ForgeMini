@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import Settings
@@ -22,11 +22,11 @@ from app.permissions.context import PathScope, PermissionContext
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.approvals import ApprovalRepository
-from app.services.agent_runs import AgentRunService
-from app.services.approval_contracts import ApprovalDecision, patch_fingerprint
+from app.services.agent_runs import AgentRunService, transition_locked_agent_run
+from app.services.approval_contracts import ApprovalDecision, PendingOperation, patch_fingerprint, validate_patch_proposal
 from app.services.approved_tool_executor import ApprovedToolExecutor
 from app.services.audited_tool_executor import AuditedToolExecutor
-from app.services.tool_call_audit import ToolCallAuditError
+from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
 from app.services.tool_calls import ToolCallService
 from app.tools.errors import ToolExecutionError
 from app.tools.executor import ToolExecutor
@@ -207,11 +207,23 @@ def test_postgres_approval_commits_before_wait_and_notification_then_writes_once
     async def check(case):
         engine = create_engine(case.settings)
         sessions = set()
+        opened, committed, row_locks = [], [], []
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_locks(_connection, _cursor, statement, _parameters, _context, _executemany):
+            if statement.endswith("FOR UPDATE"):
+                row_locks.append(statement.split("FROM ", 1)[1].split()[0])
 
         class TrackedSession(AsyncSession):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 sessions.add(self)
+                opened.append(self)
+
+            async def commit(self):
+                await super().commit()
+                committed.append((self, tuple(row_locks)))
+                row_locks.clear()
 
             async def close(self):
                 try:
@@ -228,11 +240,13 @@ def test_postgres_approval_commits_before_wait_and_notification_then_writes_once
 
         def observe_write(writer, patch, **kwargs):
             assert not sessions and engine.pool.checkedout() == 0
+            assert len(opened) == len(committed) == 3
             writes.append(patch)
             return write(writer, patch, **kwargs)
 
         def pause_notification(operation, decision):
             assert not sessions and engine.pool.checkedout() == 0
+            assert len(opened) == len(committed) == 2
             notifications.append((operation, decision))
 
         monkeypatch.setattr(SafeRepositoryWriter, "apply", observe_write)
@@ -240,6 +254,7 @@ def test_postgres_approval_commits_before_wait_and_notification_then_writes_once
         try:
             async with waiting(case, monkeypatch) as (execution, operation):
                 assert not sessions and engine.pool.checkedout() == 0
+                assert len(opened) == len(committed) == 1
                 assert assert_lifecycle(await snapshot(case, fresh=True), operation,
                                         run="waiting_approval", call="proposed", approval="pending") == [
                     "tool_call_proposed", "approval_requested", "agent_run_status_changed",
@@ -267,6 +282,10 @@ def test_postgres_approval_commits_before_wait_and_notification_then_writes_once
                     "agent_run_status_changed", "tool_call_started", "tool_call_finished",
                 ]
             assert case.coordinator.pending_request(case.context) is None
+            assert len(opened) == len(committed) == 4
+            assert [session for session, _ in committed] == opened
+            assert set(committed[0][1]) == {"agent_runs"}
+            assert [locks[:3] for _, locks in committed[1:]] == [("agent_runs", "tool_calls", "approvals")] * 3
         finally:
             await engine.dispose()
 
@@ -520,8 +539,8 @@ def test_postgres_approval_decision_waits_for_parent_cancellation_lock(database,
             try:
                 async with case.factory() as canceller:
                     run = await AgentRunRepository(canceller).get_for_update(case.context.run_id)
-                    await AgentRunService(canceller)._transition_locked(
-                        run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.CANCELLED,
+                    await transition_locked_agent_run(
+                        AgentEventRepository(canceller), run, AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.CANCELLED,
                     )
                     pids["owner"] = await canceller.scalar(text("SELECT pg_backend_pid()"))
                     decision = asyncio.create_task(approve(case, operation), name="approval-decision")
@@ -549,6 +568,43 @@ def test_postgres_approval_decision_waits_for_parent_cancellation_lock(database,
             assert_lifecycle(await snapshot(case, fresh=True), operation, run="cancelled", call="failed",
                              approval="rejected", terminal_code="cancelled")
             assert case.target.read_bytes() == ORIGINAL
+
+    database(check)
+
+
+@pytest.mark.parametrize("started", [False, True], ids=["proposed", "running"])
+def test_postgres_approval_finish_records_duration_only_after_start_and_ignores_repeat(database, started):
+    async def check(case):
+        tool, typed, writer = validate_patch_proposal(
+            case.executor, "apply_patch", {"patch": patch_for(TARGET)}, version=None, context=case.context,
+        )
+        operation = PendingOperation.create(
+            case.context, tool, writer, typed, writer.preview(typed.patch), asyncio.get_running_loop().time() + 10,
+        )
+        gate = case.coordinator._gate
+        pending = case.coordinator._pending
+        pending.reserve(operation)
+        try:
+            await gate.request(operation)
+            if started:
+                await approve(case, operation)
+                await gate.claim(operation)
+            await gate.finish(operation, error=ToolCallErrorCode.CANCELLED, duration_ms=7)
+            first = await snapshot(case, fresh=True)
+            assert_lifecycle(
+                first, operation, run="cancelled", call="failed",
+                approval="approved" if started else "rejected", terminal_code="cancelled",
+            )
+            (finished,) = [event.payload for event in first[4] if event.event_type == "tool_call_finished"]
+            if started:
+                assert finished["duration_ms"] == 7
+            else:
+                assert "duration_ms" not in finished
+            await gate.finish(operation, error=ToolCallErrorCode.HANDLER_FAILED, duration_ms=8)
+            assert await snapshot(case, fresh=True) == first
+            assert case.target.read_bytes() == ORIGINAL
+        finally:
+            pending.discard(operation)
 
     database(check)
 
