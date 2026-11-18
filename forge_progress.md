@@ -608,7 +608,7 @@ blocked_reason
 **Codex:** LEARNING\
 **Фактические часы:** не зафиксированы
 
-Steps 01–08 завершены и вошли в `main`. Инженерный прогресс — **8/13**, осталось 5. **M1 остаётся открытым.** Следующий шаг — **Step 09 — LangGraph Tool Integration**. Документационные checkpoints после Step 05 и Step 08 фиксируют принятые результаты. Дальнейшие checkpoints будут согласованы отдельно. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
+Steps 01–09 завершены и вошли в `main`. Инженерный прогресс — **9/13**, осталось 4. **M1 остаётся открытым.** Следующий шаг после review R2-06 — **Step 10 — Independent Verification v1**. Документационные checkpoints после Step 05 и Step 08 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
 
 ## Цель
 
@@ -681,11 +681,15 @@ apply_patch
 | 06 | Persisted ToolCall audit | done · [PR #38](https://github.com/eva-tarasov/myFirstForge/pull/38) |
 | 07 | Controlled apply_patch в fixture-репозиториях | done · [PR #39](https://github.com/eva-tarasov/myFirstForge/pull/39) |
 | 08 | Approval gate и in-process pause/resume | done · [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40) |
-| 09 | Интеграция tools и permissions в LangGraph | not started |
+| 09 | Интеграция tools и permissions в LangGraph | done · [PR #43](https://github.com/eva-tarasov/myFirstForge/pull/43) · [PR #44](https://github.com/eva-tarasov/myFirstForge/pull/44) |
 | 10 | Independent verification v1 | not started |
 | 11 | Public AgentRun API — create/start/show/events/result/cancel | not started |
 | 12 | Public approval и evidence API | not started |
 | 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
+
+### Архитектурный hardening R1–R2
+
+R1A/R1B и R2-01/02/03/05 вошли в `main` через PR #46–#51. R2-04 подтвердил прямой DI общего `ActiveRunRegistry` и отложил composition helper. Эти работы учитываются отдельно от 13 feature steps. R2-06 проверил baseline `8c9ae2b`, получив **1357 passed, 273 opt-in skipped** в обычном прогоне и **273 passed** в PostgreSQL. Решение для review — **GO WITH DOCUMENTED DEBT** в пределах trusted fixture workspace. [Матрица, регрессия и границы Step 10](docs/ARCHITECTURE_R2_REGRESSION_GATE.md)
 
 ### Принятые Steps 01–05
 

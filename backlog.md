@@ -3,10 +3,8 @@
 Записи фиксируют наблюдаемый долг и вопросы, а не утверждённые сроки. Приоритеты предложены для review; target milestone без подтверждения указан как «не определён».
 
 ## BL-01 — Валидация при прямом вызове TaskService
-- Type: debt; Priority: medium; Status: open
-- Context / Evidence: `TaskCreate` проверяет строки на HTTP-границе, но `TaskService.create_task()` принимает обычные значения и напрямую их не проверяет.
-- Target milestone: не определён.
-- Acceptance criteria: владельцем определена граница валидации для не-HTTP вызовов; выбранное поведение проверено тестами.
+- Статус: закрыт через [PR #51](https://github.com/eva-tarasov/myFirstForge/pull/51), squash `8c9ae2b`.
+- `TaskService.create_task()` проверяет прямой вход до insert и использует ту же канонизацию при replay. R2-06 подтвердил отказ невалидному входу, HTTP 409 при разных канонических payload, replay валидных исторических строк и сохранение исторических данных. Целевой Task/Workspace прогон — 101 passed, полная PostgreSQL opt-in регрессия — 273 passed. [Валидатор](backend/app/domain/task_input.py) · [Unit-тесты](backend/tests/test_task_input.py) · [PostgreSQL-тесты](backend/tests/test_task_idempotency_integration.py) · [Отчёт R2-06](docs/ARCHITECTURE_R2_REGRESSION_GATE.md)
 
 ## BL-02 — Передача request_id в нижние слои
 - Type: improvement; Priority: medium; Status: open
