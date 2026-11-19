@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -11,11 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.execution import AgentRunStatus
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tasks import TaskRepository
+from app.schemas.approval import ApprovalPatchReview, LiveApprovalPreview
 from app.services.active_runs import ActiveRunRegistry
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunner
 from app.services.agent_runs import AgentRunMetadata, AgentRunNotFoundError, AgentRunService
 from app.services.agent_service import AgentService, cancel_agent_run
+from app.services.approval_contracts import ApprovalDecision
+from app.services.approval_preview import (
+    ApprovalDecisionConflictError, ApprovalDecisionPort, ApprovalPreviewReader, ApprovalPreviewTarget,
+    ApprovalReviewReader,
+)
 
 
 logger = logging.getLogger("forge.agent.http_execution")
@@ -47,6 +53,7 @@ class RunExecutionBinding:
 class _Execution:
     run_id: UUID
     task: asyncio.Task[AgentFinalResult]
+    runner: AgentRunner
 
 
 class InProcessRunCoordinator:
@@ -87,7 +94,7 @@ class InProcessRunCoordinator:
                 execution.close()
                 raise
             # No suspension between creating the task and handing ownership to the app.
-            self._execution = _Execution(run_id, task)
+            self._execution = _Execution(run_id, task, runner)
             task.add_done_callback(self._observe_completion)
 
     async def cancel(self, run_id: UUID) -> AgentRunMetadata:
@@ -95,6 +102,38 @@ class InProcessRunCoordinator:
         await cancel_agent_run(self._session_factory, self._active_runs, run_id)
         async with self._session_factory() as session:
             return await AgentRunService(session).get_metadata(run_id)
+
+    def _active_runner_for(self, target: ApprovalPreviewTarget) -> AgentRunner | None:
+        active = self._execution
+        if (
+            self._closing or active is None or active.task.done() or active.task.cancelling()
+            or active.run_id != target.run_id or self._binding.workspace_id != target.workspace_id
+        ):
+            return None
+        return active.runner
+
+    def read_approval_preview(self, target: ApprovalPreviewTarget) -> LiveApprovalPreview | None:
+        runner = self._active_runner_for(target)
+        if isinstance(runner, ApprovalPreviewReader):
+            return runner.read_approval_preview(target)
+        return None
+
+    def read_approval_review(
+        self, target: ApprovalPreviewTarget, request_events: Sequence[object],
+    ) -> ApprovalPatchReview | None:
+        runner = self._active_runner_for(target)
+        if isinstance(runner, ApprovalReviewReader):
+            return runner.read_approval_review(target, request_events)
+        return None
+
+    async def decide_approval(
+        self, target: ApprovalPreviewTarget, request_events: Sequence[object],
+        decision: ApprovalDecision, *, reviewed_patch_sha256: str | None,
+    ) -> None:
+        runner = self._active_runner_for(target)
+        if not isinstance(runner, ApprovalDecisionPort):
+            raise ApprovalDecisionConflictError()
+        await runner.decide_approval(target, request_events, decision, reviewed_patch_sha256=reviewed_patch_sha256)
 
     async def _bound_run(self, run_id: UUID) -> AgentRunMetadata:
         async with self._session_factory() as session:

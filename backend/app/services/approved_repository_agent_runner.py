@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -14,19 +15,25 @@ from app.domain.execution import AgentRunStatus
 from app.permissions.context import PathScope, PermissionContext
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tasks import TaskRepository
+from app.schemas.approval import ApprovalPatchReview, LiveApprovalPreview
 from app.services.agent_failure import AgentFailureCode
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
-from app.services.approval_contracts import ApprovalDecision
+from app.services.approval_contracts import ApprovalDecision, PendingOperation, patch_fingerprint
 from app.services.approval_outcome import ApprovalOutcomePort
+from app.services.approval_preview import (
+    ApprovalDecisionConflictError, ApprovalPreviewTarget, ApprovalReviewIntegrityError, project_patch_preview,
+)
 from app.services.approved_tool_executor import ApprovedToolExecutor, _ApprovalPreview
 from app.services.audited_tool_executor import AuditedToolExecutor
 from app.services.repository_agent_runner import RepositoryFixtureBinding
+from app.services.tool_call_audit import ToolCallAuditError, ToolCallErrorCode
 from app.services.tool_calls import ToolCallService
 from app.tools.errors import ToolErrorCode, ToolExecutionError
 from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 from app.tools.repository.factory import create_fixture_executor, create_fixture_patch_tool
+from app.tools.repository.patch import PatchTextError, parse_patch
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +76,89 @@ class ApprovedRepositoryAgentRunner:
             return None
         context, executor = self._active
         return executor._pending_preview(context)
+
+    def _live_operation(self, target: ApprovalPreviewTarget) -> PendingOperation | None:
+        loop = asyncio.get_running_loop()
+        if (
+            self._active is None or self._loop is not loop
+            or self._run_id != target.run_id or self._binding.workspace_id != target.workspace_id
+        ):
+            return None
+        context, executor = self._active
+        # Use the same published, undecided slot as the private approval bridge.
+        operation = executor._pending._undecided_operation_for(context)
+        if operation is None or loop.time() >= operation.deadline:
+            return None
+        reference = operation.reference
+        ticket = reference.ticket
+        if target != ApprovalPreviewTarget(
+            reference.approval_id, ticket.run_id, ticket.workspace_id, ticket.tool_call_id, ticket.tool_name,
+        ):
+            return None
+        return operation
+
+    def read_approval_preview(self, target: ApprovalPreviewTarget) -> LiveApprovalPreview | None:
+        operation = self._live_operation(target)
+        if operation is None:
+            return None
+        preview = project_patch_preview(operation.patch)
+        return preview if asyncio.get_running_loop().time() < operation.deadline else None
+
+    def _checked_review_operation(
+        self, target: ApprovalPreviewTarget, request_events: Sequence[object],
+    ) -> PendingOperation | None:
+        operation = self._live_operation(target)
+        if operation is None:
+            return None
+        event = request_events[0] if len(request_events) == 1 else None
+        reference = operation.reference
+        if (
+            type(event) is not dict or type(event.get("schema_version")) is not int
+            or type(event.get("tool_version")) is not int or event != reference.requested_payload()
+        ):
+            raise ApprovalReviewIntegrityError("Invalid approval review evidence")
+        try:
+            parse_patch(operation.patch)
+        except PatchTextError:
+            raise ApprovalReviewIntegrityError("Invalid approval review patch") from None
+        if patch_fingerprint(operation.patch) != reference.patch_sha256:
+            raise ApprovalReviewIntegrityError("Invalid approval review fingerprint")
+        if asyncio.get_running_loop().time() >= operation.deadline:
+            return None
+        return operation
+
+    def read_approval_review(
+        self, target: ApprovalPreviewTarget, request_events: Sequence[object],
+    ) -> ApprovalPatchReview | None:
+        operation = self._checked_review_operation(target, request_events)
+        if operation is None:
+            return None
+        reference = operation.reference
+        return ApprovalPatchReview(
+            approval_id=reference.approval_id, run_id=reference.ticket.run_id,
+            patch_sha256=reference.patch_sha256, patch=operation.patch,
+        )
+
+    async def decide_approval(
+        self, target: ApprovalPreviewTarget, request_events: Sequence[object],
+        decision: ApprovalDecision, *, reviewed_patch_sha256: str | None,
+    ) -> None:
+        operation = self._checked_review_operation(target, request_events)
+        if operation is None or self._active is None:
+            raise ApprovalDecisionConflictError()
+        if decision is ApprovalDecision.APPROVE and reviewed_patch_sha256 != operation.reference.patch_sha256:
+            raise ApprovalDecisionConflictError()
+        _, executor = self._active
+        try:
+            await executor.decide(operation.reference, decision, context=operation.context)
+        except ToolExecutionError as error:
+            if error.code in (ToolErrorCode.APPROVAL_INVALID, ToolErrorCode.APPROVAL_TIMEOUT):
+                raise ApprovalDecisionConflictError() from None
+            raise
+        except ToolCallAuditError as error:
+            if error.code is ToolCallErrorCode.RUN_NOT_RUNNING:
+                raise ApprovalDecisionConflictError() from None
+            raise
 
     async def _decide(self, preview: _ApprovalPreview, decision: ApprovalDecision) -> None:
         if type(preview) is not _ApprovalPreview or self._approval_preview() != preview or self._active is None:

@@ -608,7 +608,7 @@ blocked_reason
 **Codex:** LEARNING\
 **Фактические часы:** не зафиксированы
 
-Steps 01–10 завершены и вошли в `main`. Step 11 принят в [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59). Инженерный прогресс — **11/13**, осталось 2 основных шага. **M1 остаётся открытым.** Следующий шаг — **Step 12 — Public approval и evidence API**, статус `not started`. Документационные checkpoints после Steps 05, 08, 10 и 11 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
+Steps 01–11 завершены и вошли в `main`. Техническая приёмка Step 12 завершена, PR ожидает merge. Инженерный прогресс — **12/13**. Остался **Step 13 — bounded live OpenAI smoke, интеграция и приёмка M1**, статус `not started`. **M1 остаётся открытым.** Документационные checkpoints после Steps 05, 08, 10, 11 и 12 фиксируют принятые результаты. Week4CLI ведётся отдельно со своими dependency gates. [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61).
 
 ## Цель
 
@@ -684,7 +684,7 @@ apply_patch
 | 09 | Интеграция tools и permissions в LangGraph | done · [PR #43](https://github.com/eva-tarasov/myFirstForge/pull/43) · [PR #44](https://github.com/eva-tarasov/myFirstForge/pull/44) |
 | 10 | Independent Verification v1 | done · [PR #53](https://github.com/eva-tarasov/myFirstForge/pull/53) · [PR #54](https://github.com/eva-tarasov/myFirstForge/pull/54) · [PR #56](https://github.com/eva-tarasov/myFirstForge/pull/56) · [PR #57](https://github.com/eva-tarasov/myFirstForge/pull/57) |
 | 11 | Public AgentRun API — create/start/show/events/result/cancel | done · [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59) |
-| 12 | Public approval и evidence API | not started |
+| 12 | Public approval и evidence API | done · техническая приёмка завершена, [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) ожидает merge |
 | 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
 
 ### Архитектурный hardening R1–R2
@@ -751,16 +751,16 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 |---|---|
 | Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
 | Runtime и verifier сверяют workspace с сохранённым Task. Физический fixture root выбирает доверенный backend, который отвечает за привязку корня к workspace и его изоляцию. | Изоляция в Week 6. |
-| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Публичный approval API относится к Step 12. |
+| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. HTTP-решение допускается по отдельной workspace-scoped capability и фиксируется существующим `ApprovalGate`. Идентификация пользователя и персональная авторизация остаются открытыми. | Step 12 поддерживает доверенный локальный single-process runtime. |
 | Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. При конкурентных изменениях файловой системы остаются TOCTOU-окна, в том числе между наблюдением verifier и SQL commit. | Изоляция в Week 6. |
 | Подтверждён macOS-прогон. Linux — целевая платформа при наличии требуемых POSIX-примитивов, независимого Linux-прогона на checkpoint не было. | Отдельная проверка Linux-совместимости. |
 | Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Проектирование sandbox в Week 6. |
-| Output budgets применяются к полезному UTF-8 тексту. Полный сериализованный API envelope пока вне этих лимитов. | Публичные response DTO в Steps 11–12. |
+| Output budgets применяются к полезному UTF-8 тексту. Общий лимит полного сериализованного API envelope остаётся открытым. | Steps 11–12 ограничивают отдельные публичные проекции и выборки. |
 | Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
 | Сбой процесса, неоднозначный commit или повторная отмена могут оставить незавершённые записи. In-process ожидание теряется при перезапуске. | Durable approval resume и восстановление в Week 7. |
 | Отмена может конкурировать с уже выполненной записью. Step 10 подтверждает наблюдаемое состояние и согласованность audit в изолированном fixture. Восстановление после частичной замены остаётся открытым. | Проектирование восстановления в Week 7. |
-| Публичные approval и evidence API, bounded live OpenAI smoke и проверка M1 exit criteria остаются открытыми. | Steps 12–13 с действующими CLI dependency gates. |
-| GitHub CI ещё отсутствует. | [Backlog](backlog.md), BL-05. |
+| Bounded live OpenAI smoke, интеграция и проверка M1 exit criteria остаются открытыми. | Step 13. |
+| Автоматическая проверка GitHub CI для этого checkpoint не подтверждена. | [Backlog](backlog.md), BL-05. |
 
 ### Учебные checkpoints
 
@@ -813,9 +813,40 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 Поддерживаемый режим — доверенный локальный single-worker runtime. Публичная аутентификация и авторизация, публичные approval/verification API, durable resume и multi-worker ownership остаются за пределами Step 11.
 
+## Step 12 — Public Approval & Evidence API
+
+Техническая приёмка 12A–12E завершена после code review и проверки владельцем feature HEAD `7fe3e2482551662b6ed6e10380d5a34492b03093`. [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) ожидает merge.
+
+- **12A — Pending approval discovery.** Workspace-scoped read capability открывает ограниченную безопасную проекцию сохранённых pending approvals.
+- **12B — Approval details.** SQL проверяет принадлежность approval к run и workspace. Структурный preview показывает относительные пути и счётчики только для совпавшей live operation. Сохранённая запись pending может существовать без live waiter.
+- **12C — Exact review и решение.** Отдельная review/decision capability открывает точный patch и разрешает approve/reject через существующий `ApprovalGate`. Approve требует fingerprint точного patch. Повторные и устаревшие решения отклоняются. HTTP `200` с `recorded: true` подтверждает сохранение решения. Допуск ToolCall и применение patch происходят отдельно.
+- **12D — Evidence Read API.** Read capability открывает версионированные сохранённые попытки и безопасные checks. Сервис проверяет целостность ограниченной истории перед keyset pagination. GET читает сохранённые данные без вызова verifier.
+- **12E — Final HTTP E2E.** FastAPI, PostgreSQL и offline LangGraph подтвердили цепочки approve → PASS, reject, INCONCLUSIVE → FAIL и INCONCLUSIVE → cancel. Проверены committed visibility, разделение capability по workspace и отсутствие повторных side effects. [HTTP E2E gate](docs/STEP_12_HTTP_E2E_GATE.md).
+
+**Результаты технической проверки владельцем**
+
+| Checkpoint | Focused | HTTP Step 11/12 | Ordinary backend | PostgreSQL opt-in | pip check |
+|---|---|---|---|---|---|
+| Step 12D | 140 passed | 239 passed | — | 445 passed | — |
+| Step 12E | 4 новых E2E passed | 243 passed | 1593 passed, 449 skipped | 449 passed | PASS |
+
+Это отдельные локальные прогоны с пересекающимися наборами тестов.
+
+**Границы.** Поддерживается доверенный локальный single-process runtime. Workspace-scoped capability подтверждает владение токеном, полноценная user authentication остаётся открытой. Независимый verifier вызывает доверенный backend, публичного endpoint для запуска verification нет. Evidence подтверждает наблюдавшиеся байты и не устанавливает авторство изменения. Filesystem TOCTOU сохраняется, а выполненные side effects не откатываются автоматически. Production sandbox относится к Week 6, durable resume и restart recovery — к Week 7. Live OpenAI smoke остаётся неподтверждённым, M1 открыт до Step 13.
+
+**Открытые вопросы самостоятельной проверки владельца**
+
+- [ ] Чем решение approval отличается от исполнения ToolCall?
+- [ ] Почему `202 Accepted` не означает завершение запуска?
+- [ ] Почему `200` с `recorded: true` не подтверждает изменение файла?
+- [ ] Почему для `succeeded` нужен независимый `PASS`?
+- [ ] Что гарантирует committed PostgreSQL snapshot?
+- [ ] Почему потеря HTTP-ответа не означает rollback?
+- [ ] Почему terminal AgentRun нельзя переоткрыть?
+
 ## Additional integration handoff — Week4CLI
 
-The Public AgentRun API was accepted in Step 11. Before exposing the corresponding agent-control CLI commands, apply the remaining Week4CLI dependency gates, including the Step 12 approval/evidence contract for approval commands. Prioritize the original M1 exit criteria and record new contract scope and its verification separately. Plan a bounded real OpenAI smoke with owner-provided credentials (no secrets in Git/logs), distinguishing live model behavior from offline fixture tests. Week 3 acceptance stays historical. If handoff remains unfinished, report CLI integration as blocked. Durable restart remains a Week 7 concern.
+Backend-контракты Public AgentRun API и Public Approval & Evidence API приняты в Steps 11–12. Готовность соответствующих CLI-команд оценивается отдельно по действующим dependency gates Week4CLI. Step 13 сохраняет исходные M1 exit criteria и bounded live OpenAI smoke с credentials владельца вне Git и логов. Результаты live smoke фиксируются отдельно от offline fixture-прогонов. Durable restart остаётся задачей Week 7.
 
 ## Exit Criteria — M1
 

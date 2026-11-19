@@ -32,7 +32,7 @@ from app.services.approval_contracts import ApprovalReference
 from app.services.tool_call_audit import ToolCallAudit, ToolCallErrorCode, encode_tool_call_event
 from app.services.tool_calls import ToolCallTicket
 from app.services.verification_contract import VerificationVerdict
-from app.services.verification_evidence import VERIFICATION_RECORDED, decode_evidence, metadata_digest
+from app.services.verification_evidence import VERIFICATION_RECORDED, VerificationEvidence, decode_evidence, metadata_digest
 
 
 _TOOL_KINDS = frozenset({"tool_call_proposed", "tool_call_started", "tool_call_finished"})
@@ -63,8 +63,15 @@ class AgentRunReadService:
             raise InvalidAgentRunReadError() from None
 
     async def read_result(self, run_id: UUID) -> AgentRunResultResponse:
+        result, _ = await self.read_validated_result(run_id)
+        return result
+
+    async def read_validated_result(
+        self, run_id: UUID, *, workspace_id: UUID | None = None,
+    ) -> tuple[AgentRunResultResponse, list[tuple[int, VerificationEvidence]]]:
+        """Validate the complete bounded snapshot before any API projects it."""
         snapshot = await self._events.read_result_snapshot(
-            run_id, event_types=_RESULT_KINDS, limit=MAX_RESULT_EVENTS + 1,
+            run_id, event_types=_RESULT_KINDS, limit=MAX_RESULT_EVENTS + 1, workspace_id=workspace_id,
         )
         if snapshot is None:
             raise AgentRunNotFoundError(run_id)
@@ -72,7 +79,7 @@ class AgentRunReadService:
         if len(events) > MAX_RESULT_EVENTS:
             raise InvalidAgentRunReadError()
         try:
-            return _project_result(run, workspace_id, events)
+            return _validate_result(run, workspace_id, events)
         except (ValueError, TypeError, KeyError):
             raise InvalidAgentRunReadError() from None
 
@@ -174,15 +181,18 @@ def _project_usage(record: AgentUsageRecord) -> AgentRunUsageResponse:
     )
 
 
-def _project_result(run: AgentRunModel, workspace_id: UUID, events: list) -> AgentRunResultResponse:
+def _validate_result(
+    run: AgentRunModel, workspace_id: UUID, events: list,
+) -> tuple[AgentRunResultResponse, list[tuple[int, VerificationEvidence]]]:
     status = AgentRunStatus(run.status)
     preliminary = None if run.final_result is None else decode_agent_result(run.final_result).status
     failure = None
     usage = None
     verdict = None
     attempt_ids: set[UUID] = set()
+    attempts: list[tuple[int, VerificationEvidence]] = []
     result_digest = metadata_digest(run.final_result) if preliminary == "ready_for_verification" else None
-    for kind, payload in events:
+    for sequence, kind, payload in events:
         if kind == AGENT_EXECUTION_FAILED_EVENT:
             if failure is not None:
                 raise ValueError("duplicate_execution_failure")
@@ -203,6 +213,7 @@ def _project_result(run: AgentRunModel, workspace_id: UUID, events: list) -> Age
                 raise ValueError("inconsistent_verification_history")
             attempt_ids.add(evidence.attempt_id)
             verdict = evidence.verdict
+            attempts.append((sequence, evidence))
 
     if (
         (status in (AgentRunStatus.VERIFYING, AgentRunStatus.SUCCEEDED) and preliminary != "ready_for_verification")
@@ -216,7 +227,8 @@ def _project_result(run: AgentRunModel, workspace_id: UUID, events: list) -> Age
     ):
         raise ValueError("inconsistent_agent_run_result")
 
-    return AgentRunResultResponse(
+    result = AgentRunResultResponse(
         run_id=run.id, run_status=status, preliminary_status=preliminary, execution_failure_code=failure,
         verification_verdict=verdict, usage=usage,
     )
+    return result, attempts

@@ -192,6 +192,67 @@ Usage содержит `known_total_tokens`, `usage_complete`, `known_cost_usd` 
 
 Неизвестный run даёт `404 AGENT_RUN_NOT_FOUND`, ошибочный UUID или query — `422 VALIDATION_ERROR`, повреждение известной записи или SQL-ошибка чтения — `500 AGENT_RUN_READ_FAILED`. Контракт предназначен для локальной разработки без аутентификации и авторизации. Клиент получает состояние опросом, отдельного потока уведомлений у 11C нет.
 
+### Step 12A — локальный доступ к pending approvals
+
+`GET /agent-runs/{run_id}/approvals?status=pending` возвращает `{"items": [...]}`. Единственное допустимое значение `status` — `pending`, оно же используется при отсутствии параметра. Элемент содержит `id`, `run_id`, `tool_name`, `status`, `requested_at`. SQL возвращает до 32 pending approvals для одного run, в порядке `requested_at` и `id`. Список описывает committed snapshot PostgreSQL. Approval может быть виден до завершения cleanup отмены или после утраты in-process waiter. Его наличие в списке не подтверждает готовность операции к исполнению.
+
+По умолчанию endpoint закрыт. Для доверенной локальной конфигурации backend явно передаёт `create_app(approval_access_binding=LocalApprovalAccessBinding(workspace_id=..., token=SecretStr(...)))`. Workspace выбирает backend, а случайный Bearer-секрет он получает из локального защищённого источника. Клиент передаёт `Authorization: Bearer <token>`. При отсутствии binding ответ `503 APPROVAL_API_UNAVAILABLE`, при отсутствующей или недействительной capability — `403 APPROVAL_ACCESS_DENIED` до обращения к БД. С действительной capability неизвестный run и run из чужого workspace дают одинаковый `404 AGENT_RUN_NOT_FOUND`. Недопустимый UUID или query возвращает `422 VALIDATION_ERROR`, сбой чтения — `500 APPROVAL_READ_FAILED`.
+
+Конфигурация принимает Bearer-секрет длиной от 32 до 512 символов. Минимальная длина сама по себе не гарантирует случайность. Для создания нового секрета используйте 32 случайных байта и сохраняйте значение в защищённом локальном хранилище.
+
+```python
+import secrets
+
+from pydantic import SecretStr
+
+token = SecretStr(secrets.token_urlsafe(32))
+```
+
+Граница предназначена для доверенной локальной среды с одним worker. Обычные endpoints Step 11 сохраняют свою политику доступа. Токен подтверждает владение capability, а scoped SQL отдельно сверяет сохранённую связь Run → Task → Workspace. IP и `Host` не подтверждают владение токеном. При передаче за пределами loopback используйте защищённый транспорт. HTTPS защищает передачу, а общий токен и localhost не устанавливают личность человека для аудита. В HTTP-лог Forge попадают шаблон маршрута, метод, статус, request ID и длительность. Значения заголовков должны оставаться вне логов приложения и прокси. Step 12A предоставляет метаданные pending approvals, решение по approval остаётся внутренней операцией.
+
+### Step 12B — детали approval и структурный preview
+
+`GET /agent-runs/{run_id}/approvals/{approval_id}` использует ту же capability. Один SQL-запрос сверяет Approval → ToolCall → AgentRun → Task → разрешённый workspace. Ответ содержит `id`, `run_id`, `tool_name`, `status`, `requested_at`, nullable `decided_at` и `preview`. Неизвестный, чужой или неверно сопоставленный approval возвращает одинаковый `404 APPROVAL_NOT_FOUND`. Ошибка чтения или некорректная сохранённая запись даёт `500 APPROVAL_READ_FAILED`. Ошибки доступа и UUID сохраняют формат Step 12A.
+
+`preview.state=live_at_read` означает, что после чтения SQL текущий локальный runner наблюдал точную опубликованную, нерешённую операцию до её deadline. `files` содержит канонические относительные логические пути, `added_lines`, `removed_lines` и `hunk_count`. Лимиты парсера составляют 4 файла и 32 hunks на patch. Публичная JSON-проекция preview ограничена 4096 байтами UTF-8. При превышении бюджета, завершённом approval или отсутствии подходящей живой операции возвращается `unavailable` с пустым `files`. `content_included` всегда `false`. Содержимое patch и файлов, абсолютный корень и fingerprints остаются внутри runtime.
+
+SQL и runner наблюдаются отдельно. `live_at_read` описывает момент локального чтения. Состояние может измениться сразу после него, а решение требует повторных проверок штатного approval flow. GET читает метаданные и структурное представление без решения, событий и side effects.
+
+### Step 12C-1 — просмотр точного patch
+
+`GET /agent-runs/{run_id}/approvals/{approval_id}/review` использует отдельный `review_token` в `LocalApprovalAccessBinding`. Backend задаёт его через `SecretStr` из защищённого локального источника. Сгенерируйте его независимо от read token. По умолчанию review выключен. Токены подчиняются одинаковым ограничениям, а read token сохраняет доступ к списку и структурным деталям. Review capability подтверждает владение отдельным полномочием в доверенной локальной среде. Она не устанавливает личность человека.
+
+`200` возвращает `approval_id`, `run_id`, `patch_sha256` и исходный `patch` в JSON с `Cache-Control: no-store`. Scoped SQL читает состояние и до двух `approval_requested` events одним statement. Runtime сверяет точную живую операцию с единственным сохранённым request, повторно проверяет patch существующим парсером и сверяет `patch_sha256` через Forge `patch_fingerprint()`. Для текста действуют исходные лимиты: 64 КиБ UTF-8, 4 файла и 32 hunks. SHA-256 здесь вычисляется с доменным префиксом Forge. Fingerprint связывает значение с текстом и не подтверждает факт человеческого просмотра.
+
+`403 APPROVAL_ACCESS_DENIED` означает отсутствующую или неверную review capability. Для чужого, неизвестного или ошибочно сопоставленного approval возвращается `404 APPROVAL_NOT_FOUND`. Для закрытого, просроченного или потерявшего waiter approval возвращается `409 APPROVAL_NOT_REVIEWABLE`. Некорректные UUID дают `422 VALIDATION_ERROR`, проблема чтения или целостности даёт `500 APPROVAL_REVIEW_FAILED`, отсутствие конфигурации review или локального runtime даёт `503 APPROVAL_REVIEW_UNAVAILABLE`.
+
+Точный patch может содержать секреты и управляющие последовательности. Клиенту следует показывать его как текст, экранировать HTML и нейтрализовать управляющие символы терминала, исключать тело ответа и токены из логов. JSON-экранирование защищает формат передачи. SQL и live runtime наблюдаются раздельно. Получение ответа не фиксирует решение. Перед решением и исполнением нужна повторная проверка текущего состояния, срока, полномочий и исходных файлов.
+
+### Step 12C-2 — запись решения по approval
+
+`POST /agent-runs/{run_id}/approvals/{approval_id}/decision` использует тот же `review_token`. Для approve тело содержит `{"decision":"approve","reviewed_patch_sha256":"<64 строчных hex-символа>"}`. Для reject тело содержит только `{"decision":"reject"}`. Лишние поля запрещены. Backend сверяет workspace и сохранённое событие запроса, а live runner проверяет точную ожидающую операцию. Для approve digest сверяется с fingerprint текущего patch и его привязкой к approval.
+
+Ответ `200` с `Cache-Control: no-store` содержит `approval_id`, `run_id`, `decision` со значением `approved` или `rejected`, и `recorded: true`. Ответ подтверждает commit через `ApprovalGate.decide()`. Изменение файлов и независимая verification происходят отдельно. При approve runtime повторно проверяет исходные файлы перед записью. При reject ожидавшая операция завершается без записи.
+
+`403 APPROVAL_ACCESS_DENIED` означает отсутствующую или неверную capability при включённом доступе. Неизвестный, чужой или неверно сопоставленный approval даёт `404 APPROVAL_NOT_FOUND`. Повтор, несовпавший fingerprint, отмена, таймаут, shutdown или потеря waiter дают `409 APPROVAL_DECISION_CONFLICT`. Ошибки UUID и тела дают `422 VALIDATION_ERROR`, внутренний сбой — `500 APPROVAL_DECISION_FAILED`, отсутствие конфигурации capability или локального runtime — `503 APPROVAL_DECISION_UNAVAILABLE`.
+
+Решение записывается не более одного раза. Потеря ответа оставляет клиенту неопределённый исход. Для сверки используйте GET details из Step 12B и проверьте сохранённые `status` и `decided_at`. Повтор POST после commit возвращает конфликт. Review fingerprint подтверждает соответствие patch, а отдельная capability ограничивает доступ в доверенном локальном runtime. Персональная идентификация и подтверждение факта человеческого просмотра остаются за его пределами.
+
+### Step 12D — сохранённые результаты независимой verification
+
+Чтение evidence использует workspace-scoped read token из Step 12A. Backend выбирает workspace, а SQL сверяет его с Task данного run. Review/decision token не даёт доступа. У authorized GET ответ `200` содержит `Cache-Control: no-store`.
+
+| Запрос | Ответ |
+| --- | --- |
+| `GET /agent-runs/{run_id}/evidence?after_sequence=0&limit=20` | `run_id`, `items`, `next_after_sequence`, `has_more`. Элемент содержит `attempt_id`, `sequence`, `verdict`, `file_verdict`, `audit_complete`, `isolated_fixture` и `check_count`. |
+| `GET /agent-runs/{run_id}/evidence/{attempt_id}` | Те же поля попытки и до 32 `checks` в порядке плана. Каждый check содержит `check_id`, `criterion_index`, относительный логический `path` и `outcome`. |
+
+`outcome` равен `missing`, если наблюдение отсутствует, и `ambiguous`, если у check несколько наблюдений, даже одинаковых. Для единственного наблюдения с issue возвращается `read_error` или `unknown_effect`. Для наблюдения с digest конфликтующие digests одного логического пути дают `ambiguous`, иначе возвращается `match` или `mismatch`. Неизвестные check IDs не создают публичных строк. Итог попытки вычисляется существующим codec. Например, `file_verdict: "pass"` при `isolated_fixture: false` даёт итоговый `verdict: "inconclusive"`. После отмены ранее записанный INCONCLUSIVE остаётся видимым.
+
+Курсор принимает целые значения от 0 до 2147483647, `limit` — от 1 до 20. Результат упорядочен по возрастанию `sequence`, следующая страница включает попытки с большим sequence. Пустая страница сохраняет входной курсор. Каждый запрос использует один committed snapshot, поэтому следующий poll может увидеть новые commits. SQL читает максимум 513 релевантных событий в пределах существующего общего бюджета `/result` в 512. До применения курсора сервис проверяет всю ограниченную историю на дубликаты и несогласованность. Превышение бюджета и повреждённая история дают `500 VERIFICATION_EVIDENCE_READ_FAILED` без частичной выдачи.
+
+Отсутствующее или чужое evidence даёт одинаковый `404 VERIFICATION_EVIDENCE_NOT_FOUND`. Существующий run без evidence даёт пустой список. Ошибки UUID и query дают `422 VALIDATION_ERROR`. Ошибки capability сохраняют коды Step 12A `403 APPROVAL_ACCESS_DENIED` и `503 APPROVAL_API_UNAVAILABLE`. GET работает только с сохранёнными данными и не читает файлы. Hashes, внутренний payload и grants остаются внутри backend. Наблюдавшиеся байты подтверждают содержимое по плану, а авторство изменения остаётся за пределами v1.
+
 ## Переходы состояний в PostgreSQL
 
 `AgentRunService.transition_status()` блокирует строку AgentRun через `SELECT FOR UPDATE`, сравнивает сохранённый статус с ожидаемым и проверяет допустимость перехода. Изменение статуса и `AgentEvent` типа `agent_run_status_changed` с полями `from` и `to` фиксируются одной транзакцией. При ошибке оба изменения откатываются. Терминальные состояния `succeeded`, `failed` и `cancelled` нельзя переоткрыть. Для успешного завершения требуется независимое подтверждение результата, поэтому сервис пока отклоняет переход в `succeeded`.
