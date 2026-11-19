@@ -608,7 +608,7 @@ blocked_reason
 **Codex:** LEARNING\
 **Фактические часы:** не зафиксированы
 
-Steps 01–09 завершены и вошли в `main`. Инженерный прогресс — **9/13**, осталось 4. **M1 остаётся открытым.** Следующий шаг после review R2-06 — **Step 10 — Independent Verification v1**. Документационные checkpoints после Step 05 и Step 08 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
+Steps 01–10 завершены и вошли в `main`. Инженерный прогресс — **10/13**, осталось 3. **M1 остаётся открытым.** Следующий шаг — **Step 11 — Public AgentRun API**. Документационные checkpoints после Steps 05, 08 и 10 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
 
 ## Цель
 
@@ -682,7 +682,7 @@ apply_patch
 | 07 | Controlled apply_patch в fixture-репозиториях | done · [PR #39](https://github.com/eva-tarasov/myFirstForge/pull/39) |
 | 08 | Approval gate и in-process pause/resume | done · [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40) |
 | 09 | Интеграция tools и permissions в LangGraph | done · [PR #43](https://github.com/eva-tarasov/myFirstForge/pull/43) · [PR #44](https://github.com/eva-tarasov/myFirstForge/pull/44) |
-| 10 | Independent verification v1 | not started |
+| 10 | Independent Verification v1 | done · [PR #53](https://github.com/eva-tarasov/myFirstForge/pull/53) · [PR #54](https://github.com/eva-tarasov/myFirstForge/pull/54) · [PR #56](https://github.com/eva-tarasov/myFirstForge/pull/56) · [PR #57](https://github.com/eva-tarasov/myFirstForge/pull/57) |
 | 11 | Public AgentRun API — create/start/show/events/result/cancel | not started |
 | 12 | Public approval и evidence API | not started |
 | 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
@@ -743,23 +743,22 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - Read-only фабрика связывает tools с точным экземпляром доверенного контекста, выбранным backend fixture root и одним `SafeRepositoryReader`. `git_diff` ограничен сравнением текста одного файла с переданным snapshot. Отдельная фабрика привязывает `apply_patch` к `SafeRepositoryWriter`.
 - `ToolCall` фиксирует жизненный цикл отдельного вызова, `AgentRun` — жизненный цикл всего запуска. `PermissionPolicy` проверяет права на ресурсы. Approval фиксирует решение по одной неизменяемой операции, прошедшей проверку прав.
 - Сохранённый audit фиксирует переходы и наблюдаемые результаты. Коммит `running` подтверждает допуск, а факт side effect устанавливается отдельно. Блокировки обеспечивают однократный допуск данного `ToolCall` в поддерживаемом in-process сценарии. Durable resume и гарантии распределённого исполнения остаются за его пределами.
-- Новый tool system пока работает отдельно от `AgentRunner` и LangGraph. Текущий граф по-прежнему использует Week 3 `read_fixture`. Переход `AgentRun` в `succeeded` требует независимой verification с evidence даже после успешного tool call. Полный sandbox относится к Week 6, durable orchestration — к Week 7.
+- Fixture-графы Steps 09A/09B используют новый tool system через `AgentRunner`. LangGraph выдаёт preliminary result, а отдельный `VerificationService` независимо наблюдает состояние файлов и проверяет audit. `succeeded` требует подтверждённого `PASS` и durable evidence. Полный sandbox относится к Week 6, durable orchestration — к Week 7.
 
 ### Технический долг и ограничения
 
 | Открытый вопрос | Где вернуться |
 |---|---|
 | Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
-| Фабрика связывает экземпляр per-run контекста и корень в пределах одного набора tools. Сквозная проверка соответствия workspace и физического корня пока отсутствует. | Step 09, привязка к AgentRunner. |
-| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval пока поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Привязка контекста к runtime в Step 09 и публичные API в Steps 11–12. |
-| Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. Между проверкой и операцией остаются TOCTOU-окна при конкурентных изменениях файловой системы. | Интеграция с учётом fixture threat model в Step 09, изоляция в Week 6. |
+| Runtime и verifier сверяют workspace с сохранённым Task. Физический fixture root выбирает доверенный backend, который отвечает за привязку корня к workspace и его изоляцию. | Изоляция в Week 6. |
+| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Публичные API в Steps 11–12. |
+| Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. При конкурентных изменениях файловой системы остаются TOCTOU-окна, в том числе между наблюдением verifier и SQL commit. | Изоляция в Week 6. |
 | Подтверждён macOS-прогон. Linux — целевая платформа при наличии требуемых POSIX-примитивов, независимого Linux-прогона на checkpoint не было. | Отдельная проверка Linux-совместимости. |
-| Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Подключение инструментов к runtime в Step 09 и проектирование sandbox в Week 6. |
+| Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Проектирование sandbox в Week 6. |
 | Output budgets применяются к полезному UTF-8 тексту. Полный сериализованный API envelope пока вне этих лимитов. | Публичные response DTO в Steps 11–12. |
 | Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
 | Сбой процесса, неоднозначный commit или повторная отмена могут оставить незавершённые записи. In-process ожидание теряется при перезапуске. | Durable approval resume и восстановление в Week 7. |
-| Отмена может конкурировать с уже выполненной записью. При сбое многофайловой замены требуется сверка фактического состояния файлов с аудитом и решение о восстановлении. | Независимая verification в Step 10 и проектирование восстановления в Week 7. |
-| Интеграция tools с активным LangGraph runtime и независимая verification v1 остаются открытыми. | Steps 09–10. |
+| Отмена может конкурировать с уже выполненной записью. Step 10 подтверждает наблюдаемое состояние и согласованность audit в изолированном fixture. Восстановление после частичной замены остаётся открытым. | Проектирование восстановления в Week 7. |
 | Публичные AgentRun API, approval и evidence API, bounded live OpenAI smoke и проверка M1 exit criteria остаются открытыми. | Steps 11–13 с действующими CLI dependency gates. |
 | GitHub CI ещё отсутствует. | [Backlog](backlog.md), BL-05. |
 
@@ -767,7 +766,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 При реализации и ревью разобраны строгие схемы и runtime validation, контракты registry и handler, кооперативные `asyncio` timeout и отмена, отмена и rollback, capability grants и least privilege, явные решения policy, сравнение компонентов пути, логическая авторизация и физический доступ, POSIX-дескрипторы, symlink, hard link, inode и TOCTOU, бюджеты и неизменяемый Git baseline. На Step 03 показано воспроизведение дефектов до исправления и повторная проверка после него. Независимая verification с evidence остаётся условием успеха `AgentRun`.
 
-Самостоятельные объяснения владельца по Steps 01–08 остаются открытыми.
+Самостоятельные объяснения владельца по Steps 01–08 остаются открытыми. Самостоятельный разбор Step 10 также остаётся открытым.
 
 - [ ] **01.** Объяснить, где строгие схемы проверяют вход и выход и почему `ToolSpec` не выдаёт права.
 - [ ] **02.** Объяснить, зачем реестр повторно валидирует снимок и где проходит граница lookup и вызова handler.
@@ -777,6 +776,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - [ ] **06.** Объяснить роли `ToolCall` и `AgentEvent`, границы транзакций и атомарность аудита. Разобрать, что известно о вызове после сбоя до или после коммита допуска.
 - [ ] **07.** Разобрать restricted unified diff, проверку прав на все пути, атомарность одной замены через `os.replace` и состояние файлов при частичном применении.
 - [ ] **08.** Объяснить роли approval и permission checks, привязку к неизменяемой операции, блокировки PostgreSQL, in-process ожидание, однократный допуск и ограничения отмены.
+- [ ] **10.** Проследить путь от предварительного результата графа до независимого verdict. Объяснить границы SQL rollback, файлового эффекта и replay после потери подтверждения `COMMIT`.
 
 **Python Deep Dives на потом**
 
@@ -791,13 +791,16 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - POSIX `os.replace`, оптимистическая проверка исходников и границы TOCTOU.
 - SHA-256 fingerprints и неизменяемые snapshots patch и исходников.
 
-## Verification v1
+## Step 10 — Independent Verification v1
 
-Проверять:
+- **10A — Verification Contract.** Неизменяемый `VerificationPlan` связывает run, task, workspace, baseline revision, упорядоченные критерии и ожидаемые SHA-256. Правила покрытия и корреляции дают `PASS`, `FAIL` или `INCONCLUSIVE`.
+- **10B — Read-only Observer.** Observer проверяет доверенный binding до чтения, использует существующие `PermissionPolicy` и `SafeRepositoryReader`, а наблюдения строит из фактически прочитанных файлов в рамках read scopes и бюджетов.
+- **10C — Durable Evidence.** `VerificationService` читает файлы вне SQL-транзакции. Затем под блокировкой `AgentRun` повторно сверяет binding, preliminary result и полноту audit. Evidence сохраняется в `AgentEvent` JSONB. Достоверный terminal verdict и status event сохраняются вместе с evidence одним commit. `INCONCLUSIVE` оставляет run в `verifying`. Прямой переход в `succeeded` через общий `transition_status` отклоняется.
+- **10D — End-to-End Regression.** Офлайн-графы 09A/09B с реальными PostgreSQL, tools и approval подтвердили durable `PASS` для чтения и approved write, `FAIL` при несовпадении, а также защиту при отказах, отмене, частичном эффекте, подмене binding и replay. PostgreSQL владеет состоянием `AgentRun`, статус Task сохраняется отдельно.
 
-- ожидаемый файл создан/изменён;
-- запрещённые path не затронуты;
-- patch соответствует scope.
+**Owner verification, PR #57.** Ordinary backend — **1463 passed, 336 skipped**. PostgreSQL opt-in — **336 passed**. Focused — **6 passed**. Окружение PostgreSQL 17.11, `READ COMMITTED`, Alembic `1d972cc34fbe`. Это результаты технических прогонов. [PR #57](https://github.com/eva-tarasov/myFirstForge/pull/57) · [Контракт 10A–10C](docs/VERIFICATION_V1_CONTRACT.md) · [E2E gate 10D](docs/VERIFICATION_V1_E2E_GATE.md)
+
+Область v1 ограничена доверенными изолированными disposable fixtures, для которых вызывающий backend обеспечивает эксклюзивный доступ. Исходные цели roadmap включают проверку ожидаемого файла, запрещённых путей и scope patch. V1 подтверждает наблюдённые байты по доверенному плану и согласованность audit. Между чтением и SQL commit остаётся filesystem TOCTOU, а evidence не устанавливает авторство файлового изменения. Durable resume остаётся задачей Week 7.
 
 ## Additional integration handoff — Week4CLI
 
