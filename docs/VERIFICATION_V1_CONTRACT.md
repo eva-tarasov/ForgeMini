@@ -82,3 +82,63 @@ async def verify_fixture(plan, fixture_root, task_criteria):
 Отмена доставляется кооперативно между чтениями. Синхронный системный вызов может задержать и отмену, и deadline. Observer фиксирует содержимое, увиденное при каждом чтении. Согласованный snapshot нескольких файлов и отсутствие изменений после чтения остаются открытыми условиями изоляции fixture.
 
 Для 10C доверенный оркестратор должен получить binding и критерии из действительных SQL-записей, выбрать fixture access на стороне backend, наблюдать снаружи транзакции и повторно проверить состояние run и корреляцию перед публикацией. Атомарность записи evidence и перехода состояния относится к 10C. [Текущий success gate](../backend/app/services/agent_runs.py#L67)
+
+## Step 10C — durable evidence и финализация
+
+`VerificationService(session_factory).verify(plan, access, attempt_id=..., isolated_fixture=False)` владеет тремя фазами. Caller задаёт план и fixture access из доверенной backend composition. Идентичность попытки — пара run UUID и attempt UUID. Для повторного наблюдения после `INCONCLUSIVE` caller создаёт новый attempt UUID.
+
+1. Фаза A открывает PostgreSQL transaction с `READ ONLY`. Сервис сверяет реальные AgentRun и Task, workspace, упорядоченные критерии, валидный предварительный result v1 со статусом `ready_for_verification` и binding плана. Новая попытка требует `verifying`. Сервис запоминает digest result и снимка audit, затем закрывает SQL session.
+2. Фаза B вызывает принятый observer 10B. SQL session и row locks в этой фазе отсутствуют.
+3. Фаза C получает свежий AgentRun через `FOR UPDATE`, затем защищает Task через `FOR SHARE`. Повторно проверяет binding, result, статус и audit. Сервис записывает `verification_recorded` и, при достоверном terminal verdict, status event и новый статус в одной транзакции. Чтение дочерних audit rows опирается на существующий протокол parent-first locks. Новые блокировки ToolCall или Approval не требуются, поскольку lifecycle writers сначала блокируют AgentRun. [Сервис](../backend/app/services/verification_service.py)
+
+Success разрешает только этот узкий trusted path. Он вызывает доменную проверку перехода после оценки evidence. Общий `AgentRunService.transition_status(..., SUCCEEDED)` сохраняет `VerificationEvidenceRequiredError`. При полном audit и подтверждённой изоляции файловый `PASS` даёт `succeeded`, файловый `FAIL` даёт `failed`. При неопределённости run остаётся `verifying`. Task сохраняет собственный статус.
+
+### Trust boundaries и freshness
+
+`isolated_fixture=True` — отдельное подтверждение доверенного владельца fixture, который обеспечивает эксклюзивный доступ на протяжении всей операции. Параметр по умолчанию равен `False`. Без подтверждения сохраняется `INCONCLUSIVE`, даже при совпадении digest. В интеграционных тестах каждый сценарий владеет отдельным disposable root. Операторы production должны обеспечить такое же условие через lifecycle своего fixture. Передача объекта access или установка флага сама по себе не доказывает отсутствие внешних writers.
+
+PostgreSQL обеспечивает атомарность evidence, status и status event. Файловое наблюдение имеет отдельную временную границу. Внешний writer способен изменить файл между чтением и commit. Для shared workspace с неизвестными writers данный v1 не даёт допуска к success. Автоматическая проверка exclusivity, согласованный filesystem snapshot, durable resume и механизм distributed locks требуют отдельного решения.
+
+Evidence подтверждает наблюдавшееся состояние по доверенному плану и согласованность сохранённого audit. Metadata-only audit содержит hashes patch и sources, но не хранит patch, пути записи и результирующие bytes. Поэтому causal attribution изменения конкретного файла к конкретному handler остаётся за границей v1. Совпадение ожидаемых bytes, включая файл, который уже имел такое содержимое, позволяет подтвердить критерий состояния. Если критерий требует доказать авторство изменения, caller обязан считать его unsupported до отдельного расширения execution evidence.
+
+### Audit gate
+
+Сервис проверяет непрерывную последовательность AgentEvent, допустимую историю статусов от `queued` до `verifying`, ровно одно событие ready-result и отсутствие execution failure. Каждый ToolCall должен принадлежать run, иметь известный fixture tool v1, состояние `succeeded` и ровно три согласованных события proposed → started → finished до preliminary result. Оба audit schema versions и tool version проверяются с точными JSON-типами. Чужие, дублированные, неизвестные или отсутствующие lifecycle events закрывают terminal admission.
+
+Для `apply_patch` требуется ровно одно approved Approval с `decided_at`, точными requested/decided events, workspace, ToolCall identity, tool version, hashes patch/sources и порядком proposal → request → decision → start → finish. Read tools не должны иметь Approval. `proposed`, `running`, `failed`, `denied`, pending/rejected approval и `patch_partial_apply` оставляют итог `INCONCLUSIVE`. Подтверждённое несовпадение файла также не даёт terminal decision при неполном audit.
+
+Отсутствие ToolCall допустимо, если execution не заявлял audited operations и история run/result полная. Это позволяет проверить исходное состояние fixture. Сырые LLM-ответы не задают план и observed digest. Бюджет audit составляет 32 ToolCall, 32 Approval и 512 AgentEvent на run. Превышение даёт `INCONCLUSIVE`. Изменение снимка audit между фазами A и C также даёт `INCONCLUSIVE`, даже если восстановленные данные выглядят полными.
+
+### Event contract v1
+
+`verification_recorded` использует существующую AgentEvent JSONB колонку. Payload ограничен 32 КиБ UTF-8. Он содержит следующие поля.
+
+| Поле | Содержимое |
+| --- | --- |
+| `schema_version`, `attempt_id` | Версия 1 и ненулевой UUID попытки |
+| `plan` | Run/task/workspace UUID, revision, UUID и fingerprint плана, ordered criterion digests, check UUID, index, logical path и expected SHA-256 |
+| `observations` | Check UUID и observed SHA-256 либо закрытый issue |
+| `audit_complete`, `isolated_fixture` | Результат audit gate и подтверждение caller |
+| `audit_sha256`, `result_sha256`, `access_sha256` | Корреляция audit, preliminary result и выбранных root/scopes |
+| `file_verdict`, `verdict` | Результат 10A и итог допуска |
+
+Host root и scopes входят только в digest access. Содержимое файлов, credentials, raw patch, Task text и preliminary summary не копируются в evidence. Decoder заново строит immutable модели 10A, сверяет fingerprint, вычисляет оба verdict и проверяет точное соответствие каноническому payload. [Codec](../backend/app/services/verification_evidence.py)
+
+### Конкуренция и сбои
+
+AgentRun row lock сериализует terminal commit с cancel и другим verifier. Если cancellation закоммичена первой, verifier отклоняет устаревший статус. Если terminal verification закоммичена первой, поздняя cancellation получает недопустимый terminal transition. Терминальный run принимает только replay уже записанной попытки. Новая попытка не переоткрывает его.
+
+Replay той же identity с тем же планом, access digest и isolation возвращает прежнее evidence без повторного чтения. Изменённый запрос даёт `verification_attempt_conflict`. Две попытки с одной identity создают одно evidence. Для разных identity первый terminal commit закрывает допуск второму verifier. Повторные события с одинаковой identity считаются ошибкой `duplicate_verification_evidence`. Уникальность обеспечивается прикладным parent lock при записи через сервис. Прямой SQL write за пределами trusted приложения способен нарушить этот протокол.
+
+Ошибки записи evidence, transition, status event, SQL constraint и commit до подтверждённого завершения транзакции приводят к rollback всех staged writes. Cooperative cancellation пробрасывается и запускает rollback. Потеря подтверждения уже выполненного COMMIT имеет неопределённый для caller исход. В таком случае caller перечитывает durable попытку или повторяет тот же attempt UUID. Тест с потерянным подтверждением показывает один terminal result и один evidence после replay. Безопасный replay не повторяет write.
+
+### Архитектурные решения
+
+| Решение | Статус | Основание и граница |
+| --- | --- | --- |
+| Application service, PostgreSQL source of truth, parent-first locks | KEEP | ADR-001/002 и текущий lifecycle протокол |
+| Evidence в существующем AgentEvent JSONB, три короткие фазы | ADOPT | Обеспечивает атомарную финализацию без новой persisted schema |
+| Изолированный disposable fixture и отдельное подтверждение владельца | ADOPT | Минимальная явно ограниченная область v1 |
+| Отдельная evidence table с database uniqueness | DEFER | Потребует migrations и согласования владельца при выходе за текущий write protocol |
+| Доказательство авторства и patch-to-path/result correlation | SPIKE | Нужен отдельный контракт audit для таких критериев |
+| Shared workspace snapshots, durable orchestration, distributed locks | DEFER | Требуют отдельного Change Gate |
