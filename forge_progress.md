@@ -608,7 +608,7 @@ blocked_reason
 **Codex:** LEARNING\
 **Фактические часы:** не зафиксированы
 
-Steps 01–10 завершены и вошли в `main`. Инженерный прогресс — **10/13**, осталось 3. **M1 остаётся открытым.** Следующий шаг — **Step 11 — Public AgentRun API**. Документационные checkpoints после Steps 05, 08 и 10 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
+Steps 01–10 завершены и вошли в `main`. Step 11 принят в [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59). Инженерный прогресс — **11/13**, осталось 2 основных шага. **M1 остаётся открытым.** Следующий шаг — **Step 12 — Public approval и evidence API**, статус `not started`. Документационные checkpoints после Steps 05, 08, 10 и 11 фиксируют принятые результаты. Week4CLI остаётся в статусе `not started` с действующим планом и dependency gates.
 
 ## Цель
 
@@ -683,7 +683,7 @@ apply_patch
 | 08 | Approval gate и in-process pause/resume | done · [PR #40](https://github.com/eva-tarasov/myFirstForge/pull/40) |
 | 09 | Интеграция tools и permissions в LangGraph | done · [PR #43](https://github.com/eva-tarasov/myFirstForge/pull/43) · [PR #44](https://github.com/eva-tarasov/myFirstForge/pull/44) |
 | 10 | Independent Verification v1 | done · [PR #53](https://github.com/eva-tarasov/myFirstForge/pull/53) · [PR #54](https://github.com/eva-tarasov/myFirstForge/pull/54) · [PR #56](https://github.com/eva-tarasov/myFirstForge/pull/56) · [PR #57](https://github.com/eva-tarasov/myFirstForge/pull/57) |
-| 11 | Public AgentRun API — create/start/show/events/result/cancel | not started |
+| 11 | Public AgentRun API — create/start/show/events/result/cancel | done · [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59) |
 | 12 | Public approval и evidence API | not started |
 | 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
 
@@ -751,7 +751,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 |---|---|
 | Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
 | Runtime и verifier сверяют workspace с сохранённым Task. Физический fixture root выбирает доверенный backend, который отвечает за привязку корня к workspace и его изоляцию. | Изоляция в Week 6. |
-| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Публичные API в Steps 11–12. |
+| Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. Решения approval поступают из доверенного in-process кода. Аутентификация пользователя и авторизация его решения остаются открытыми. | Публичный approval API относится к Step 12. |
 | Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. При конкурентных изменениях файловой системы остаются TOCTOU-окна, в том числе между наблюдением verifier и SQL commit. | Изоляция в Week 6. |
 | Подтверждён macOS-прогон. Linux — целевая платформа при наличии требуемых POSIX-примитивов, независимого Linux-прогона на checkpoint не было. | Отдельная проверка Linux-совместимости. |
 | Ограниченный синхронный файловый I/O может блокировать event loop. Кооперативный timeout не завершает процесс принудительно и не откатывает side effects. | Проектирование sandbox в Week 6. |
@@ -759,7 +759,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 | Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
 | Сбой процесса, неоднозначный commit или повторная отмена могут оставить незавершённые записи. In-process ожидание теряется при перезапуске. | Durable approval resume и восстановление в Week 7. |
 | Отмена может конкурировать с уже выполненной записью. Step 10 подтверждает наблюдаемое состояние и согласованность audit в изолированном fixture. Восстановление после частичной замены остаётся открытым. | Проектирование восстановления в Week 7. |
-| Публичные AgentRun API, approval и evidence API, bounded live OpenAI smoke и проверка M1 exit criteria остаются открытыми. | Steps 11–13 с действующими CLI dependency gates. |
+| Публичные approval и evidence API, bounded live OpenAI smoke и проверка M1 exit criteria остаются открытыми. | Steps 12–13 с действующими CLI dependency gates. |
 | GitHub CI ещё отсутствует. | [Backlog](backlog.md), BL-05. |
 
 ### Учебные checkpoints
@@ -802,9 +802,20 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 Область v1 ограничена доверенными изолированными disposable fixtures, для которых вызывающий backend обеспечивает эксклюзивный доступ. Исходные цели roadmap включают проверку ожидаемого файла, запрещённых путей и scope patch. V1 подтверждает наблюдённые байты по доверенному плану и согласованность audit. Между чтением и SQL commit остаётся filesystem TOCTOU, а evidence не устанавливает авторство файлового изменения. Durable resume остаётся задачей Week 7.
 
+## Step 11 — Public AgentRun API
+
+- **11A — HTTP Create/Get.** PostgreSQL row lock на Task сериализует создание. Безопасный replay с HTTP `200` доступен для единственной существующей queued попытки №1, даже если Task сменил статус. Поздняя попытка или несколько runs дают `409`.
+- **11B — Start/Cancel.** `InProcessRunCoordinator` держит не более одного активного HTTP-запуска в процессе и владеет его lifecycle в пределах FastAPI lifespan. Общий `ActiveRunRegistry` связывает исполнение с локальной отменой. Cancel фиксирует статус в PostgreSQL до сигнала coroutine, а `202` подтверждает локальное принятие запуска.
+- **11C — Events/Result.** Events использует keyset pagination по `sequence`. Result выдаёт безопасную проекцию из одного SQL snapshot. SQL агрегирует до 513 релевантных событий для проверки лимита в 512. При превышении API возвращает `AGENT_RUN_READ_FAILED`.
+- **11D — HTTP E2E.** Реальные FastAPI routes, PostgreSQL и LangGraph с offline model transport проверяют create, start, poll, result и отмену при ожидании approval. Гибридные сценарии получают решение approval и независимый verdict через существующие доверенные in-process операции, а committed outcome наблюдают через HTTP.
+
+**Owner verification, PR #59.** Ordinary backend — **1489 passed, 409 skipped**. PostgreSQL opt-in — **409 passed**. HTTP 11A–11D — **99 passed**, включая **5 новых E2E**. Это технические результаты приёмки. Отдельная самостоятельная учебная проверка владельца по Step 11 не подтверждена. [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59) · [HTTP E2E gate](docs/AGENT_RUN_HTTP_E2E_GATE.md).
+
+Поддерживаемый режим — доверенный локальный single-worker runtime. Публичная аутентификация и авторизация, публичные approval/verification API, durable resume и multi-worker ownership остаются за пределами Step 11.
+
 ## Additional integration handoff — Week4CLI
 
-Before exposing agent-control CLI commands, review and implement the narrow public AgentRun/approval API slice described in Week4CLI. Prioritize the original M1 exit criteria; record new contract scope and its verification separately. Plan a bounded real OpenAI smoke with owner-provided credentials (no secrets in Git/logs), distinguishing live model behavior from offline fixture tests. Week 3 acceptance stays historical; do not retroactively mark live or public orchestration complete. If handoff remains unfinished, report CLI integration as blocked, not as M1 success evidence. No durable restart guarantee until Week 7.
+The Public AgentRun API was accepted in Step 11. Before exposing the corresponding agent-control CLI commands, apply the remaining Week4CLI dependency gates, including the Step 12 approval/evidence contract for approval commands. Prioritize the original M1 exit criteria and record new contract scope and its verification separately. Plan a bounded real OpenAI smoke with owner-provided credentials (no secrets in Git/logs), distinguishing live model behavior from offline fixture tests. Week 3 acceptance stays historical. If handoff remains unfinished, report CLI integration as blocked. Durable restart remains a Week 7 concern.
 
 ## Exit Criteria — M1
 
@@ -847,7 +858,7 @@ CLI-01–04 form Foundation. CLI-05–07 may be `blocked` awaiting backend witho
 
 ## Backend handoff (Week 4 ownership)
 
-Keep existing Week 4 Tool System/M1 criteria. After contracts are agreed, add a narrowly scoped API slice for explicit Task → AgentRun creation/start, read status/result/events and cancel, approval list/show/decision, evidence/diff where appropriate. Backend owns state, authorization/policy and transaction boundaries. Define IDs, idempotency/duplicate start, 409 for stale transitions, response timing, error mapping, and polling semantics. Do not hold a DB transaction or HTTP request open while waiting for human approval; choose an explicit supported execution/pause mechanism for Week 4 without claiming crash recovery. Define local single-process limits and reject unsupported operations. No new framework or queue by default; durable recovery remains Week 7. Test HTTP integration and cancellation/approval races. CLI must not bypass the API or invent a resume mechanism.
+Keep existing Week 4 Tool System/M1 criteria. Step 11 covers explicit Task → AgentRun creation/start, status/result/events reads and cancel. Approval list/show/decision and evidence/diff remain subject to the Step 12 contract. Backend owns state, authorization/policy and transaction boundaries. Define IDs, idempotency, 409 for stale transitions, response timing, error mapping, and polling semantics for the remaining operations. Do not hold a DB transaction or HTTP request open while waiting for human approval. Document the supported local single-process execution/pause mechanism and reject unsupported operations. No new framework or queue by default. Durable recovery remains Week 7. Test HTTP integration and cancellation/approval races. CLI must use the public API and respect the existing execution and resume boundaries.
 
 ## Exit criteria (independent from M1)
 

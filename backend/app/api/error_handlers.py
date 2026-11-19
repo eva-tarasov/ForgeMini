@@ -8,7 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.errors import ApiError
 from app.schemas.error import ErrorData, ErrorResponse, ValidationIssue
 
-_SAFE_FIELDS = {"name", "workspace_id", "goal", "acceptance_criteria", "task_id"}
+_SAFE_FIELDS = {"name", "workspace_id", "goal", "acceptance_criteria", "task_id", "run_id", "after_sequence", "limit"}
 _SAFE_LOCATIONS = {"body", "path", "query", "header", "cookie"}
 _VALIDATION_MESSAGES = {
     "missing": "Field is required",

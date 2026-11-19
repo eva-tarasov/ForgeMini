@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.active_runs import ActiveExecution, ActiveRunRegistry
 from app.services.agent_cost import AgentPricing
@@ -31,10 +31,28 @@ def _check_interruption(handle: ActiveExecution, initial_cancelling: int) -> Non
         raise asyncio.CancelledError()
 
 
+async def cancel_agent_run(
+    session_factory: Callable[[], AsyncSession], active_runs: ActiveRunRegistry, run_id: UUID,
+) -> None:
+    """Persist cancellation before signaling a local execution, even without a runner."""
+    observer = AgentObserver(AgentLogContext(run_id, AgentOperation.CANCEL))
+    with observer.operation():
+        committed = False
+        try:
+            with observer.phase(AgentPhase.CANCELLATION_PERSISTENCE):
+                async with session_factory() as session:
+                    await AgentRunService(session).cancel_execution(run_id)
+                    committed = True
+        finally:
+            if committed:
+                with observer.phase(AgentPhase.CANCELLATION_SIGNAL):
+                    active_runs.request_cancel(run_id)
+
+
 class AgentService:
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_factory: Callable[[], AsyncSession],
         runner: AgentRunner,
         *,
         execution_timeout_seconds: float = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
@@ -131,18 +149,7 @@ class AgentService:
                     self._active_runs.unregister(run_id, handle)
 
     async def cancel_run(self, run_id: UUID) -> None:
-        observer = AgentObserver(AgentLogContext(run_id, AgentOperation.CANCEL))
-        with observer.operation():
-            committed = False
-            try:
-                with observer.phase(AgentPhase.CANCELLATION_PERSISTENCE):
-                    async with self._session_factory() as session:
-                        await AgentRunService(session).cancel_execution(run_id)
-                        committed = True
-            finally:
-                if committed:
-                    with observer.phase(AgentPhase.CANCELLATION_SIGNAL):
-                        self._active_runs.request_cancel(run_id)
+        await cancel_agent_run(self._session_factory, self._active_runs, run_id)
 
     async def _run_with_deadline(
         self, request: AgentRunRequest, invoke: Callable[[AgentRunRequest], Awaitable[AgentFinalResult]],

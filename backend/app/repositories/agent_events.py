@@ -1,9 +1,10 @@
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import JSONB, aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AgentEventModel, AgentRunModel
+from app.db.models import AgentEventModel, AgentRunModel, TaskModel
 from app.domain.execution import AgentRunStatus
 from app.services.agent_failure import AGENT_EXECUTION_FAILED_EVENT
 from app.services.agent_usage_codec import AGENT_USAGE_RECORDED_EVENT
@@ -16,6 +17,44 @@ class AgentEventParentNotFoundError(LookupError):
 class AgentEventRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def read_after(self, run_id: UUID, after_sequence: int, *, limit: int) -> list[AgentEventModel]:
+        statement = (
+            select(AgentEventModel)
+            .where(AgentEventModel.agent_run_id == run_id, AgentEventModel.sequence > after_sequence)
+            .order_by(AgentEventModel.sequence)
+            .limit(limit)
+        )
+        return list((await self.session.scalars(statement)).all())
+
+    async def read_result_snapshot(
+        self, run_id: UUID, *, event_types: tuple[str, ...], limit: int,
+    ) -> tuple[AgentRunModel, UUID, list] | None:
+        """Read the run and bounded ordered history from a single statement snapshot."""
+        relevant_events = (
+            select(AgentEventModel.event_type, AgentEventModel.payload, AgentEventModel.sequence)
+            .where(AgentEventModel.agent_run_id == run_id, AgentEventModel.event_type.in_(event_types))
+            .order_by(AgentEventModel.sequence)
+            .limit(limit)
+            .subquery()
+        )
+        history = (
+            select(func.jsonb_agg(aggregate_order_by(
+                func.jsonb_build_array(relevant_events.c.event_type, relevant_events.c.payload),
+                relevant_events.c.sequence,
+            ), type_=JSONB))
+            .scalar_subquery()
+        )
+        statement = (
+            select(AgentRunModel, TaskModel.workspace_id, history)
+            .join(TaskModel, TaskModel.id == AgentRunModel.task_id)
+            .where(AgentRunModel.id == run_id)
+        )
+        row = (await self.session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        run, workspace_id, events = row
+        return run, workspace_id, events or []
 
     async def get_execution_failure_events(self, run_id: UUID) -> list[AgentEventModel]:
         statement = (

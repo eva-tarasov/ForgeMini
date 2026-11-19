@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -5,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AgentEventModel, AgentRunModel
 from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
+from app.domain.task import TaskStatus
 from app.domain.transitions import validate_agent_run_transition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
@@ -36,6 +39,23 @@ from app.services.tool_call_audit import ToolCallErrorCode
 
 class AgentRunNotFoundError(Exception):
     pass
+
+
+class AgentRunCreateConflictError(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunMetadata:
+    id: UUID
+    task_id: UUID
+    attempt_number: int
+    status: AgentRunStatus
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, run: AgentRunModel) -> "AgentRunMetadata":
+        return cls(run.id, run.task_id, run.attempt_number, AgentRunStatus(run.status), run.created_at)
 
 
 class StaleAgentRunStatusError(Exception):
@@ -87,6 +107,43 @@ class AgentRunService:
         self.runs = AgentRunRepository(session)
         self.events = AgentEventRepository(session)
         self.tasks = TaskRepository(session)
+
+    async def create_initial_run(self, task_id: UUID) -> tuple[AgentRunMetadata, bool]:
+        """Create attempt one or replay it if it is the only run and still queued."""
+        try:
+            task = await self.tasks.get_for_update(task_id)
+            if task is None:
+                raise TaskNotFoundError(task_id)
+            existing = await self.runs.list_for_task(task_id, limit=2)
+            if existing:
+                if (
+                    len(existing) != 1
+                    or existing[0].attempt_number != 1
+                    or existing[0].status != AgentRunStatus.QUEUED.value
+                ):
+                    raise AgentRunCreateConflictError()
+                run = existing[0]
+            else:
+                # Read the locked status even if the caller previously loaded this Task.
+                await self.session.refresh(task, attribute_names=["status"])
+                if task.status != TaskStatus.QUEUED.value:
+                    raise AgentRunCreateConflictError()
+                run = await self.runs.add_initial(task_id)
+            metadata = AgentRunMetadata.from_record(run)
+            await self.session.commit()
+            return metadata, not existing
+        except BaseException as error:
+            try:
+                await self.session.rollback()
+            except Exception:
+                error.add_note("agent_run_create_rollback_failed")
+            raise
+
+    async def get_metadata(self, run_id: UUID) -> AgentRunMetadata:
+        run = await self.runs.get(run_id)
+        if run is None:
+            raise AgentRunNotFoundError(run_id)
+        return AgentRunMetadata.from_record(run)
 
     async def transition_status(
         self, run_id: UUID, expected_status: AgentRunStatus, target_status: AgentRunStatus
