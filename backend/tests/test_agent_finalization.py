@@ -503,7 +503,15 @@ def test_agent_graph_finalization_openai_mock_transport(fixture_execution, refus
     assert second["messages"][3] == {"role": "tool", "tool_call_id": CALL_ID, "content": FIXTURE_TEXT}
 
     assert [message["role"] for message in third["messages"]] == ["system", "user"]
-    assert "structured preliminary task analysis" in third["messages"][0]["content"]
+    instructions = third["messages"][0]["content"]
+    assert "structured preliminary task analysis" in instructions
+    assert "A substantive preliminary result that can be independently checked is ready for verification." in instructions
+    assert (
+        "Set blocked_reason only for a material obstacle that prevents producing a usable preliminary result."
+        in instructions
+    )
+    assert "Pending independent verification alone is not a blocker." in instructions
+    assert "Record unverified claims and pending verification in assumptions." in instructions
     assert "tools" not in third
     assert json.loads(third["messages"][1]["content"]) == {
         "goal": GOAL,

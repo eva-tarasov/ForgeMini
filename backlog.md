@@ -58,3 +58,10 @@
 - Risk: смена уровня изоляции без пересмотра алгоритма может изменить результат replay, в том числе привести к ошибке сериализации.
 - Target milestone: до изменения уровня изоляции транзакций.
 - Acceptance criteria: зафиксировать требование `READ COMMITTED` для текущего алгоритма. Перед сменой уровня проверить на PostgreSQL конкурентное создание с одинаковым ключом и разными payload, а также сценарий rollback и повторного использования ключа.
+
+## BL-10 — Передача repository evidence в finalization
+- Type: architecture debt. Status: open.
+- Context / Evidence: offline SPIKE Step 13B подтвердил, что `read_file` передаёт прямой результат в research как `ToolMessage`, а финализация получает `analysis_notes` и пустой `observations` для repository graph. При одинаковых заметках разные байты файла дали одинаковый запрос финализации. [Финализатор](backend/app/agent_runtime/finalization.py#L37) · [Live smoke gate](docs/WEEK4_M1_LIVE_SMOKE_GATE.md)
+- Risk: полнота предварительного результата зависит от пересказа модели. Влияние этого долга на конкретные live-отказы не установлено.
+- Target milestone: не определён.
+- Acceptance criteria: отдельно согласовать bounded handoff с проверкой происхождения и без содержимого файлов в логах. Сохранить permissions, результат независимой verification и публичные схемы.
