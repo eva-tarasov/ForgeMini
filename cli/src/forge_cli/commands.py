@@ -21,6 +21,7 @@ task_app = typer.Typer(no_args_is_help=True, add_completion=False)
 class CommandOptions:
     base_url: str
     json_output: bool
+    no_color: bool = False
 
 
 def _parse_uuid(value: str) -> UUID:
@@ -54,7 +55,7 @@ def _run(
     except ValueError:
         _fail("Invalid Forge base URL.", 2)
 
-    print_result(result, json_output=options.json_output)
+    print_result(result, json_output=options.json_output, no_color=options.no_color)
 
 
 def health(ctx: typer.Context) -> None:

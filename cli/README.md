@@ -21,7 +21,7 @@ cli/.venv/bin/forge --base-url http://127.0.0.1:9000
 
 ## Commands
 
-Global options go before the command. Use `forge --json workspace list` for structured JSON and `forge --base-url http://127.0.0.1:8000 health` to select the backend explicitly.
+Global options go before the command. Use `forge --base-url http://127.0.0.1:8000 health` to select the backend explicitly.
 
 | Command | Required input |
 | --- | --- |
@@ -31,9 +31,27 @@ Global options go before the command. Use `forge --json workspace list` for stru
 | `forge task create` | `--workspace-id UUID --goal TEXT --criterion TEXT` |
 | `forge task get UUID` | Task UUID |
 
-Repeat `--criterion` to supply multiple acceptance criteria. Task creation accepts an optional `--idempotency-key UUID`, which is forwarded unchanged as a header. UUID arguments are validated locally, and request DTOs enforce the backend field limits. Invalid input sends no HTTP requests.
+The following examples use an available Forge backend. Replace the sample IDs with the IDs returned by the workspace and task creation commands.
 
-Plain output uses `field=value` lines with full UUIDs and repeated `acceptance_criteria` lines. An empty workspace list prints `No workspaces found.`. Untrusted values use ASCII JSON escaping, with brackets escaped as well to prevent terminal controls or Rich markup. This also escapes non-ASCII characters. `--json` writes the response object or array, including `[]` for an empty workspace list, with UUID strings and JSON-escaped text.
+```sh
+forge workspace create --name "Проект Forge"
+forge --no-color workspace list
+forge --json workspace list
+forge task create --workspace-id 11111111-1111-4111-8111-111111111111 --goal "Verify the build" --criterion "Tests pass" --criterion "Artifact is produced"
+forge task get 22222222-2222-4222-8222-222222222222
+```
+
+Repeat `--criterion` to supply multiple acceptance criteria. Task creation accepts an optional `--idempotency-key UUID`, which is forwarded as a header. UUID arguments are validated locally, and request DTOs enforce the backend field limits. Invalid input sends no HTTP requests.
+
+## Output
+
+On a compatible interactive terminal with UTF-8 output, Forge shows workspace lists as Rich tables and individual workspace and task results as panels. IDs are displayed in full, long fields fold, and task criteria are numbered in order. Narrow terminals use labeled text with complete values. The health command prints `status=ok`. An empty workspace list prints `No workspaces found.`.
+
+Use `--no-color` or set `NO_COLOR` to any nonempty value to suppress ANSI color while keeping the terminal layout. Either setting takes precedence over `FORCE_COLOR`. Piped or redirected output, and terminals without UTF encoding, use deterministic `field=value` lines with ASCII escaping and one `acceptance_criteria` line per criterion.
+
+Interactive output preserves ordinary Unicode, including Cyrillic. Forge escapes terminal controls, bidi and other format controls, and displays Rich markup and emoji shortcodes literally. Backslashes in values display doubled so that a literal path containing an escape-like sequence can be distinguished from an escaped control.
+
+`--json` writes only the JSON response object or array to stdout, with UUID strings and JSON-escaped text. An empty workspace list produces `[]`. `--no-color` and terminal capabilities have no effect on the JSON bytes.
 
 Successful results go to stdout. Error diagnostics go to stderr and use local messages without server code, message, details, response body, or full URL.
 
@@ -45,7 +63,15 @@ Successful results go to stdout. Error diagnostics go to stderr and use local me
 | 4 | Unexpected HTTP status |
 | 5 | Invalid successful response |
 
-Run command tests offline with `cli/.venv/bin/python -m pytest -q cli/tests/test_commands.py`. They exercise the Typer app with HTTPX MockTransport and block real sockets. A separate live integration smoke that creates Workspace and Task records requires the owner's explicit approval and a confirmed dedicated test database name. Live HTTP integration has not been run for this step.
+## Offline tests
+
+From the repository root, run the output tests, command tests, or full CLI suite. The command tests exercise Typer with HTTPX MockTransport and block real sockets. The output tests simulate terminal capabilities and verify redirected output.
+
+```sh
+cli/.venv/bin/python -m pytest -q cli/tests/test_output.py
+cli/.venv/bin/python -m pytest -q cli/tests/test_commands.py
+cli/.venv/bin/python -m pytest -q cli/tests
+```
 
 ## Python HTTP client
 

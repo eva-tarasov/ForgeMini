@@ -11,6 +11,7 @@ from forge_cli.config import resolve_base_url
 app = typer.Typer(
     help="Command-line interface for Forge.",
     add_completion=False,
+    rich_markup_mode=None,
     pretty_exceptions_show_locals=False,
 )
 app.command()(health)
@@ -38,13 +39,19 @@ def configure(
         bool,
         typer.Option("--json", help="Write successful results as JSON."),
     ] = False,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable color in terminal output."),
+    ] = False,
     version_flag: Annotated[
         bool,
         typer.Option("--version", callback=show_version, is_eager=True, help="Show the CLI version."),
     ] = False,
 ) -> None:
     try:
-        ctx.obj = CommandOptions(base_url=resolve_base_url(base_url), json_output=json_output)
+        ctx.obj = CommandOptions(
+            base_url=resolve_base_url(base_url), json_output=json_output, no_color=no_color
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--base-url / FORGE_BASE_URL") from None
 

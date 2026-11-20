@@ -1,5 +1,6 @@
 import json
 import socket
+import sys
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -67,15 +68,19 @@ def task_body():
     ["--help"], ["health", "--help"], ["workspace", "--help"],
     ["workspace", "create", "--help"], ["workspace", "list", "--help"],
     ["task", "--help"], ["task", "create", "--help"], ["task", "get", "--help"],
-    ["--version"], [],
+    ["--version"], [], ["--no-color", "--help"],
+    ["--no-color", "task", "get", "--help"], ["--no-color", "--version"],
 ])
 def test_help_and_version_need_no_client(api, args):
-    result = runner.invoke(app, args)
+    result = runner.invoke(app, args, env={"FORCE_COLOR": "1"}, color=True)
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
-    expected = "0.1.0" if args == ["--version"] else "Usage:"
+    expected = "0.1.0" if "--version" in args else "Usage:"
     assert expected in result.stdout
+    assert "\x1b" not in result.stdout
+    if args in (["--help"], ["--no-color", "--help"]):
+        assert "--no-color" in result.stdout
     assert api.clients == []
     assert api.requests == []
 
@@ -139,6 +144,44 @@ def test_workspace_list_command(api, json_mode, empty):
         assert str(WORKSPACE_ID) in result.stdout
         assert "name=Forge\n" in result.stdout
     assert api.clients[0].is_closed
+
+
+def test_global_no_color_preserves_workspace_table(api, monkeypatch):
+    api.response = httpx.Response(200, json=[{"id": str(WORKSPACE_ID), "name": "Проект"}])
+    create_client = commands.ForgeAPIClient
+
+    def create_client_with_tty(base_url):
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        return create_client(base_url)
+
+    monkeypatch.setattr(commands, "ForgeAPIClient", create_client_with_tty)
+    for variable in ("NO_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE"):
+        monkeypatch.delenv(variable, raising=False)
+    env = {"FORCE_COLOR": "1", "TERM": "xterm-256color", "COLUMNS": "80"}
+
+    colored = runner.invoke(app, ["workspace", "list"], env=env, color=True)
+    plain = runner.invoke(app, ["--no-color", "workspace", "list"], env=env, color=True)
+
+    assert colored.exit_code == plain.exit_code == 0
+    assert colored.stderr == plain.stderr == ""
+    assert "\x1b[" in colored.stdout
+    assert "\x1b" not in plain.stdout
+    assert "┏" in colored.stdout and "┏" in plain.stdout
+    assert "Проект" in plain.stdout and str(WORKSPACE_ID) in plain.stdout
+
+
+def test_global_no_color_with_json(api):
+    api.response = httpx.Response(200, json=[{"id": str(WORKSPACE_ID), "name": "Проект"}])
+
+    result = runner.invoke(
+        app, ["--no-color", "--json", "workspace", "list"], env={"FORCE_COLOR": "1"}, color=True
+    )
+
+    escaped_name = r"\u041f\u0440\u043e\u0435\u043a\u0442"
+    expected = f'[{{"id": "{WORKSPACE_ID}", "name": "{escaped_name}"}}]\n'
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == expected.encode("ascii")
+    assert result.stderr_bytes == b""
 
 
 @pytest.mark.parametrize("json_mode", [False, True])
@@ -319,13 +362,16 @@ def test_uuid_diagnostic_does_not_echo_untrusted_input(api):
     assert api.requests == []
 
 
-def test_error_fields_cannot_inject_terminal_output(api):
+@pytest.mark.parametrize("no_color", [False, True])
+def test_error_fields_cannot_inject_terminal_output(api, no_color):
     value = SECRET + "[bold]\x1b[2J\n\u202e"
     api.response = httpx.Response(500, json={"error": {
         "code": value, "message": value, "details": [{"field": value, "message": value}],
     }})
 
-    result = runner.invoke(app, ["--base-url", "https://forge.example.invalid/" + SECRET, "health"])
+    args = ["--no-color"] if no_color else []
+    args += ["--base-url", "https://forge.example.invalid/" + SECRET, "health"]
+    result = runner.invoke(app, args, env={"FORCE_COLOR": "1"}, color=True)
 
     assert result.exit_code == 4
     assert result.stdout == ""
