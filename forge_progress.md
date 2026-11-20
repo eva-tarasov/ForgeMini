@@ -142,6 +142,8 @@ Flow:
 
 **Срок:** конец Week 4
 
+**Final Acceptance:** pending · решение владельца. [M1 Final Acceptance Gate](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md).
+
 Параллельный клиентский deliverable: Week4CLI v0.1 (отдельный статус и acceptance criteria; не блокирует исходный M1).
 
 Forge умеет:
@@ -606,9 +608,9 @@ blocked_reason
 **Status:** in progress\
 **Оценка:** 24–30 часов\
 **Codex:** LEARNING\
-**Фактические часы:** не зафиксированы
+**Фактические часы:** UNKNOWN · владелец не сообщил
 
-Steps 01–11 завершены и вошли в `main`. Техническая приёмка Step 12 завершена, PR ожидает merge. Инженерный прогресс — **12/13**. Остался **Step 13 — bounded live OpenAI smoke, интеграция и приёмка M1**, статус `not started`. **M1 остаётся открытым.** Документационные checkpoints после Steps 05, 08, 10, 11 и 12 фиксируют принятые результаты. Week4CLI ведётся отдельно со своими dependency gates. [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61).
+Реализация **13/13 feature steps** доставлена в `main`, включая Step 12 через [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) и Step 13A–13B через [PR #63](https://github.com/eva-tarasov/myFirstForge/pull/63). Step 13C — `in progress` до review и решения владельца. **M1 Final Acceptance — pending.** Week4CLI ведётся отдельно. [Учебник Week 4](docs/LEARNING_GUIDE_WEEK4.md) · [Матрица M1](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md).
 
 ## Цель
 
@@ -684,8 +686,8 @@ apply_patch
 | 09 | Интеграция tools и permissions в LangGraph | done · [PR #43](https://github.com/eva-tarasov/myFirstForge/pull/43) · [PR #44](https://github.com/eva-tarasov/myFirstForge/pull/44) |
 | 10 | Independent Verification v1 | done · [PR #53](https://github.com/eva-tarasov/myFirstForge/pull/53) · [PR #54](https://github.com/eva-tarasov/myFirstForge/pull/54) · [PR #56](https://github.com/eva-tarasov/myFirstForge/pull/56) · [PR #57](https://github.com/eva-tarasov/myFirstForge/pull/57) |
 | 11 | Public AgentRun API — create/start/show/events/result/cancel | done · [PR #59](https://github.com/eva-tarasov/myFirstForge/pull/59) |
-| 12 | Public approval и evidence API | done · техническая приёмка завершена, [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) ожидает merge |
-| 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | not started |
+| 12 | Public approval и evidence API | done · [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) merged |
+| 13 | Bounded live OpenAI smoke, интеграция, учебная и техническая приёмка M1 | 13A и 13B done · [PR #63](https://github.com/eva-tarasov/myFirstForge/pull/63) merged · 13C in progress |
 
 ### Архитектурный hardening R1–R2
 
@@ -749,7 +751,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 | Открытый вопрос | Где вернуться |
 |---|---|
-| Live provider, production verification и самостоятельный учебный checkpoint Week 3 остаются открытыми. | Step 13 предусматривает bounded live smoke. Production verification и самостоятельный разбор требуют отдельного evidence. |
+| Владелец подтвердил один bounded live smoke на trusted fixture. Проверка в production-среде и самостоятельный учебный checkpoint Week 3 остаются открытыми. | [Live gate](docs/WEEK4_M1_LIVE_SMOKE_GATE.md) и отдельные проверки владельца. |
 | Runtime и verifier сверяют workspace с сохранённым Task. Физический fixture root выбирает доверенный backend, который отвечает за привязку корня к workspace и его изоляцию. | Изоляция в Week 6. |
 | Audit и approval проверяют сохранённые workspace и статус `AgentRun` в соответствующих фазах. HTTP-решение допускается по отдельной workspace-scoped capability и фиксируется существующим `ApprovalGate`. Идентификация пользователя и персональная авторизация остаются открытыми. | Step 12 поддерживает доверенный локальный single-process runtime. |
 | Reader и writer рассчитаны на доверенные локальные fixture roots и контролируемых предков. При конкурентных изменениях файловой системы остаются TOCTOU-окна, в том числе между наблюдением verifier и SQL commit. | Изоляция в Week 6. |
@@ -759,14 +761,15 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 | Повторная проверка output покрывает простые схемы. Произвольные вложенные Pydantic-модели, aliases и custom serializers требуют отдельных контрактов и тестов. | Первая схема с такими требованиями. |
 | Сбой процесса, неоднозначный commit или повторная отмена могут оставить незавершённые записи. In-process ожидание теряется при перезапуске. | Durable approval resume и восстановление в Week 7. |
 | Отмена может конкурировать с уже выполненной записью. Step 10 подтверждает наблюдаемое состояние и согласованность audit в изолированном fixture. Восстановление после частичной замены остаётся открытым. | Проектирование восстановления в Week 7. |
-| Bounded live OpenAI smoke, интеграция и проверка M1 exit criteria остаются открытыми. | Step 13. |
+| Прямое repository evidence остаётся в research, а финализатор зависит от `analysis_notes`. | [BL-10](backlog.md#bl-10--передача-repository-evidence-в-finalization) · отдельный review provenance-aware handoff. |
+| Финальная приёмка M1 и самостоятельное прохождение Week 4 требуют решения владельца. | [M1 Final Acceptance Gate](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md). |
 | Автоматическая проверка GitHub CI для этого checkpoint не подтверждена. | [Backlog](backlog.md), BL-05. |
 
 ### Учебные checkpoints
 
 При реализации и ревью разобраны строгие схемы и runtime validation, контракты registry и handler, кооперативные `asyncio` timeout и отмена, отмена и rollback, capability grants и least privilege, явные решения policy, сравнение компонентов пути, логическая авторизация и физический доступ, POSIX-дескрипторы, symlink, hard link, inode и TOCTOU, бюджеты и неизменяемый Git baseline. На Step 03 показано воспроизведение дефектов до исправления и повторная проверка после него. Независимая verification с evidence остаётся условием успеха `AgentRun`.
 
-Самостоятельные объяснения владельца по Steps 01–08 остаются открытыми. Самостоятельный разбор Step 10 также остаётся открытым.
+Самостоятельное прохождение учебных checkpoints Week 4 владельцем не подтверждено. Воспроизводимые задания и вопросы собраны в [учебнике Week 4](docs/LEARNING_GUIDE_WEEK4.md).
 
 - [ ] **01.** Объяснить, где строгие схемы проверяют вход и выход и почему `ToolSpec` не выдаёт права.
 - [ ] **02.** Объяснить, зачем реестр повторно валидирует снимок и где проходит граница lookup и вызова handler.
@@ -776,7 +779,11 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - [ ] **06.** Объяснить роли `ToolCall` и `AgentEvent`, границы транзакций и атомарность аудита. Разобрать, что известно о вызове после сбоя до или после коммита допуска.
 - [ ] **07.** Разобрать restricted unified diff, проверку прав на все пути, атомарность одной замены через `os.replace` и состояние файлов при частичном применении.
 - [ ] **08.** Объяснить роли approval и permission checks, привязку к неизменяемой операции, блокировки PostgreSQL, in-process ожидание, однократный допуск и ограничения отмены.
+- [ ] **09.** Проследить путь `AIMessage.tool_calls → ToolMessage → finalization` и объяснить, почему source-of-truth для бизнес-состояния находится вне LangGraph.
 - [ ] **10.** Проследить путь от предварительного результата графа до независимого verdict. Объяснить границы SQL rollback, файлового эффекта и replay после потери подтверждения `COMMIT`.
+- [ ] **11.** Объяснить границу `202`, внутренний claim, cancellation после commit и keyset polling.
+- [ ] **12.** Разобрать read и review/decision capability, точный fingerprint и committed evidence из публичных HTTP-проекций.
+- [ ] **13.** Сопоставить offline и live evidence, отличить `blocked` от pending verification и объяснить, почему usage не измеряет фактическую стоимость.
 
 **Python Deep Dives на потом**
 
@@ -790,6 +797,8 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - `asyncio.Event`, `timeout_at` и отмена при ожидании и после допуска.
 - POSIX `os.replace`, оптимистическая проверка исходников и границы TOCTOU.
 - SHA-256 fingerprints и неизменяемые snapshots patch и исходников.
+- LangGraph reducers, `TaskAnalysis` и provenance на границе research/finalization.
+- FastAPI lifespan и `ASGITransport`, keyset pagination и bounded JSONB reads, `hmac.compare_digest` и разделение bearer capability.
 
 ## Step 10 — Independent Verification v1
 
@@ -815,7 +824,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 ## Step 12 — Public Approval & Evidence API
 
-Техническая приёмка 12A–12E завершена после code review и проверки владельцем feature HEAD `7fe3e2482551662b6ed6e10380d5a34492b03093`. [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) ожидает merge.
+Техническая приёмка 12A–12E завершена после code review и проверки владельцем feature HEAD `7fe3e2482551662b6ed6e10380d5a34492b03093`. [PR #61](https://github.com/eva-tarasov/myFirstForge/pull/61) merged в `e1c23fb7edc0fe362f640afb3a73f578b88c8eba`.
 
 - **12A — Pending approval discovery.** Workspace-scoped read capability открывает ограниченную безопасную проекцию сохранённых pending approvals.
 - **12B — Approval details.** SQL проверяет принадлежность approval к run и workspace. Структурный preview показывает относительные пути и счётчики только для совпавшей live operation. Сохранённая запись pending может существовать без live waiter.
@@ -832,7 +841,7 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 
 Это отдельные локальные прогоны с пересекающимися наборами тестов.
 
-**Границы.** Поддерживается доверенный локальный single-process runtime. Workspace-scoped capability подтверждает владение токеном, полноценная user authentication остаётся открытой. Независимый verifier вызывает доверенный backend, публичного endpoint для запуска verification нет. Evidence подтверждает наблюдавшиеся байты и не устанавливает авторство изменения. Filesystem TOCTOU сохраняется, а выполненные side effects не откатываются автоматически. Production sandbox относится к Week 6, durable resume и restart recovery — к Week 7. Live OpenAI smoke остаётся неподтверждённым, M1 открыт до Step 13.
+**Границы.** Поддерживается доверенный локальный single-process runtime. Workspace-scoped capability подтверждает владение токеном, полноценная user authentication остаётся открытой. Независимый verifier вызывает доверенный backend, публичного endpoint для запуска verification нет. Evidence подтверждает наблюдавшиеся байты и не устанавливает авторство изменения. Filesystem TOCTOU сохраняется, а выполненные side effects не откатываются автоматически. Production sandbox относится к Week 6, durable resume и restart recovery — к Week 7.
 
 **Открытые вопросы самостоятельной проверки владельца**
 
@@ -843,6 +852,20 @@ PostgreSQL-проверки использовали PostgreSQL 17.11, `READ COM
 - [ ] Что гарантирует committed PostgreSQL snapshot?
 - [ ] Почему потеря HTTP-ответа не означает rollback?
 - [ ] Почему terminal AgentRun нельзя переоткрыть?
+
+## Step 13 — Bounded live smoke и M1 gate
+
+| Подшаг | Статус | Evidence |
+|---|---|---|
+| 13A | done | Guarded harness, offline MockTransport, выделенная PostgreSQL, deadline и бюджет wire requests. |
+| 13B | done | Пятая попытка владельца `LIVE_PASS` на `cffc15f0c820e2d470b5be4f063ada6066108ac5` в `2026-11-20T13:28:00Z`. Три запроса, `read_file / succeeded`, independent `pass`, 1068 токенов и completed cleanup. Фактическая стоимость и причина третьего отказа — UNKNOWN. |
+| 13C | in progress | Documentation audit, учебник и post-merge regression evidence подготовлены для review. Финальное решение владельца — pending. |
+
+[PR #63](https://github.com/eva-tarasov/myFirstForge/pull/63) merged в `b86ff2cdcb439e124a2062e2688efca8dde1a652`. Live evidence относится к feature HEAD запуска владельца. Post-merge offline evidence относится к squash SHA. Обычный backend — **1622 passed, 481 skipped**. После включения PostgreSQL все **481** случая из обычных skips прошли по четырём выделенным БД. Task 06 дал **2099 passed, 4 skipped**, оставшиеся три группы дали **2 + 1 + 1 passed**. Результаты пересекаются с обычным набором. [Live smoke gate](docs/WEEK4_M1_LIVE_SMOKE_GATE.md) · [Post-merge evidence](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md).
+
+**Архитектурные решения:** KEEP ADR-001 и ADR-002. Modular monolith, LangGraph за `AgentRunner`, PostgreSQL как источник бизнес-состояния, permissions до side effects, отдельные approval и verification, terminal states без reopening и раздельные retry/resume.
+
+**Следующий шаг:** review документов Step 13C и решение владельца по M1. Week 5 MCP остаётся `not started`.
 
 ## Additional integration handoff — Week4CLI
 
@@ -862,7 +885,8 @@ Backend-контракты Public AgentRun API и Public Approval & Evidence API
 
 # WEEK4CLI — Forge CLI (parallel track)
 
-**Status:** not started — утверждено добавление трека, реализация не начата.  
+**Status:** in progress · CLI-01 и CLI-02 merged, CLI-03 открыт.
+
 **Параллельно:** Week 4; при необходимости интеграционный хвост продолжается рядом с Week 5, без переименования трека.  
 **Codex:** LEARNING → ENGINEERING.  
 **Оценка:** предварительно 8–14 ч суммарно, уточнить после CLI-01; входит в общий бюджет, не обязательство уложиться в календарную неделю.
@@ -871,15 +895,15 @@ Backend-контракты Public AgentRun API и Public Approval & Evidence API
 
 Читаемый developer CLI поверх Forge HTTP API: подкоманды и help, таблицы Workspace/Task, статус и timeline AgentRun, явные approval/reject/cancel, diff/evidence, usage/cost при наличии. Human-readable по умолчанию, machine-readable `--json`, `--no-color`, корректные stdout/stderr и exit codes; вывод не раскрывает secrets и безопасно обрабатывает строки из репозитория/модели (escape terminal controls/markup). No full-screen TUI, no chat, no direct database/model/tools.
 
-Предложенный стек: Typer + Rich + HTTPX + pytest. Отдельный `cli/pyproject.toml`, `cli/src/forge_cli/`, `cli/tests/`, CLI README. CLI-01 подтверждает package naming, dependency versions, entry point `forge` (проверить конфликт команды в окружении). Не менять backend package layout и зависимости.
+Отдельный пакет `forge-cli` использует Typer, Rich, HTTPX и Pydantic, а pytest входит в dev extra. Bootstrap и entry point `forge` приняты в CLI-01, типизированный HTTP client — в CLI-02. Backend package layout и зависимости клиента разделены. [CLI package](cli/pyproject.toml) · [CLI README](cli/README.md).
 
 ## Подшаги и dependency gates
 
 | Step | Scope | Dependency / evidence |
 |---|---|---|
-| CLI-01 | Theory: CLI vs TUI, HTTP-only, commands/help, UX, packaging, exit codes. Bootstrap `cli/`, config `--base-url` / `FORGE_BASE_URL`, default loopback; `forge --help`, `forge --version`. | Existing API, clean install, smoke, no backend edits. |
-| CLI-02 | HTTP client, typed transport DTOs, timeout, structured errors, no implicit retry of mutations, redacted output. | Mock HTTP tests, connection refused / timeout / HTTP validation and malformed response; compare real OpenAPI. |
-| CLI-03 | `health`, `workspace create/list`, `task create/get`; repeated acceptance-criteria flags, UUIDs, optional idempotency key, JSON output. | Actual existing endpoints; localhost smoke with isolated DB. Task listing/repository binding only when API supports them. |
+| CLI-01 | Theory: CLI vs TUI, HTTP-only, commands/help, UX, packaging, exit codes. Bootstrap `cli/`, config `--base-url` / `FORGE_BASE_URL`, default loopback; `forge --help`, `forge --version`. | done · [PR #41](https://github.com/eva-tarasov/myFirstForge/pull/41), merge `c38209b6393ce77a233788b2c3a6f8bb8d2079c5`. |
+| CLI-02 | HTTP client, typed transport DTOs, timeout, structured errors, no implicit retry of mutations, redacted output. | done · [PR #60](https://github.com/eva-tarasov/myFirstForge/pull/60), merge `68e77759a0318a76f60af22852b024e4578d0c58`. |
+| CLI-03 | `health`, `workspace create/list`, `task create/get`; repeated acceptance-criteria flags, UUIDs, optional idempotency key, JSON output. | in progress · [PR #62](https://github.com/eva-tarasov/myFirstForge/pull/62) открыт; результата merge в `main` нет. |
 | CLI-04 | Rich tables/panels, readable status, help/examples, `--json`, `--no-color`, non-TTY behavior, exit codes, CLI unit/regression tests, user guide. | No fabricated fields or statuses; output snapshots / tests and manual terminal check. Foundation can be accepted independently. |
 | CLI-05 | Integrate run create/start/show/events/cancel via backend contracts; polling with bounded timeout and clean Ctrl-C (stop watching, not automatic cancellation). Show preliminary result, errors, estimated cost/usage and evidence only if exposed. | Week 4 backend handoff: reviewed real API, status semantics, duplicate-start safety, live integration smoke. No assumption of scheduler, durable recovery or instant cancellation. |
 | CLI-06 | Integrate approval list/show/approve/reject and diff/evidence if supported; explicit decision on exact approval, conflict handling, no implicit auto-approve. | Week 4 approval/verification and public API handoff; verify pause/decision/resume in actual supported execution mode; deny/late cancellation scenarios. |
@@ -902,7 +926,7 @@ Keep existing Week 4 Tool System/M1 criteria. Step 11 covers explicit Task → A
 
 ## Progress record
 
-Completed: none. Decisions: separate HTTP-only client; preserve ADR-001/002; separate worktrees and PRs. Technical debt: public execution API, live provider, approvals and verification not yet proven (Week 4 handoff). Lessons / Python Deep Dives / verification evidence / hours: not yet recorded. Next: CLI-01 and Week 4 Step 01 in separate chats, after roadmap update accepted. Status only by evidence.
+CLI-01 и CLI-02 вошли в `main`. [CLI README](cli/README.md) описывает доступный клиент. CLI-03 остаётся в открытом PR #62. Интеграция AgentRun, approvals и evidence в CLI остаётся последующей работой клиента. Техническая приёмка backend и bounded live smoke учитываются отдельно. Фактические часы и самостоятельный учебный checkpoint CLI — UNKNOWN.
 
 ## Later increments (no automatic scope expansion)
 

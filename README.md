@@ -1,9 +1,11 @@
 # Forge backend
 
-Минимальный FastAPI backend для проекта Forge. Требуется Python 3.11 или новее.
+FastAPI backend Forge с PostgreSQL, локальным AgentRun runtime и контролируемыми инструментами для доверенных fixture-репозиториев. Требуется Python 3.11 или новее.
 
 Документация проекта — [архитектура Week 1](docs/ARCHITECTURE.md), [учебное руководство Week 1](docs/LEARNING_GUIDE.md), [учебное руководство Week 2](docs/LEARNING_GUIDE_WEEK2.md), [учебное руководство Week 3](docs/LEARNING_GUIDE_WEEK3.md), [ADR-001](docs/adr/ADR-001.md), [ADR-002](docs/adr/ADR-002.md) и [backlog](backlog.md).
 Документ архитектуры описывает состояние Week 1; актуальный запуск PostgreSQL и API приведён ниже.
+
+Текущие материалы Week 4 — [учебное руководство](docs/LEARNING_GUIDE_WEEK4.md), [M1 Final Acceptance Gate](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md) и [история bounded live smoke](docs/WEEK4_M1_LIVE_SMOKE_GATE.md). Финальная приёмка M1 остаётся за владельцем.
 
 ## Установка
 
@@ -129,7 +131,7 @@ FORGE_TEST_SCHEMA_DB="$TEST_DB" python -m pytest -q tests/test_schema_integratio
 
 `POST /tasks` создаёт и сохраняет Task. Внутренний `AgentService.execute_run(run_id)` принимает UUID уже существующего `queued` AgentRun. Финальный тест Week 3 вызывает настоящий `TaskService.create_task()`, затем явно создаёт связанный AgentRun в тестовом setup. [Разбор полного прохода](docs/LEARNING_GUIDE_WEEK3.md#16-полный-проход-task--agentrun)
 
-Task описывает намерение, AgentRun — отдельную попытку исполнения: один Task может иметь несколько AgentRun. У AgentRun есть AgentEvent для структурированных событий, ToolCall для записи вызовов инструментов и Artifact со ссылкой на результат. Approval связан с ToolCall; для одного вызова допускается несколько согласований.
+Task описывает намерение, AgentRun — отдельную попытку исполнения. У AgentRun есть AgentEvent для событий и ToolCall для аудита инструментов. Предварительный результат сохраняется в `AgentRun.final_result`. Artifact представлен в схеме данных. Approval привязан к ToolCall, а поддерживаемый approved-write путь требует одного точного решения для операции.
 
 Связи: `Task → AgentRun → AgentEvent / ToolCall / Artifact`, а также `ToolCall → Approval`. Внешние ключи используют `ON DELETE RESTRICT`. Номера попыток уникальны в пределах Task, номера событий — в пределах AgentRun. Оба значения положительны. CHECK ограничивает значения статусов и запрещает пустые обязательные строки. Время хранится с часовым поясом, payload события — в JSONB.
 
@@ -255,11 +257,11 @@ SQL и runner наблюдаются отдельно. `live_at_read` описы
 
 ## Переходы состояний в PostgreSQL
 
-`AgentRunService.transition_status()` блокирует строку AgentRun через `SELECT FOR UPDATE`, сравнивает сохранённый статус с ожидаемым и проверяет допустимость перехода. Изменение статуса и `AgentEvent` типа `agent_run_status_changed` с полями `from` и `to` фиксируются одной транзакцией. При ошибке оба изменения откатываются. Терминальные состояния `succeeded`, `failed` и `cancelled` нельзя переоткрыть. Для успешного завершения требуется независимое подтверждение результата, поэтому сервис пока отклоняет переход в `succeeded`.
+`AgentRunService.transition_status()` блокирует строку AgentRun через `SELECT FOR UPDATE`, сравнивает сохранённый статус с ожидаемым и проверяет допустимость перехода. Изменение статуса и `AgentEvent` типа `agent_run_status_changed` с полями `from` и `to` фиксируются одной транзакцией. При ошибке оба изменения откатываются. Терминальные состояния `succeeded`, `failed` и `cancelled` нельзя переоткрыть. Общий метод перехода отклоняет прямую установку `succeeded`. `VerificationService` сохраняет независимое evidence и переводит `verifying → succeeded` в одной транзакции при `PASS`.
 
-`TaskService.transition_status()` также сохраняет статус в PostgreSQL под блокировкой строки и отклоняет запрос с устаревшим ожидаемым статусом. У Task собственный граф состояний. Переход AgentRun сам по себе не меняет Task. `verifying → running` допустим для исправления, а переход в `succeeded` заблокирован до появления независимого подтверждения результата. Общие методы перехода остаются внутренними. HTTP публикует команды Start и Cancel для AgentRun.
+`TaskService.transition_status()` также сохраняет статус в PostgreSQL под блокировкой строки и отклоняет запрос с устаревшим ожидаемым статусом. У Task собственный граф состояний. Переход AgentRun сам по себе не меняет Task. Для Task `verifying → running` допустим для исправления. Публикация evidence Step 10 завершает AgentRun, а прямой переход Task в `succeeded` через общий сервис остаётся закрыт. HTTP публикует команды Start и Cancel для AgentRun.
 
-`AgentService` захватывает подготовленный AgentRun и закрывает claim-сессию до вызова `AgentRunner`. Текущий LangGraph runtime поддерживает ограниченный read-only `read_fixture`. Обработка approvals, оркестрация retry/resume и независимая verification относятся к последующим этапам.
+`AgentService` захватывает подготовленный AgentRun и закрывает claim-сессию до вызова `AgentRunner`. Week 4 добавил read-only и approved-write графы для доверенных fixture, in-process ожидание решения и независимую verification. Доверенный backend передаёт execution binding. Обычный запуск `app.main:app` предоставляет HTTP API, а Start без binding возвращает `503 RUN_EXECUTION_UNAVAILABLE`. Durable retry и resume остаются будущими возможностями.
 
 ### Deadline исполнения агента
 
@@ -433,6 +435,8 @@ Caller владеет commit и rollback и держит короткую тра
   .venv/bin/python -m pytest -q -rs
 )
 ```
+
+Полный post-merge regression gate Week 4, включая выделенные PostgreSQL-базы, HTTP E2E и dry-run, описан в [M1 Final Acceptance Gate](docs/WEEK4_M1_FINAL_ACCEPTANCE_GATE.md).
 
 ### Полная проверка PostgreSQL для Week 3
 
