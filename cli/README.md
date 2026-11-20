@@ -19,6 +19,34 @@ FORGE_BASE_URL=https://forge.example.invalid cli/.venv/bin/forge
 cli/.venv/bin/forge --base-url http://127.0.0.1:9000
 ```
 
+## Commands
+
+Global options go before the command. Use `forge --json workspace list` for structured JSON and `forge --base-url http://127.0.0.1:8000 health` to select the backend explicitly.
+
+| Command | Required input |
+| --- | --- |
+| `forge health` | None |
+| `forge workspace create` | `--name NAME` |
+| `forge workspace list` | None |
+| `forge task create` | `--workspace-id UUID --goal TEXT --criterion TEXT` |
+| `forge task get UUID` | Task UUID |
+
+Repeat `--criterion` to supply multiple acceptance criteria. Task creation accepts an optional `--idempotency-key UUID`, which is forwarded unchanged as a header. UUID arguments are validated locally, and request DTOs enforce the backend field limits. Invalid input sends no HTTP requests.
+
+Plain output uses `field=value` lines with full UUIDs and repeated `acceptance_criteria` lines. An empty workspace list prints `No workspaces found.`. Untrusted values use ASCII JSON escaping, with brackets escaped as well to prevent terminal controls or Rich markup. This also escapes non-ASCII characters. `--json` writes the response object or array, including `[]` for an empty workspace list, with UUID strings and JSON-escaped text.
+
+Successful results go to stdout. Error diagnostics go to stderr and use local messages without server code, message, details, response body, or full URL.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 2 | Invalid command, arguments, or configuration |
+| 3 | Transport failure or timeout |
+| 4 | Unexpected HTTP status |
+| 5 | Invalid successful response |
+
+Run command tests offline with `cli/.venv/bin/python -m pytest -q cli/tests/test_commands.py`. They exercise the Typer app with HTTPX MockTransport and block real sockets. A separate live integration smoke that creates Workspace and Task records requires the owner's explicit approval and a confirmed dedicated test database name. Live HTTP integration has not been run for this step.
+
 ## Python HTTP client
 
 Use the synchronous client as a context manager. It owns its HTTPX client and any supplied transport, and closes both when the context ends, including after an exception.
