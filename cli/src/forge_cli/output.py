@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from unicodedata import category
+from uuid import UUID
 
 import typer
 from pydantic import BaseModel
@@ -13,7 +14,21 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from forge_cli.dto import TaskResponse, WorkspaceResponse
+from forge_cli.dto import (
+    AgentRunEventsResponse,
+    AgentRunPublicEvent,
+    AgentRunResponse,
+    AgentRunResultResponse,
+    AgentRunStartResponse,
+    AgentRunStatus,
+    RunFailureDetails,
+    RunPreliminaryDetails,
+    RunTransitionDetails,
+    RunVerificationDetails,
+    TaskResponse,
+    WorkspaceResponse,
+)
+from forge_cli.polling import WatchOutcome
 
 # Leave room for a full UUID, labels, and the borders and padding.
 _MIN_RICH_WIDTH = 54
@@ -83,6 +98,118 @@ def _workspace_list(workspaces: list[WorkspaceResponse], width: int) -> Table | 
     return table
 
 
+def _event_lines(events: list[AgentRunPublicEvent]) -> list[str]:
+    lines = []
+    for event in events:
+        lines.extend([f"#{event.sequence}  {event.created_at.isoformat()}", f"Kind: {event.kind}"])
+        details = event.details
+        if isinstance(details, RunTransitionDetails):
+            lines.extend([f"From: {details.previous}", f"To: {details.to}"])
+        elif isinstance(details, RunPreliminaryDetails):
+            lines.append(f"Preliminary status: {details.preliminary_status}")
+        elif isinstance(details, RunFailureDetails):
+            lines.append(f"Execution failure code: {details.code}")
+        elif isinstance(details, RunVerificationDetails):
+            lines.append(f"Verification verdict: {details.verdict}")
+        else:
+            lines.append("Details: none")
+        lines.append("")
+    return lines
+
+
+def _event_page_lines(page: AgentRunEventsResponse) -> list[str]:
+    lines = _event_lines(page.items) if page.items else ["No events on this page."]
+    lines.extend([
+        f"Next after sequence: {page.next_after_sequence}",
+        f"Has more: {json.dumps(page.has_more)}",
+    ])
+    return lines
+
+
+def _result_lines(result: AgentRunResultResponse) -> list[str]:
+    lines = [
+        f"Run ID: {result.run_id}",
+        f"Run status: {result.run_status}",
+        f"Preliminary status: {result.preliminary_status or 'not recorded'}",
+        f"Execution failure code: {result.execution_failure_code or 'not recorded'}",
+        f"Verification verdict: {result.verification_verdict or 'not recorded'}",
+    ]
+    usage = result.usage
+    if usage is None:
+        lines.extend([
+            "Known total tokens: unknown", "Usage complete: unknown",
+            "Known cost (USD): unknown", "Cost complete: unknown",
+        ])
+    else:
+        tokens = str(usage.known_total_tokens)
+        cost = usage.known_cost_usd if usage.known_cost_usd is not None else "unknown"
+        lines.extend([
+            f"Known total tokens: {tokens}" + ("" if usage.usage_complete else " (incomplete)"),
+            f"Usage complete: {json.dumps(usage.usage_complete)}",
+            f"Known cost (USD): {cost}" + ("" if usage.cost_complete else " (incomplete)"),
+            f"Cost complete: {json.dumps(usage.cost_complete)}",
+        ])
+    return lines
+
+
+def _detail_panel(title: str, lines: list[str], width: int) -> Panel | Text:
+    if width < _MIN_RICH_WIDTH:
+        return Text("\n".join([title, *lines]))
+    return Panel(
+        _fold_lines(lines, width - 4),
+        title=title,
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
+def _print_detail_lines(console: Console, rich_layout: bool, title: str, lines: list[str]) -> None:
+    if rich_layout:
+        presentation = _detail_panel(title, [_terminal_value(line) for line in lines], console.width)
+        console.print(presentation, soft_wrap=isinstance(presentation, Text))
+    else:
+        for line in lines:
+            console.print(_escape(line))
+
+
+def print_watch_page(
+    status_change: AgentRunStatus | None, events: list[AgentRunPublicEvent], *, no_color: bool
+) -> None:
+    lines = [f"Observed status: {status_change}"] if status_change is not None else []
+    lines.extend(_event_lines(events))
+    if lines:
+        console, rich_layout = _stdout_console(no_color=no_color)
+        _print_detail_lines(console, rich_layout, "AgentRun watch", lines)
+
+
+def print_watch_summary(
+    run_id: UUID,
+    outcome: WatchOutcome,
+    events: list[AgentRunPublicEvent],
+    *,
+    json_output: bool,
+    no_color: bool,
+) -> None:
+    if json_output:
+        typer.echo(json.dumps({
+            "run_id": str(run_id),
+            "last_observed_status": outcome.last_observed_status,
+            "events": [event.model_dump(mode="json") for event in events],
+            "next_after_sequence": outcome.next_after_sequence,
+            "stop_reason": outcome.stop_reason,
+        }, ensure_ascii=True))
+        return
+
+    console, rich_layout = _stdout_console(no_color=no_color)
+    _print_detail_lines(console, rich_layout, "AgentRun observation ended", [
+        f"Run ID: {run_id}",
+        f"Last observed status: {outcome.last_observed_status or 'unknown'}",
+        f"Next after sequence: {outcome.next_after_sequence}",
+        f"Stop reason: {outcome.stop_reason}",
+    ])
+
+
 def _terminal_result(
     result: BaseModel | list[WorkspaceResponse], width: int
 ) -> Panel | Table | Text | None:
@@ -103,18 +230,22 @@ def _terminal_result(
             f"{index}. {_terminal_value(criterion)}"
             for index, criterion in enumerate(result.acceptance_criteria, start=1)
         )
+    elif isinstance(result, AgentRunResponse):
+        title = "AgentRun"
+        lines = [
+            f"ID: {result.id}",
+            f"Task ID: {result.task_id}",
+            f"Attempt number: {result.attempt_number}",
+            f"Status: {result.status}",
+            f"Created at: {result.created_at.isoformat()}",
+        ]
+    elif isinstance(result, AgentRunStartResponse):
+        title = "AgentRun start accepted"
+        lines = [f"Run ID: {result.run_id}", "Accepted: true"]
     else:
         return None
 
-    if width < _MIN_RICH_WIDTH:
-        return Text("\n".join([title, *lines]))
-    return Panel(
-        _fold_lines(lines, width - 4),
-        title=title,
-        title_align="left",
-        border_style="cyan",
-        padding=(0, 1),
-    )
+    return _detail_panel(title, lines, width)
 
 
 def print_result(
@@ -129,6 +260,14 @@ def print_result(
         return
 
     console, rich_layout = _stdout_console(no_color=no_color)
+    if isinstance(result, (AgentRunEventsResponse, AgentRunResultResponse)):
+        if isinstance(result, AgentRunEventsResponse):
+            title, lines = "AgentRun events", _event_page_lines(result)
+        else:
+            title, lines = "AgentRun result", _result_lines(result)
+        _print_detail_lines(console, rich_layout, title, lines)
+        return
+
     if rich_layout:
         presentation = _terminal_result(result, console.width)
         if presentation is not None:
@@ -143,4 +282,5 @@ def print_result(
         for field, value in model.model_dump(mode="json").items():
             values = value if isinstance(value, list) else [value]
             for item in values:
-                console.print(f"{field}={_escape(item)}")
+                text = json.dumps(item) if isinstance(item, bool) else str(item)
+                console.print(f"{field}={_escape(text)}")

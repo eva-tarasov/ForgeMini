@@ -1,4 +1,6 @@
+import json
 from contextlib import redirect_stdout
+from datetime import datetime
 from io import StringIO
 from uuid import UUID
 
@@ -6,7 +8,15 @@ import pytest
 from rich.cells import cell_len
 
 from forge_cli import output
-from forge_cli.dto import HealthResponse, TaskResponse, WorkspaceResponse
+from forge_cli.dto import (
+    AgentRunEventsResponse,
+    AgentRunResponse,
+    AgentRunResultResponse,
+    AgentRunStartResponse,
+    HealthResponse,
+    TaskResponse,
+    WorkspaceResponse,
+)
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 TASK_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -122,6 +132,151 @@ def test_task_panel_numbers_criteria(render_terminal):
     assert "Goal: Проверить сборку" in rendered
     assert rendered.index("Acceptance criteria:") < rendered.index("1. Тесты пройдены")
     assert rendered.index("1. Тесты пройдены") < rendered.index("2. Артефакт создан")
+
+
+@pytest.mark.parametrize("width", [80, 24])
+@pytest.mark.parametrize("status", ["waiting_approval", "cancelled"])
+def test_agent_run_presentation_without_color(render_terminal, width, status):
+    run = AgentRunResponse(
+        id=UUID(int=3),
+        task_id=TASK_ID,
+        attempt_number=2,
+        status=status,
+        created_at=datetime.fromisoformat("2026-11-21T09:30:00+03:00"),
+    )
+
+    rendered = render_terminal(run, width=width, no_color=True)
+
+    if width == 80:
+        assert "╭─ AgentRun " in rendered
+    else:
+        assert rendered.startswith("AgentRun\n")
+    assert f"ID: {run.id}" in rendered
+    assert f"Task ID: {TASK_ID}" in rendered
+    assert "Attempt number: 2" in rendered
+    assert f"Status: {status}" in rendered
+    assert "Created at: 2026-11-21T09:30:00+03:00" in rendered
+    assert "\x1b" not in rendered
+
+
+@pytest.mark.parametrize("width", [80, 24])
+def test_run_start_acceptance_presentation_without_color(render_terminal, width):
+    response = AgentRunStartResponse(run_id=TASK_ID, accepted=True)
+
+    rendered = render_terminal(response, width=width, no_color=True)
+
+    assert "AgentRun start accepted" in rendered
+    assert f"Run ID: {TASK_ID}" in rendered
+    assert "Accepted: true" in rendered
+    assert "\x1b" not in rendered
+    assert "running" not in rendered
+    assert "succeeded" not in rendered
+    if width == 80:
+        assert "╭─ AgentRun start accepted " in rendered
+
+
+@pytest.mark.parametrize("width", [80, 24])
+def test_run_events_timeline_without_color(render_terminal, width):
+    descriptions = [
+        ("agent_run_status_changed", {"from": "queued", "to": "running"}, "From: queued"),
+        ("agent_result_recorded", {"preliminary_status": "blocked"}, "Preliminary status: blocked"),
+        ("agent_execution_failed", {"code": "execution_failed"}, "Execution failure code: execution_failed"),
+        ("verification_recorded", {"verdict": "fail"}, "Verification verdict: fail"),
+        ("tool_call_finished", {}, "Details: none"),
+    ]
+    items = [
+        {"sequence": 2147483640 + index, "created_at": "2026-11-21T09:30:00+03:00",
+         "kind": kind, "details": details}
+        for index, (kind, details, _) in enumerate(descriptions)
+    ]
+    page = AgentRunEventsResponse.model_validate_json(json.dumps({
+        "items": items, "next_after_sequence": 2147483644, "has_more": True,
+    }))
+
+    rendered = render_terminal(page, width=width, no_color=True)
+
+    assert "AgentRun events" in rendered
+    assert ("╭─ AgentRun events " in rendered) is (width == 80)
+    assert "\x1b" not in rendered
+    assert "To: running" in rendered
+    for index, (kind, _, detail) in enumerate(descriptions):
+        assert f"#{2147483640 + index}  2026-11-21T09:30:00+03:00" in rendered
+        assert f"Kind: {kind}" in rendered
+        assert detail in rendered
+    assert "Next after sequence: 2147483644" in rendered
+    assert "Has more: true" in rendered
+
+
+def test_empty_run_events_page_does_not_imply_completion(capsys):
+    page = AgentRunEventsResponse(items=[], next_after_sequence=16, has_more=False)
+
+    output.print_result(page, json_output=False)
+
+    assert capsys.readouterr() == (
+        "No events on this page.\nNext after sequence: 16\nHas more: false\n", ""
+    )
+
+
+@pytest.mark.parametrize("width", [80, 24])
+@pytest.mark.parametrize("has_usage", [False, True])
+def test_run_result_presentation_distinguishes_unknown_from_zero(render_terminal, width, has_usage):
+    usage = {
+        "known_total_tokens": 0, "usage_complete": False,
+        "known_cost_usd": "0.000000", "cost_complete": False,
+    } if has_usage else None
+    result = AgentRunResultResponse.model_validate_json(json.dumps({
+        "run_id": str(TASK_ID), "run_status": "verifying",
+        "preliminary_status": "ready_for_verification", "execution_failure_code": None,
+        "verification_verdict": "inconclusive", "usage": usage,
+    }))
+
+    rendered = render_terminal(result, width=width, no_color=True)
+
+    assert f"Run ID: {TASK_ID}" in rendered
+    assert "Run status: verifying" in rendered
+    assert "Preliminary status: ready_for_verification" in rendered
+    assert "Execution failure code: not recorded" in rendered
+    assert "Verification verdict: inconclusive" in rendered
+    if has_usage:
+        assert "Known total tokens: 0 (incomplete)" in rendered
+        assert "Known cost (USD): 0.000000 (incomplete)" in rendered
+        assert "Usage complete: false" in rendered
+        assert "Cost complete: false" in rendered
+    else:
+        assert "Known total tokens: unknown" in rendered
+        assert "Known cost (USD): unknown" in rendered
+        assert "Usage complete: unknown" in rendered
+        assert "Cost complete: unknown" in rendered
+    assert "succeeded" not in rendered
+
+
+def test_run_result_plain_output_and_json_usage(capsys, monkeypatch):
+    body = {
+        "run_id": str(TASK_ID), "run_status": "failed",
+        "preliminary_status": None, "execution_failure_code": "provider_timeout",
+        "verification_verdict": None, "usage": {
+            "known_total_tokens": 42, "usage_complete": True,
+            "known_cost_usd": None, "cost_complete": False,
+        },
+    }
+    result = AgentRunResultResponse.model_validate_json(json.dumps(body))
+
+    output.print_result(result, json_output=False)
+
+    assert capsys.readouterr() == (
+        f"Run ID: {TASK_ID}\nRun status: failed\nPreliminary status: not recorded\n"
+        "Execution failure code: provider_timeout\nVerification verdict: not recorded\n"
+        "Known total tokens: 42\nUsage complete: true\n"
+        "Known cost (USD): unknown (incomplete)\nCost complete: false\n",
+        "",
+    )
+
+    def unexpected_console(*args, **kwargs):
+        pytest.fail("JSON output must bypass Rich Console")
+
+    monkeypatch.setattr(output, "Console", unexpected_console)
+    output.print_result(result, json_output=True, no_color=True)
+    assert capsys.readouterr() == (json.dumps(body) + "\n", "")
 
 
 @pytest.mark.parametrize("presentation", ["table", "workspace", "task"])

@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from forge_cli.commands import CommandOptions, health, task_app, workspace_app
+from forge_cli.commands import CommandOptions, health, run_app, task_app, workspace_app
 from forge_cli.config import resolve_base_url
 
 app = typer.Typer(
@@ -17,6 +17,9 @@ app = typer.Typer(
 app.command()(health)
 app.add_typer(workspace_app, name="workspace", help="Create and list workspaces.")
 app.add_typer(task_app, name="task", help="Create and retrieve tasks.")
+app.add_typer(
+    run_app, name="run", help="Create, start, cancel, and observe AgentRuns. Watch is read-only."
+)
 
 
 def show_version(value: bool) -> None:
