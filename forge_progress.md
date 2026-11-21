@@ -885,48 +885,82 @@ Backend-контракты Public AgentRun API и Public Approval & Evidence API
 
 # WEEK4CLI — Forge CLI (parallel track)
 
-**Status:** in progress · CLI-01 и CLI-02 merged, CLI-03 открыт.
+**Status:** in progress — technical delivery done; owner learning checkpoint pending
 
-**Параллельно:** Week 4; при необходимости интеграционный хвост продолжается рядом с Week 5, без переименования трека.  
-**Codex:** LEARNING → ENGINEERING.  
-**Оценка:** предварительно 8–14 ч суммарно, уточнить после CLI-01; входит в общий бюджет, не обязательство уложиться в календарную неделю.
+**CLI-01–07:** DONE, merged в `main`.
+**Forge CLI v0.1:** technical delivery accepted.
+**Owner learning checkpoint:** pending.
+**Параллельно:** Week 4, отдельный клиентский трек при сохранении основных Week 1–12 и M1/M2/M3.
+**Codex mode:** LEARNING → ENGINEERING.
+**Hours:** UNKNOWN.
 
-## Цель и UX
+## Техническая реализация и UX
 
-Читаемый developer CLI поверх Forge HTTP API: подкоманды и help, таблицы Workspace/Task, статус и timeline AgentRun, явные approval/reject/cancel, diff/evidence, usage/cost при наличии. Human-readable по умолчанию, machine-readable `--json`, `--no-color`, корректные stdout/stderr и exit codes; вывод не раскрывает secrets и безопасно обрабатывает строки из репозитория/модели (escape terminal controls/markup). No full-screen TUI, no chat, no direct database/model/tools.
+Доставлен самостоятельный Python-пакет `forge-cli` в `cli/`, версия `0.1.0`, Python >=3.11. Стек — Typer, Rich, HTTPX, Pydantic, pytest в dev extra. Production CLI работает исключительно через HTTP. Backend владеет state, execution и persistence. Реализованы следующие команды и возможности.
 
-Отдельный пакет `forge-cli` использует Typer, Rich, HTTPX и Pydantic, а pytest входит в dev extra. Bootstrap и entry point `forge` приняты в CLI-01, типизированный HTTP client — в CLI-02. Backend package layout и зависимости клиента разделены. [CLI package](cli/pyproject.toml) · [CLI README](cli/README.md).
+- `health`, `workspace create/list`, `task create/get`, повторяемые acceptance criteria и optional idempotency key для Task.
+- `run create/get/start/cancel/events/result/watch`, cursor pagination, preliminary result и usage/cost с признаками полноты, bounded polling и Ctrl-C.
+- `approval list/get/review/approve/reject`, структурный preview, точный patch review, отдельные read/review capabilities, явный `--confirm` и проверяемый patch fingerprint.
+- `evidence list/get`, verdict и outcomes отдельных checks, проверка pagination и check count.
+- Rich tables/panels, `--json`, `--no-color`, deterministic non-TTY output, полные UUID, разделение stdout/stderr и безопасное экранирование untrusted terminal data.
+- Typed DTOs, строгая проверка соответствующих wire-контрактов, response identity и semantic invariants, безопасные ошибки и exit codes. Автоматические retries отсутствуют, в том числе для mutations.
 
-## Подшаги и dependency gates
+Настройка backend URL через `--base-url` / `FORGE_BASE_URL`, default loopback. Bearer credentials передаются per request. JSON bypasses Rich. Документация содержит installation, commands, lifecycle, error semantics и guarded demonstrations. [CLI package](cli/pyproject.toml) · [CLI README](cli/README.md) · [Release acceptance matrix](cli/RELEASE_V0_1.md).
 
-| Step | Scope | Dependency / evidence |
+## Семь доставленных шагов
+
+Все семь PR подтверждены как merged в `main` через GitHub. База этого документационного обновления — merge PR #68 `3959f0a8dab924236172ae225545dd5899173dcc` от 2026-11-21.
+
+| Step | Доставленная функциональность | PR | Status | Merge commit |
+|---|---|---|---|---|
+| CLI-01 | Пакет `cli/`, Typer entry point `forge`, `--help`, `--version`, base URL config и bootstrap tests. | [#41](https://github.com/eva-tarasov/myFirstForge/pull/41) | DONE · merged | `c38209b` |
+| CLI-02 | Typed HTTPX client, transport lifecycle, timeout, безопасные API/transport/response errors и offline MockTransport tests. | [#60](https://github.com/eva-tarasov/myFirstForge/pull/60) | DONE · merged | `68e7775` |
+| CLI-03 | `health`, `workspace create/list`, `task create/get`, criteria, UUID validation, optional idempotency key и JSON. | [#62](https://github.com/eva-tarasov/myFirstForge/pull/62) | DONE · merged | `d1b00ce` |
+| CLI-04 | Централизованный Rich output, tables/panels, безопасный Unicode, JSON/no-color/non-TTY и narrow-terminal compatibility. | [#65](https://github.com/eva-tarasov/myFirstForge/pull/65) | DONE · merged | `a557c6c` |
+| CLI-05 | AgentRun `create/get/start/cancel/events/result/watch`, bounded polling, Ctrl-C, identity validation и guarded execution/cancellation demos. | [#66](https://github.com/eva-tarasov/myFirstForge/pull/66) | DONE · merged | `a91ca5e` |
+| CLI-06 | Approval `list/get/review/approve/reject`, Evidence `list/get`, capability separation, exact fingerprint/confirm и four-scenario TCP/interactive harness. | [#67](https://github.com/eva-tarasov/myFirstForge/pull/67) | DONE · merged | `00d6e29` |
+| CLI-07 | Wheel build/clean installation вне checkout, release safeguards, полный regression, release matrix, owner TCP/interactive acceptance и документационный handoff. | [#68](https://github.com/eva-tarasov/myFirstForge/pull/68) | DONE · merged | `3959f0a` |
+
+## Verification evidence
+
+Ниже зафиксированы ранее выполненные проверки и принятые owner results. При текущем документационном обновлении pytest, E2E, Docker/PostgreSQL и provider calls не запускались. CLI acceptance учитывается отдельно от Week 4 backend M1.
+
+| Этап / атрибуция | Принятые результаты | Источник |
 |---|---|---|
-| CLI-01 | Theory: CLI vs TUI, HTTP-only, commands/help, UX, packaging, exit codes. Bootstrap `cli/`, config `--base-url` / `FORGE_BASE_URL`, default loopback; `forge --help`, `forge --version`. | done · [PR #41](https://github.com/eva-tarasov/myFirstForge/pull/41), merge `c38209b6393ce77a233788b2c3a6f8bb8d2079c5`. |
-| CLI-02 | HTTP client, typed transport DTOs, timeout, structured errors, no implicit retry of mutations, redacted output. | done · [PR #60](https://github.com/eva-tarasov/myFirstForge/pull/60), merge `68e77759a0318a76f60af22852b024e4578d0c58`. |
-| CLI-03 | `health`, `workspace create/list`, `task create/get`; repeated acceptance-criteria flags, UUIDs, optional idempotency key, JSON output. | in progress · [PR #62](https://github.com/eva-tarasov/myFirstForge/pull/62) открыт; результата merge в `main` нет. |
-| CLI-04 | Rich tables/panels, readable status, help/examples, `--json`, `--no-color`, non-TTY behavior, exit codes, CLI unit/regression tests, user guide. | No fabricated fields or statuses; output snapshots / tests and manual terminal check. Foundation can be accepted independently. |
-| CLI-05 | Integrate run create/start/show/events/cancel via backend contracts; polling with bounded timeout and clean Ctrl-C (stop watching, not automatic cancellation). Show preliminary result, errors, estimated cost/usage and evidence only if exposed. | Week 4 backend handoff: reviewed real API, status semantics, duplicate-start safety, live integration smoke. No assumption of scheduler, durable recovery or instant cancellation. |
-| CLI-06 | Integrate approval list/show/approve/reject and diff/evidence if supported; explicit decision on exact approval, conflict handling, no implicit auto-approve. | Week 4 approval/verification and public API handoff; verify pause/decision/resume in actual supported execution mode; deny/late cancellation scenarios. |
-| CLI-07 | CLI v0.1 review, installation/docs, local E2E demo, regression and progress. | Real model + fixture flow and backend M1 prerequisites for full agent demo; report unsupported operations separately. |
+| CLI-05 · историческая приёмка | Real TCP/PostgreSQL PASS, active cancellation PASS, owner Terminal verification PASS. Bounded real OpenAI smoke PASS, 3 model requests, 1053 tokens, usage_complete=true, cost unknown. Read-only tool audit и independent verification PASS, cleanup completed. | [PR #66](https://github.com/eva-tarasov/myFirstForge/pull/66), [release matrix](cli/RELEASE_V0_1.md), [AgentRun harness](cli/tests/demo_agent_run.py). |
+| CLI-06 · историческая приёмка | 755 offline tests PASS. Четыре TCP/PostgreSQL сценария PASS — approve → exactly one patch application → independent verification PASS, reject/cancel/lost-response PASS. Interactive owner acceptance PASS, cleanup completed. | [PR #67](https://github.com/eva-tarasov/myFirstForge/pull/67), [release matrix](cli/RELEASE_V0_1.md), [approval harness](cli/tests/demo_approval.py). |
+| CLI-07 · release checks и последние owner results | 7 release tests PASS, 762 full CLI tests PASS, 0 failed/skipped. Clean wheel installation PASS на Python 3.13.0, 25 installed command help checks PASS, 2 real loopback health requests PASS, installed wheel без backend imports. Owner repeated TCP/PostgreSQL four-scenario acceptance PASS, interactive session SESSION_ENDED с approve/reject, cleanup completed. | [PR #68](https://github.com/eva-tarasov/myFirstForge/pull/68), merge `3959f0a`, [release evidence](cli/RELEASE_V0_1.md), [clean-install launcher](cli/tests/clean_install.py). |
 
-CLI-01–04 form Foundation. CLI-05–07 may be `blocked` awaiting backend without blocking Week 4. Optional `task list`, `run watch`, `run diff` and artifact viewing only when supported. Command spelling in this table is a design proposal, not a claim about implemented routes. Document actual endpoint, request/response, errors and verification for each enabled command.
+CLI-07 owner acceptance относится к reviewed HEAD `760f8c64d75874a0ddf462299bb20fdbaf1d7b33`, затем изменения вошли в merge `3959f0a`. Последний owner wheel SHA256 — `11feb3f5fbfe487e3e0c127d157758e5ed8a492c86ff93f3dc21a83bd6573f2f`. Предыдущая Codex wheel-сборка отдельно сохранена в release evidence. Последняя interactive session подтверждает approve/reject. Личный просмотр evidence/result в Terminal 2 на этом прогоне не подтверждён, автоматические evidence assertions относятся к TCP matrix. Real OpenAI smoke в CLI-07 не повторялся, используется историческое CLI-05 evidence.
 
-## Backend handoff (Week 4 ownership)
+## Architecture continuity и backend ownership
 
-Keep existing Week 4 Tool System/M1 criteria. Step 11 covers explicit Task → AgentRun creation/start, status/result/events reads and cancel. Approval list/show/decision and evidence/diff remain subject to the Step 12 contract. Backend owns state, authorization/policy and transaction boundaries. Define IDs, idempotency, 409 for stale transitions, response timing, error mapping, and polling semantics for the remaining operations. Do not hold a DB transaction or HTTP request open while waiting for human approval. Document the supported local single-process execution/pause mechanism and reject unsupported operations. No new framework or queue by default. Durable recovery remains Week 7. Test HTTP integration and cancellation/approval races. CLI must use the public API and respect the existing execution and resume boundaries.
+- ADR-001 modular monolith и ADR-002 LangChain/LangGraph сохраняются. Архитектурных изменений в CLI-треке не было, отдельный ADR не требуется.
+- Backend остаётся source of truth. `Task ≠ AgentRun`. CLI не импортирует backend, не владеет permission policy и не выполняет tools самостоятельно. Backend/runtime imports и доступ к dedicated DB ограничены test-only harnesses.
+- Side effects проходят существующий backend approval gate. Exact review fingerprint и explicit confirm связывают решение с конкретным patch. `recorded=true` означает запись решения. Фактическое применение patch и успешная independent verification подтверждаются отдельно.
+- При timeout результат mutation может оставаться неизвестным. Caller перечитывает состояние перед следующим действием. Retry ≠ resume. Автоматического повтора mutation нет.
+- Ctrl-C у `run watch` завершает только наблюдение. Отмена AgentRun требует явного `run cancel`. Terminal AgentRun не переоткрывается.
+- Технические результаты CLI не изменяют Week 4 backend M1 status или его исходные exit criteria. Основной roadmap и technology gates остаются действующими.
 
 ## Exit criteria (independent from M1)
 
-- [ ] Clean CLI install and `forge --help`/`--version`; config, typed client, deterministic exit codes.
-- [ ] Existing Workspace/Task endpoints work from CLI against local backend; readable tables/panels and machine output; no-color/non-TTY tests; stderr separated from JSON stdout.
-- [ ] Backend public AgentRun/approval/evidence contracts accepted and CLI commands exercised end-to-end on an isolated fixture; no implied success before independent evidence, no unsafe auto-approval.
-- [ ] Live provider checked in a bounded real smoke (not just MockTransport); failures/status honest; no secret leakage. If live/API prerequisites are blocked, Foundation may be complete but full CLI v0.1 remains blocked/not done.
-- [ ] Docs include startup, commands, examples, limitations, polling and cancellation semantics; CLI unit + HTTP integration checks and review evidence recorded.
-- [ ] Owner can explain HTTP boundary, DTO mapping, error handling and why CLI does not own business state.
+- [x] Clean wheel installation в isolated venv вне checkout, версия `0.1.0`, `forge --help`/`--version`, config и typed HTTP client подтверждены.
+- [x] Workspace/Task доступны из CLI, Rich/JSON/no-color/non-TTY, terminal safety и stdout/stderr проверены.
+- [x] AgentRun, Approval и Evidence commands проверены offline и real TCP/PostgreSQL на isolated fixture, включая approval pause/decision/continuation, cancellation и lost-response.
+- [x] Bounded real provider smoke принят по историческому CLI-05 evidence. Secrets не раскрываются в diagnostics, ограничения usage/cost задокументированы.
+- [x] Approve → exactly one scoped patch application → independent verification PASS → persisted evidence подтверждено. Решение об approval отделено от verified success.
+- [x] Installation/commands/lifecycle/errors/limitations, guarded demos и release evidence задокументированы, 762 full CLI tests и 7 release tests PASS приняты владельцем.
+- [ ] Owner learning checkpoint — владелец самостоятельно объясняет HTTP boundary, DTO mapping, errors, lifecycle, approval/fingerprint, verification/evidence и ownership бизнес-состояния.
 
-## Progress record
+## Known limitations / debt и продолжение roadmap
 
-CLI-01 и CLI-02 вошли в `main`. [CLI README](cli/README.md) описывает доступный клиент. CLI-03 остаётся в открытом PR #62. Интеграция AgentRun, approvals и evidence в CLI остаётся последующей работой клиента. Техническая приёмка backend и bounded live smoke учитываются отдельно. Фактические часы и самостоятельный учебный checkpoint CLI — UNKNOWN.
+- Заявлен Python >=3.11. Проверен Python 3.13.0. Python 3.11/3.12 — NOT RUN.
+- Production authentication отсутствует. Read/review capabilities обеспечивают текущий local-backend доступ.
+- Local in-process coordinator не является durable worker system. Durable restart/resume остаётся Week 7 и подчиняется существующему architecture gate.
+- MCP остаётся Week 5, sandbox isolation — Week 6. CLI v0.1 не реализует MCP, sandbox isolation или generic shell execution.
+- Production verification orchestration остаётся отдельной работой. Usage/cost могут быть неполными, гарантированного provider cost нет.
+- Apple Client Week 9–10 сохраняется в roadmap. Shared API contracts, backend SSE до возможного CLI SSE, remote authentication/deployment Week 11–12, macOS worker и project orchestration остаются последующими решениями в исходных границах.
+- Owner learning checkpoint pending. Actual hours UNKNOWN. Этот документационный PR не начинает реализацию перечисленного debt и не запускает Week 5 автоматически.
 
 ## Later increments (no automatic scope expansion)
 
@@ -934,6 +968,24 @@ CLI-01 и CLI-02 вошли в `main`. [CLI README](cli/README.md) описыв�
 - Week 7–8: durable recovery and verification reporting; model-provider spike only after live baseline and separate decision.
 - Week 9–10: Apple Client remains; share API contracts, not UI code. SSE for CLI is optional after backend SSE exists; no extra framework by default.
 - Week 11–12: remote base URL and auth only with backend security/deployment; CLI install/demo docs included in release. Web, macOS worker and project orchestration remain separate future decisions.
+
+## Learning record
+
+**Codex mode:** LEARNING → ENGINEERING.
+
+**Lessons learned:** реализация и проверки подтвердили HTTP-only boundary и backend ownership, разделение Task/AgentRun, локальную валидацию DTO и response identity, безопасный terminal output, явный review/fingerprint/confirm перед side effects, bounded observation, неизвестный результат mutation при transport failure и независимость verification от approval/preliminary result. Это зафиксированные архитектурные принципы реализации. Самостоятельное освоение владельцем проверяется отдельно.
+
+**What I can explain:** pending owner checkpoint.
+**Python Deep Dives:** UNKNOWN.
+**Hours:** UNKNOWN.
+
+## Следующий шаг
+
+1. Review обновлённого `forge_progress.md`.
+2. Merge отдельного документационного PR после owner review.
+3. Owner learning checkpoint.
+4. Формальное закрытие Week4CLI после checkpoint.
+5. Возвращение к архитектурному чату `00` и основному roadmap.
 
 ---
 
