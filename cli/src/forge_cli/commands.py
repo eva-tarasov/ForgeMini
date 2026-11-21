@@ -22,6 +22,10 @@ from forge_cli.dto import (
 from forge_cli.errors import ForgeAPIError, ForgeResponseError, ForgeTransportError
 from forge_cli.output import print_result, print_watch_page, print_watch_summary
 from forge_cli.polling import watch_run
+from forge_cli.config import CapabilityConfigurationError
+
+approval_app = typer.Typer(no_args_is_help=True, add_completion=False)
+evidence_app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 workspace_app = typer.Typer(no_args_is_help=True, add_completion=False)
 task_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -70,6 +74,8 @@ def _with_client(
         _fail(str(exc), 4)
     except ForgeResponseError as exc:
         _fail(str(exc), 5)
+    except CapabilityConfigurationError as exc:
+        _fail(str(exc), 2)
     except ValueError:
         _fail("Invalid Forge base URL.", 2)
 
@@ -245,3 +251,75 @@ def run_watch(
         _fail("AgentRun observation deadline expired.", 6)
     if outcome.stop_reason == "interrupted":
         _fail("AgentRun observation interrupted.", 130)
+
+
+RunArgument = Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="RUN_UUID")]
+ApprovalArgument = Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="APPROVAL_UUID")]
+AttemptArgument = Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="ATTEMPT_UUID")]
+
+
+@approval_app.command("list")
+def list_approvals(ctx: typer.Context, run_id: RunArgument) -> None:
+    """List pending approvals using the read capability."""
+    _run(ctx, lambda client: client.list_approvals(run_id))
+
+
+@approval_app.command("get")
+def get_approval(ctx: typer.Context, run_id: RunArgument, approval_id: ApprovalArgument) -> None:
+    """Read approval metadata and structural preview."""
+    _run(ctx, lambda client: client.get_approval(run_id, approval_id))
+
+
+@approval_app.command("review")
+def review_approval(ctx: typer.Context, run_id: RunArgument, approval_id: ApprovalArgument) -> None:
+    """Read the exact patch using the separate review capability."""
+    _run(ctx, lambda client: client.get_approval_review(run_id, approval_id))
+
+
+@evidence_app.command("list")
+def list_evidence(
+    ctx: typer.Context, run_id: RunArgument,
+    after_sequence: Annotated[int, typer.Option(min=0, max=MAX_EVENT_SEQUENCE)] = 0,
+    limit: Annotated[int, typer.Option(min=1, max=20)] = 20,
+) -> None:
+    """Read one page of verification attempts."""
+    _run(ctx, lambda client: client.list_evidence(run_id, after_sequence=after_sequence, limit=limit))
+
+
+@evidence_app.command("get")
+def get_evidence(ctx: typer.Context, run_id: RunArgument, attempt_id: AttemptArgument) -> None:
+    """Read a verification attempt and its individual checks."""
+    _run(ctx, lambda client: client.get_evidence(run_id, attempt_id))
+
+
+_DECISION_TRANSPORT_HINT = (
+    "The decision outcome is unknown. Read its state with "
+    "'forge approval get RUN_UUID APPROVAL_UUID' before deciding what to do next."
+)
+
+
+@approval_app.command("approve")
+def approve_approval(
+    ctx: typer.Context, run_id: RunArgument, approval_id: ApprovalArgument,
+    reviewed_patch_sha256: Annotated[str, typer.Option("--reviewed-patch-sha256", help="Reviewed patch fingerprint.")],
+    confirm: Annotated[bool, typer.Option("--confirm", help="Explicitly authorize this decision.")] = False,
+) -> None:
+    """Record approval of the explicitly reviewed patch."""
+    if not confirm:
+        _fail("Explicit --confirm is required.", 2)
+    _run(
+        ctx,
+        lambda client: client.approve_approval(run_id, approval_id, reviewed_patch_sha256),
+        transport_hint=_DECISION_TRANSPORT_HINT,
+    )
+
+
+@approval_app.command("reject")
+def reject_approval(
+    ctx: typer.Context, run_id: RunArgument, approval_id: ApprovalArgument,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Explicitly authorize this decision.")] = False,
+) -> None:
+    """Record rejection of a pending patch."""
+    if not confirm:
+        _fail("Explicit --confirm is required.", 2)
+    _run(ctx, lambda client: client.reject_approval(run_id, approval_id), transport_hint=_DECISION_TRANSPORT_HINT)

@@ -237,3 +237,183 @@ The paid run exercises one synthetic read-only AgentRun. The guard caps provider
 On completion or failure, the launcher releases the offline reply gate, terminates any outstanding CLI subprocess, stops Uvicorn and rechecks the DB guard before deleting only the smoke workspace and its dependent rows. It confirms the DB returns to empty, disposes the engine and transport, and removes the temporary repository. An interrupted or unsuccessful cleanup is reported as unconfirmed with the synthetic workspace marker for targeted recovery. No database drop, migration or automatic rerun is part of this harness.
 
 Automated runs emit actual command exits, HTTP statuses, model request count and mode-specific results. The interactive report captures admitted HTTP traffic and cleanup. Keep each report with its PR commit and record the terminal observations separately. Final CLI-05 acceptance still requires a reviewed active-cancellation run and the owner's actual Terminal 2 observations.
+
+## CLI-06A approval and evidence reads
+
+The CLI exposes five GET operations using the backend's existing read APIs.
+
+| Command | HTTP route | Capability environment variable |
+|---|---|---|
+| `forge approval list RUN_UUID` | `/agent-runs/{run_id}/approvals` | `FORGE_APPROVAL_READ_TOKEN` |
+| `forge approval get RUN_UUID APPROVAL_UUID` | `/agent-runs/{run_id}/approvals/{approval_id}` | `FORGE_APPROVAL_READ_TOKEN` |
+| `forge approval review RUN_UUID APPROVAL_UUID` | `/agent-runs/{run_id}/approvals/{approval_id}/review` | `FORGE_APPROVAL_REVIEW_TOKEN` |
+| `forge evidence list RUN_UUID --after-sequence N --limit N` | `/agent-runs/{run_id}/evidence` | `FORGE_APPROVAL_READ_TOKEN` |
+| `forge evidence get RUN_UUID ATTEMPT_UUID` | `/agent-runs/{run_id}/evidence/{attempt_id}` | `FORGE_APPROVAL_READ_TOKEN` |
+
+The required capability is checked locally on each request. Tokens must contain 32–512 characters from the backend's bearer alphabet, with padding only at the end. The read and review environment variables are independent. The CLI sends the selected token through the request's Authorization header. Unrelated commands keep their existing HTTP behavior. Help and version work without credentials.
+
+Bearer requests require HTTPS or HTTP to an IPv4 address in `127.0.0.0/8`, IPv6 `::1`, or the hostname `localhost`. HTTP lookalike names, integer host encodings and other destinations are rejected locally. The client retains `trust_env=False`, disabled redirects and its existing timeouts. Configure real capabilities through your local environment only when exercising an authorized backend. Routine tests supply synthetic credentials themselves.
+
+Response DTOs reject unknown fields, invalid types and inconsistent approval decision timestamps. The pending list is bounded to 32 items. Structural previews distinguish `live_at_read` from `unavailable`, always exclude content, and enforce file, line and hunk limits. `Preview unavailable` indicates unavailable structural information.
+
+Exact reviews preserve raw patch data in JSON. The CLI verifies the lowercase fingerprint using `sha256(b"forge:apply_patch:v1\0" + patch.encode("utf-8"))` and enforces the 64 KiB UTF-8 limit. Human output preserves patch line boundaries and spaces, escapes terminal controls, and renders untrusted content as Rich Text. Wide patch lines use terminal soft wrapping. JSON consumers can recover the original patch exactly. Patch content is excluded from DTO repr and is never written to a file automatically.
+
+Evidence pages default to cursor 0 and limit 20. Limits are 1–20. Sequences must increase but may contain gaps. The next cursor must equal the last returned sequence, or the input cursor for an empty page. A page advertising more data must fill the requested limit and leave room for a greater sequence. Evidence detail validates its attempt identity and check count. Its backend response contains no run ID, so run association is expressed by the requested URL. Empty pages display their actual empty state.
+
+Global `--json` and `--no-color` apply to both groups. Human results use labelled Rich panels in interactive terminals and deterministic escaped lines when piped. Narrow layouts retain complete identifiers and fields. Safe errors use the existing exit categories, with local capability configuration failures using exit 2, transport failures 3, HTTP failures 4 and malformed successful responses 5.
+
+### Offline owner verification
+
+Use the existing editable CLI installation and its virtual environment in `/Users/dev/Desktop/myFirstForge-week4cli` on branch `feat/week4cli-approvals`. Backend, Docker, PostgreSQL, OpenAI and external credentials are unnecessary. The focused tests use HTTPX MockTransport and block real sockets.
+
+Check the branch and working tree.
+
+```sh
+cd /Users/dev/Desktop/myFirstForge-week4cli
+git branch --show-current
+git status --short
+```
+
+Expect the branch above and the scoped CLI changes.
+
+Run the focused checks and one full regression.
+
+```sh
+cli/.venv/bin/python -m pytest -q cli/tests/test_approval_evidence.py
+cli/.venv/bin/python -m pytest -q cli/tests
+```
+
+Measured on this CLI-06A implementation, the focused suite passed 204 tests and the full suite passed 679 tests, with zero failures or skips. Record your own summaries, including any differences. For a failing focused case, use verbose test names with traceback and captured payload output suppressed.
+
+```sh
+cli/.venv/bin/python -m pytest cli/tests/test_approval_evidence.py -v -x --tb=no --show-capture=no
+cli/.venv/bin/python -m pip check
+```
+
+Expect the failing test name and summary when diagnosing a failure. Dependency validation should report `No broken requirements found`. Keep credentials and private patches out of reviewer diagnostics.
+
+Verify both command groups offline and inspect the diff.
+
+```sh
+cli/.venv/bin/forge approval --help
+cli/.venv/bin/forge evidence --help
+git diff --check
+git diff --stat
+```
+
+Expect approval list/get/review and evidence list/get, successful help exits, and an empty whitespace-check result. Tests create no persistent external resources. Normal pytest caches may remain in the worktree. Send the reviewer both pytest summaries, help verification, dependency result, Git status/diff summary, failures/skips and known limitations.
+
+CLI-06B still requires real TCP/PostgreSQL approval and evidence lifecycle evidence, including approve/reject and exact-review integrity during a live pending operation. CLI-06A provides offline read-contract verification.
+
+## CLI-06B decisions and approval acceptance
+
+Approve and reject record a decision on an existing active approval. Both send one POST to `/agent-runs/{run_id}/approvals/{approval_id}/decision` using `FORGE_APPROVAL_REVIEW_TOKEN`. Approve requires an explicitly supplied lowercase fingerprint in `--reviewed-patch-sha256` and `--confirm`. Reject requires `--confirm`. The CLI validates input locally, sends only the decision DTO, and validates the returned IDs, decision and strict JSON `recorded: true`. HTTP 200 confirms that the decision was recorded. Filesystem execution and verification have their own subsequent outcomes.
+
+A transport failure returns exit 3 and describes the decision outcome as unknown. Read the approval state through `forge approval get` before choosing any further action. POST requests are never retried automatically. Missing confirmation, invalid fingerprint or missing review capability return exit 2 without HTTP. Backend failures return exit 4. Invalid successful responses return exit 5. JSON and global no-color behavior also apply to decisions.
+
+### Offline verification
+
+The existing CLI environment is sufficient. Tests provide synthetic tokens and MockTransport, with IP networking blocked. Backend, Docker, PostgreSQL and OpenAI are unnecessary for this part.
+
+Check the existing worktree and baseline.
+
+```sh
+cd /Users/dev/Desktop/myFirstForge-week4cli
+git branch --show-current
+git rev-parse HEAD
+git status --short
+```
+
+Expect `feat/week4cli-approvals`, baseline `09a47be42c6a89ec11d308a0ef203990440b577f`, and the scoped CLI-06B changes.
+
+Run the focused suites and one complete regression.
+
+```sh
+cli/.venv/bin/python -m pytest -q cli/tests/test_approval_decisions.py
+cli/.venv/bin/python -m pytest -q cli/tests/test_demo_approval.py
+cli/.venv/bin/python -m pytest -q cli/tests
+```
+
+Measured offline results are 52 passed for decisions, 22 passed for harness guards and 753 passed for the full CLI suite, with zero failures or skips. Save your measured summaries. The first suite covers the two production commands. The second covers launcher guards, scope restrictions and bounded task observation with external execution blocked.
+
+Check help and the dependency environment.
+
+```sh
+cli/.venv/bin/forge approval approve --help
+cli/.venv/bin/forge approval reject --help
+cli/.venv/bin/python -m pip check
+```
+
+Expect both help commands to exit 0, documented confirmation/fingerprint options, and `No broken requirements found`.
+
+Check the launcher without Docker or credentials, then inspect whitespace and diff.
+
+```sh
+zsh cli/tests/run_approval_e2e.zsh --help
+zsh cli/tests/run_approval_e2e.zsh describe
+git diff --check
+git diff --stat 09a47be
+```
+
+Expect help/configuration only and a clean whitespace check. New untracked test/helper files appear in Git status separately from tracked diff statistics. For failure diagnostics use verbose test names with payload capture and traceback suppressed.
+
+```sh
+cli/.venv/bin/python -m pytest cli/tests/test_approval_decisions.py cli/tests/test_demo_approval.py -v -x --tb=no --show-capture=no
+git status --short
+```
+
+These tests create no database, container or provider resources. Ordinary Python/pytest caches may remain. Send the reviewer the test summaries, failures/skips, help results, dependency result and Git status/diff. Include the integration execution status.
+
+### Real TCP acceptance after owner review
+
+Execution of this new integration harness is pending. The owner must first review it and explicitly authorize the fixture writes. Use the same worktree and installed CLI, Docker Desktop, the existing backend virtual environment at `/Users/dev/Desktop/forge/backend/.venv/bin/python`, a free loopback port 58066, and exclusive use of the existing disposable PostgreSQL container `forge-week4-step06-4d6f653603`. It must publish port 50088, identify its DB as `forge_task06_week4_audit_4d6f653603`, run PostgreSQL 17.11, and have Alembic revision `1d972cc34fbe`. Business tables must be empty. The wrapper reads the container's existing credentials in memory. It requires its POSTGRES_DB, POSTGRES_USER and POSTGRES_PASSWORD configuration. Credentials never need to be copied or saved by the owner.
+
+The wrapper performs Docker and read-only database identity checks. The harness repeats database identity checks, acquires the same advisory lock as the CLI-05 demo and checks empty business tables. It binds the loopback socket before creating fixture records. The launcher removes provider/tracing credentials and disables tracing. Each Forge process receives only terminal/locale settings and synthetic read/review capabilities. All model requests use HTTPX MockTransport and a closed synchronous transport.
+
+After review, check the actual Docker/DB environment and review the fixed budget.
+
+```sh
+zsh cli/tests/run_approval_e2e.zsh check
+zsh cli/tests/run_approval_e2e.zsh describe
+```
+
+Expect `environment: ready`, the exact database/container names, a 240-second scenario budget, 45-second approval phases, at most four offline model requests per run, 16 KiB request bodies and 512 completion tokens per request. The automatic scenario uses at most ten simulated requests across its four runs. Preflight operations are individually bounded, server shutdown waits at most eight seconds, and cleanup uses bounded database transactions. No migration, database creation or automatic rerun occurs.
+
+Run the automatic acceptance with one invocation.
+
+```sh
+zsh cli/tests/run_approval_e2e.zsh tcp --approve-db forge_task06_week4_audit_4d6f653603 --confirm-fixture-write
+```
+
+The automatic scenario uses the real backend approval gate and offline LangGraph. Approve must observe committed waiting_approval, unchanged bytes before the decision, discovery, structural preview and exact review. A stale fingerprint must return 409 and leave the approval pending. Explicit approval must record once, resume the same execution, and perform exactly one scoped replacement. The trusted harness then invokes the existing VerificationService independently and reads persisted PASS evidence and the succeeded result through the CLI. Reject and cancel use separate runs, workspaces and temporary fixtures. Both must leave bytes unchanged and record one rejected approval. Reject must produce failed/graph_execution_failed with an approval_rejected tool audit. Cancel must produce cancelled with a cancelled tool audit. Repeated decisions must conflict. Missing/wrong capabilities and foreign workspace/run/approval identities are checked through actual HTTP or local input rejection as appropriate.
+
+The lost-response fixture records a real rejection and holds the successful HTTP response behind an event until the CLI times out. The CLI must exit 3, send exactly one POST and reconcile by reading the persisted rejected state. Its report must have `ambiguous_post_no_retry: true`.
+
+PASS requires exit 0, `outcome: "PASS"`, `cleanup: "completed"` and these actual scenario results in the final JSON report.
+
+| Path | Run status | Decision | Recorded events | Replacements | Offline model requests | Verification |
+|---|---|---|---|---|---|---|
+| approve | succeeded | approved | 1 | 1 | 4 | pass |
+| reject | failed | rejected | 1 | 0 | 2 | null |
+| cancel | cancelled | rejected | 1 | 0 | 2 | null |
+| lost-response | failed | rejected | 1 | 0 | 2 | null |
+
+Each scenario must additionally report `execution_cleanup: "observed"` and `outside_scope_unchanged: true`. Approve must have `evidence_checked: true`. The report includes actual CLI exits and HTTP statuses, plus a generated safe fixture identifier. Any unmet assertion, nonzero exit, FAILED outcome or unconfirmed cleanup fails acceptance.
+
+### Interactive acceptance in two terminals
+
+After successful automatic cleanup, start this single command in Terminal 1.
+
+```sh
+zsh cli/tests/run_approval_e2e.zsh interactive --approve-db forge_task06_week4_audit_4d6f653603 --confirm-fixture-write
+```
+
+Wait for READY. Terminal 1 prints complete commands with actual run/approval IDs and fingerprint. Copy them one at a time into Terminal 2. Read the list, structural preview and exact patch first. The printed approve command is explicitly labelled as authorization to change the temporary synthetic sample.txt. Complete the decision within 35 seconds of READY to leave time within the gate's 45-second deadline. Then wait for the launcher to print the evidence list/get and run result commands after independent verification. Inspect them in Terminal 2, including no-color, JSON and a narrowed window as desired. Global flags go after the helper's `--` and before the Forge command.
+
+Press Return in Terminal 1 to begin the independent reject fixture. At its READY, copy the new review and reject commands. Inspect the final rejected result, then press Return in Terminal 1 to shut down and clean up. Ctrl-C in Terminal 1 also invokes bounded shutdown and fixture cleanup. Missing an interactive phase deadline ends the session with failure and cleanup reporting.
+
+The helper retrieves synthetic capabilities through a Unix-domain socket inside a private 0700 temporary directory. Tokens travel in memory through local IPC and the Forge child environment. The printed socket path contains no credential. No token or patch file is created. Interactive middleware permits only the current fixture's displayed routes. Closing each phase closes the capability channel.
+
+An interactive session that completes its assertions reports `outcome: "SESSION_ENDED"`, `manual_verification: "owner_pending"` and `cleanup: "completed"`. Save the actual visual observations separately. The automatic checks and the terminal session both require confirmed backend task completion and cleanup. Only current fixture records are deleted, followed by a fresh empty-table check. The temporary repository and local socket are removed when the launcher exits.
+
+If execution fails, save its safe failure code, fixture identifier and cleanup status. Use the read-only wrapper check above for environment diagnostics. If cleanup is unconfirmed, stop further acceptance runs and review that specific fixture's remaining resources with the owner. Never drop/recreate the database or use a broad deletion command. Send the reviewer the final JSON reports, terminal observations, Git SHA/status, offline summaries and any limitations. Until the owner runs and reviews these scenarios, real CLI-06 integration acceptance remains pending.

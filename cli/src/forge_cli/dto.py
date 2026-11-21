@@ -1,6 +1,7 @@
 """Wire models for public Forge endpoints."""
 
 from datetime import datetime
+from hashlib import sha256
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
@@ -228,3 +229,137 @@ class ErrorData(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorData
+
+
+class _CapabilityResponse(_ReadResponse):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+
+class PendingApprovalResponse(_CapabilityResponse):
+    id: UUID
+    run_id: UUID
+    tool_name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+    status: Literal["pending"]
+    requested_at: WireDatetime
+
+
+class PendingApprovalListResponse(_CapabilityResponse):
+    items: Annotated[list[PendingApprovalResponse], Field(max_length=32)]
+
+
+class ApprovalPreviewFile(_CapabilityResponse):
+    path: str
+    added_lines: Annotated[int, Field(ge=0, le=1000)]
+    removed_lines: Annotated[int, Field(ge=0, le=1000)]
+    hunk_count: Annotated[int, Field(ge=1, le=32)]
+
+
+class _ApprovalPreview(_CapabilityResponse):
+    content_included: bool
+
+    @field_validator("content_included")
+    @classmethod
+    def exclude_content(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("Preview must exclude content.")
+        return value
+
+
+class LiveApprovalPreview(_ApprovalPreview):
+    state: Literal["live_at_read"]
+    files: Annotated[tuple[ApprovalPreviewFile, ...], Field(min_length=1, max_length=4)]
+
+
+class UnavailableApprovalPreview(_ApprovalPreview):
+    state: Literal["unavailable"]
+    files: tuple[()]
+
+
+class ApprovalDetailResponse(_CapabilityResponse):
+    id: UUID
+    run_id: UUID
+    tool_name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+    status: Literal["pending", "approved", "rejected"]
+    requested_at: WireDatetime
+    decided_at: WireDatetime | None
+    preview: Annotated[LiveApprovalPreview | UnavailableApprovalPreview, Field(discriminator="state")]
+
+    @model_validator(mode="after")
+    def check_decision(self) -> Self:
+        if (self.status == "pending") != (self.decided_at is None):
+            raise ValueError("Invalid approval decision state.")
+        return self
+
+
+class ApprovalPatchReview(_CapabilityResponse):
+    approval_id: UUID
+    run_id: UUID
+    patch_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    patch: Annotated[str, Field(min_length=1, max_length=65536, repr=False)]
+
+    @model_validator(mode="after")
+    def check_patch(self) -> Self:
+        try:
+            encoded = self.patch.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("Invalid patch encoding.") from None
+        if len(encoded) > 65536 or sha256(b"forge:apply_patch:v1\0" + encoded).hexdigest() != self.patch_sha256:
+            raise ValueError("Invalid patch integrity.")
+        return self
+
+
+class EvidenceAttemptSummary(_CapabilityResponse):
+    attempt_id: UUID
+    sequence: Annotated[int, Field(ge=1, le=MAX_EVENT_SEQUENCE)]
+    verdict: VerificationVerdict
+    file_verdict: VerificationVerdict
+    audit_complete: bool
+    isolated_fixture: bool
+    check_count: Annotated[int, Field(ge=1, le=32)]
+
+
+class EvidenceListResponse(_CapabilityResponse):
+    run_id: UUID
+    items: Annotated[list[EvidenceAttemptSummary], Field(max_length=20)]
+    next_after_sequence: Annotated[int, Field(ge=0, le=MAX_EVENT_SEQUENCE)]
+    has_more: bool
+
+
+class EvidenceCheckResponse(_CapabilityResponse):
+    check_id: UUID
+    criterion_index: Annotated[int, Field(ge=0, le=9)]
+    path: Annotated[str, Field(repr=False)]
+    outcome: Literal["match", "mismatch", "read_error", "unknown_effect", "ambiguous", "missing"]
+
+
+class EvidenceAttemptDetail(EvidenceAttemptSummary):
+    checks: Annotated[list[EvidenceCheckResponse], Field(min_length=1, max_length=32)]
+
+    @model_validator(mode="after")
+    def check_length(self) -> Self:
+        if self.check_count != len(self.checks):
+            raise ValueError("Evidence check count mismatch.")
+        return self
+
+
+class ApproveApprovalRequest(_CapabilityResponse):
+    decision: Literal["approve"] = "approve"
+    reviewed_patch_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", repr=False)]
+
+
+class RejectApprovalRequest(_CapabilityResponse):
+    decision: Literal["reject"] = "reject"
+
+
+class ApprovalDecisionResponse(_CapabilityResponse):
+    approval_id: UUID
+    run_id: UUID
+    decision: Literal["approved", "rejected"]
+    recorded: Literal[True]
+
+    @field_validator("recorded", mode="before")
+    @classmethod
+    def require_recorded(cls, value: object) -> Literal[True]:
+        if value is not True:
+            raise ValueError("Expected the JSON boolean true.")
+        return True

@@ -2,6 +2,7 @@
 
 import os
 import re
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -35,3 +36,25 @@ def resolve_base_url(cli_value: str | None = None) -> str:
         raise ValueError(error)
 
     return value
+
+
+class CapabilityConfigurationError(ValueError):
+    """Safe local capability configuration failure."""
+
+
+def capability_headers(base_url: str, *, review: bool = False) -> dict[str, str]:
+    url = urlsplit(base_url)
+    host = url.hostname
+    loopback = host == "localhost"
+    try:
+        address = ip_address(host)
+        loopback = loopback or (address.version == 4 and address.is_loopback) or str(address) == "::1"
+    except ValueError:
+        pass
+    if url.scheme != "https" and not (url.scheme == "http" and loopback):
+        raise CapabilityConfigurationError("Capability requests require HTTPS or an HTTP loopback destination.")
+    variable = "FORGE_APPROVAL_REVIEW_TOKEN" if review else "FORGE_APPROVAL_READ_TOKEN"
+    token = os.getenv(variable, "")
+    if not 32 <= len(token) <= 512 or re.fullmatch(r"[A-Za-z0-9._~+/\-]+=*", token) is None:
+        raise CapabilityConfigurationError(f"Missing or invalid {variable}.")
+    return {"Authorization": f"Bearer {token}"}

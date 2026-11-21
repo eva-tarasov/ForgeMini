@@ -8,8 +8,16 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from forge_cli.config import resolve_base_url
+from forge_cli.config import capability_headers, resolve_base_url
 from forge_cli.dto import (
+    ApprovalDetailResponse,
+    ApprovalDecisionResponse,
+    ApproveApprovalRequest,
+    RejectApprovalRequest,
+    ApprovalPatchReview,
+    EvidenceAttemptDetail,
+    EvidenceListResponse,
+    PendingApprovalListResponse,
     MAX_EVENT_PAGE_SIZE,
     MAX_EVENT_SEQUENCE,
     AgentRunEventsResponse,
@@ -188,6 +196,105 @@ class ForgeAPIClient:
             TypeAdapter(AgentRunResultResponse),
             path=f"/agent-runs/{run_id}/result",
             response_matches=lambda result: result.run_id == run_id,
+        )
+
+    def list_approvals(self, run_id: UUID) -> PendingApprovalListResponse:
+        return self._capability_get(
+            run_id, "approvals", PendingApprovalListResponse,
+            response_matches=lambda page: all(item.run_id == run_id for item in page.items),
+        )
+
+    def get_approval(self, run_id: UUID, approval_id: UUID) -> ApprovalDetailResponse:
+        if not isinstance(approval_id, UUID):
+            raise TypeError("approval_id must be a UUID.")
+        return self._capability_get(
+            run_id, f"approvals/{approval_id}", ApprovalDetailResponse,
+            endpoint_suffix="approvals/{approval_id}",
+            response_matches=lambda detail: detail.run_id == run_id and detail.id == approval_id,
+        )
+
+    def get_approval_review(self, run_id: UUID, approval_id: UUID) -> ApprovalPatchReview:
+        if not isinstance(approval_id, UUID):
+            raise TypeError("approval_id must be a UUID.")
+        return self._capability_get(
+            run_id, f"approvals/{approval_id}/review", ApprovalPatchReview,
+            endpoint_suffix="approvals/{approval_id}/review", review=True,
+            response_matches=lambda detail: detail.run_id == run_id and detail.approval_id == approval_id,
+        )
+
+    def list_evidence(
+        self, run_id: UUID, *, after_sequence: int = 0, limit: int = 20,
+    ) -> EvidenceListResponse:
+        if type(after_sequence) is not int or not 0 <= after_sequence <= MAX_EVENT_SEQUENCE:
+            raise ValueError("Invalid evidence cursor.")
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("Invalid evidence page limit.")
+
+        def page_matches(page: EvidenceListResponse) -> bool:
+            if page.run_id != run_id or len(page.items) > limit:
+                return False
+            if page.has_more and (len(page.items) != limit or page.next_after_sequence == MAX_EVENT_SEQUENCE):
+                return False
+            previous = after_sequence
+            for item in page.items:
+                if item.sequence <= previous:
+                    return False
+                previous = item.sequence
+            return page.next_after_sequence == previous
+
+        return self._capability_get(
+            run_id, "evidence", EvidenceListResponse,
+            params={"after_sequence": after_sequence, "limit": limit}, response_matches=page_matches,
+        )
+
+    def get_evidence(self, run_id: UUID, attempt_id: UUID) -> EvidenceAttemptDetail:
+        if not isinstance(attempt_id, UUID):
+            raise TypeError("attempt_id must be a UUID.")
+        return self._capability_get(
+            run_id, f"evidence/{attempt_id}", EvidenceAttemptDetail,
+            endpoint_suffix="evidence/{attempt_id}",
+            response_matches=lambda detail: detail.attempt_id == attempt_id,
+        )
+
+    def approve_approval(
+        self, run_id: UUID, approval_id: UUID, reviewed_patch_sha256: str,
+    ) -> ApprovalDecisionResponse:
+        payload = ApproveApprovalRequest(reviewed_patch_sha256=reviewed_patch_sha256)
+        return self._approval_decision(run_id, approval_id, payload, "approved")
+
+    def reject_approval(self, run_id: UUID, approval_id: UUID) -> ApprovalDecisionResponse:
+        return self._approval_decision(run_id, approval_id, RejectApprovalRequest(), "rejected")
+
+    def _approval_decision(
+        self, run_id: UUID, approval_id: UUID,
+        payload: ApproveApprovalRequest | RejectApprovalRequest, expected_decision: str,
+    ) -> ApprovalDecisionResponse:
+        if not isinstance(run_id, UUID) or not isinstance(approval_id, UUID):
+            raise TypeError("run_id and approval_id must be UUIDs.")
+        headers = capability_headers(str(self._client.base_url), review=True)
+        return self._request(
+            "POST", "/agent-runs/{run_id}/approvals/{approval_id}/decision", 200,
+            TypeAdapter(ApprovalDecisionResponse),
+            path=f"/agent-runs/{run_id}/approvals/{approval_id}/decision", payload=payload, headers=headers,
+            response_matches=lambda result: (
+                result.run_id == run_id and result.approval_id == approval_id
+                and result.decision == expected_decision
+            ),
+        )
+
+    def _capability_get(
+        self, run_id: UUID, suffix: str, model: type[T], *,
+        endpoint_suffix: str | None = None, review: bool = False,
+        params: dict[str, int] | None = None,
+        response_matches: Callable[[T], bool],
+    ) -> T:
+        if not isinstance(run_id, UUID):
+            raise TypeError("run_id must be a UUID.")
+        headers = capability_headers(str(self._client.base_url), review=review)
+        return self._request(
+            "GET", "/agent-runs/{run_id}/" + (endpoint_suffix or suffix), 200, TypeAdapter(model),
+            path=f"/agent-runs/{run_id}/{suffix}", headers=headers, params=params,
+            response_matches=response_matches,
         )
 
     def _request(
