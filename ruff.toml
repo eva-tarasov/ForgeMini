@@ -1,0 +1,13 @@
+# Lint = only things that are real bugs (syntax errors, undefined names, unused imports).
+# Style rules are intentionally off: the codebase predates the linter.
+target-version = "py311"
+extend-exclude = ["backend/alembic/versions"]
+
+[lint]
+select = ["E9", "F"]
+
+[lint.per-file-ignores]
+# Tests import pytest fixtures from sibling test modules (`from test_x import database`).
+# Ruff reads that as "unused import" + "redefinition"; it is how pytest fixtures are shared here.
+"backend/tests/*" = ["F401", "F811"]
+"cli/tests/*" = ["F401", "F811"]
