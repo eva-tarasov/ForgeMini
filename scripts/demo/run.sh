@@ -62,10 +62,18 @@ if ! forge health >/dev/null 2>&1; then
   exit 3
 fi
 
-WORK="${DEMO_DIR:-${TMPDIR:-/tmp}/forgemini-demo-$(date -u +%Y%m%dT%H%M%S)}"
+# /tmp, not $TMPDIR: on macOS $TMPDIR is /var/folders/xx/…/T/, and that path filled whole lines of the live demo.
+WORK="${DEMO_DIR:-/tmp/forgemini-demo-$(date -u +%Y%m%dT%H%M%S)}"
 REPO="$WORK/forge-demo-shop"
 mkdir -p "$WORK"
-tests_here() { (cd "$REPO" && python3 -m unittest ${CLASS:+tests.test_regressions.$CLASS} 2>&1 | tail -"${1:-14}") || true; }
+# The verdict of the project's own tests, not a raw tail: which tests failed, why, and the totals. (A tail cut the
+# live demo at one FAIL block while the summary below it said failures=2.)
+tests_here() {
+  (cd "$REPO" && python3 -m unittest ${CLASS:+tests.test_regressions.$CLASS} 2>&1 \
+     | grep -E '^(FAIL|ERROR): |^[A-Za-z]+Error: |^Ran [0-9]+ test|^(OK|FAILED)' \
+     | sed -E 's/^(FAIL|ERROR): ([a-z0-9_]+) .*/\1: \2/') || true
+}
+[[ -t 1 && "$MODE" != fast ]] && clear      # start the story on a clean screen
 
 # ── 1. someone else's repository ───────────────────────────────────────────────────────────────────────────────
 scene "1/5" "Somebody else's repository"
@@ -89,7 +97,7 @@ scene "2/5" "A bug report arrives"
 echo "${B}$GOAL${R}"
 echo
 show "python3 -m unittest ${CLASS:+tests.test_regressions.$CLASS}"
-tests_here 14
+tests_here
 say "Red. That is the bug, reproduced by the project's own tests."
 pause
 
@@ -99,15 +107,18 @@ say "The agent works inside a Docker container WITHOUT network. It cannot touch 
 show "forge solve --repo forge-demo-shop --test \"$TEST\" --goal \"…\" --apply"
 echo
 set +e
-forge solve --repo "$REPO" --goal "$GOAL" --test "$TEST" --apply
+(cd "$WORK" && forge solve --repo forge-demo-shop --goal "$GOAL" --test "$TEST" --apply)   # exactly the command shown
 SOLVE_RC=$?
 set -e
 pause
 
 # ── 4. the result ──────────────────────────────────────────────────────────────────────────────────────────────
 scene "4/5" "What changed in the repository"
-show "git diff"
-(cd "$REPO" && git --no-pager diff --stat && echo && git --no-pager diff --color="$([[ -t 1 ]] && echo always || echo never)")
+say "The patch itself was shown above; here is what --apply did to the checkout."
+show "git status --short"
+(cd "$REPO" && git status --short)
+show "git diff --stat"
+(cd "$REPO" && git --no-pager diff --stat)
 show "git status --short tests/"
 (cd "$REPO" && git status --short tests/)
 say "(nothing listed: the agent did not touch a single test)"
@@ -116,10 +127,10 @@ pause
 # ── 5. green ───────────────────────────────────────────────────────────────────────────────────────────────────
 scene "5/5" "Green"
 show "python3 -m unittest ${CLASS:+tests.test_regressions.$CLASS}"
-tests_here 6
+tests_here
 echo
 if [[ $SOLVE_RC -eq 0 ]]; then
-  echo "${B}Done.${R} Bug found, fixed and independently verified; the diff above is the only change."
+  echo "${B}Done.${R} Bug found, fixed and independently verified; the patch from step 3 is the only change."
 else
   echo "${B}Forge did not verify a fix (exit $SOLVE_RC).${R} That is a legitimate outcome: nothing was applied. See the explanation above."
 fi

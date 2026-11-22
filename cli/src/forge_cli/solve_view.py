@@ -48,14 +48,25 @@ def colorize_diff(diff: str, *, max_lines: int = MAX_DIFF_LINES) -> Text:
     return out
 
 
+
+def runs_test_command(target: str, test: str) -> bool:
+    """True when the step's exit code is the task's test command's exit code: the command IS the test command, or
+    ends with it after `;` / `&&` (`ls; <test>`). Anything else (`<test> || true`, pipes) keeps the raw exit code."""
+    command = " ".join(target.split())
+    if not test or not command:
+        return False
+    return command == test or any(command.endswith(sep + test) for sep in ("; ", ";", "&& "))
+
 class SolveView:
     def __init__(self, console: Console) -> None:
         self.console = console
         self._t0 = time.monotonic()
         self._announced_verifying = False
+        self._test = ""                                 # the task's test command, set by banner()
 
     # -- before the run -------------------------------------------------------------------------
     def banner(self, *, repo_label: str, commit: str | None, goal: str, test: str) -> None:
+        self._test = " ".join(test.split())
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column()
@@ -88,7 +99,7 @@ class SolveView:
         if d.step == "tool_result" and d.tool == "finish":
             return                                      # the "agent claims…" line below says it better
         if d.step == "tool_result" and d.tool:
-            self.console.print(self._tool_row(d))
+            self.console.print(self._tool_row(d, self._test))
         elif d.step == "model_response" and d.tools is not None and not d.tools:
             self.console.print(Text("  … the model answered without calling a tool", style="dim"))
         elif d.step == "model_response" and d.tools is None:
@@ -100,9 +111,10 @@ class SolveView:
             self.console.print(_t("  ! " + d.summary, 220, "yellow"))
 
     @staticmethod
-    def _tool_row(d) -> Text:
+    def _tool_row(d, test: str = "") -> Text:
         row = Text("  ")
         if d.tool == "bash":
+            runs_tests = runs_test_command(d.target or "", test)
             if not d.ok:
                 row.append("✗ ", style="red")
             elif d.exit_code == 0:
@@ -111,7 +123,12 @@ class SolveView:
                 row.append("● ", style="yellow")
             row.append("$ ", style="bold")
             row.append(sanitize(d.target or "", 90).replace("\n", " ⏎ "))
-            if d.exit_code is not None:
+            if d.exit_code is not None and runs_tests:
+                # Red tests are the NORMAL first step (the agent reproduces the bug); a red "exit 1" read as an
+                # agent error in the live demo. This is the agent's own run, not the verdict: that comes later.
+                row.append("   tests pass" if d.exit_code == 0 else f"   tests fail (exit {d.exit_code})",
+                           style="green" if d.exit_code == 0 else "yellow")
+            elif d.exit_code is not None:
                 row.append(f"   exit {d.exit_code}", style="green" if d.exit_code == 0 else "red")
         elif d.tool == "read_file":
             row.append("◦ read  ", style="blue")
@@ -181,6 +198,8 @@ class SolveView:
                 head.append(f" · {u.input_tokens:,} in / {u.output_tokens:,} out tokens", style="dim")
             if u.cost_status in ("estimated", "incomplete") and u.known_cost_usd is not None:
                 head.append(f" · {cost_text(u)}", style="dim")
+            elif u.cost_status == "not_priced":       # say it, so a missing $ is not a silent mystery on stage
+                head.append(" · cost not configured", style="dim")
         head.append(f" · {took:.0f}s", style="dim")
         lines: list = [head]
         if report.has_patch:

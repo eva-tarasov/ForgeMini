@@ -331,6 +331,21 @@ def solve(
         raise typer.Exit(exit_code)
 
 
+def display_path(path: Path) -> str:
+    """Relative to the current directory when inside it, else with ~ for home: an absolute temp path
+    (/private/var/folders/…) wrapped over three lines in the live demo."""
+    cwd = Path.cwd()
+    if cwd != Path(cwd.anchor):                   # from "/" every path is "inside": /tmp/x would print as tmp/x
+        try:
+            return str(path.relative_to(cwd)) or "."
+        except ValueError:
+            pass
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 def _apply_verified_patch(result, repo_path: Path, view: SolveView | None, options: CommandOptions) -> int:
     """Only a verified result is ever applied. Returns an exit code (0 = applied)."""
     if result.patch is None:
@@ -341,7 +356,8 @@ def _apply_verified_patch(result, repo_path: Path, view: SolveView | None, optio
         except ApplyError as exc:
             typer.echo(f"Not applied: {sanitize(str(exc), 600)}", err=True)
             return EXIT_APPLY_FAILED
-        message = f"applied to {repo_path}  (review: git -C {repo_path} diff)"
+        shown = display_path(repo_path)
+        message = f"applied to {shown}  (review: git -C {shown} diff)"
     if view is not None:
         view.note(message)
     else:

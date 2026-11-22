@@ -460,3 +460,58 @@ def test_cost_line_never_shows_unknown_as_zero(cost, status, expected):
 def test_report_from_an_older_server_without_cost_fields_still_parses():
     usage = UsageView.model_validate({"steps": 1, "tool_calls": 1, "input_tokens": 1, "output_tokens": 1})
     assert (usage.known_cost_usd, usage.cost_status, cost_text(usage)) == (None, "not_recorded", "")
+
+
+# --- live-demo polish (F′): labels and paths a non-engineer can read ---------------------------------------------
+from forge_cli.commands import display_path  # noqa: E402
+from forge_cli.solve_view import SolveView, runs_test_command  # noqa: E402
+
+TEST_CMD = "python -m unittest tests.test_regressions.Issue1FreeShippingAtThreshold"
+
+
+@pytest.mark.parametrize("command,expected", [
+    (TEST_CMD, True),
+    (f"ls -la; {TEST_CMD}", True),                      # what the live agent actually ran first
+    (f"pip list && {TEST_CMD}", True),
+    (f"{TEST_CMD} || true", False),                     # exit code is no longer the tests' verdict
+    (f"{TEST_CMD} | tail -5", False),                   # pipe: the exit code is tail's
+    ("python -m unittest", False),                      # a different (broader) test command
+    ("", False),
+])
+def test_only_steps_whose_exit_code_is_the_test_commands_get_a_tests_label(command, expected):
+    assert runs_test_command(command, TEST_CMD) is expected
+
+
+@pytest.mark.parametrize("exit_code,label", [(1, "tests fail (exit 1)"), (0, "tests pass")])
+def test_the_agents_own_test_run_is_labelled_not_shown_as_a_bare_red_exit(exit_code, label):
+    step = SimpleNamespace(tool="bash", ok=True, exit_code=exit_code, target=f"ls -la; {TEST_CMD}")
+    text = SolveView._tool_row(step, TEST_CMD).plain
+    assert label in text and f"exit {exit_code}" not in text.replace(label, "")
+    other = SolveView._tool_row(SimpleNamespace(tool="bash", ok=True, exit_code=2, target="grep x y"), TEST_CMD).plain
+    assert other.endswith("exit 2") and "tests" not in other
+
+
+def test_applied_path_is_shown_relative_or_home_shortened(tmp_path, monkeypatch):
+    repo = tmp_path / "forge-demo-shop"
+    repo.mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert display_path(repo) == "forge-demo-shop"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir("/")
+    assert display_path(repo) == "~/forge-demo-shop"
+    assert display_path(__import__("pathlib").Path("/opt/x")) == "/opt/x"
+
+
+@pytest.mark.parametrize("cost,status,shown", [
+    ("0.021300", "estimated", "≈ $0.0213"),
+    (None, "not_priced", "cost not configured"),
+    (None, "not_recorded", None),
+])
+def test_verified_panel_shows_the_cost_or_says_why_not(cost, status, shown):
+    from rich.console import Console
+    report = SimpleNamespace(usage=_usage(cost, status), has_patch=False, run_status="succeeded")
+    console = Console(record=True, width=160, color_system=None)
+    console.print(SolveView(console)._result_panel(report, RUN, True))
+    text = console.export_text()
+    assert "VERIFIED" in text
+    assert (shown in text) if shown else ("cost" not in text.lower() and "$" not in text)
