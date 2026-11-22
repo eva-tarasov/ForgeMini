@@ -1,6 +1,6 @@
 # ForgeMini — прогресс
 
-Формат: коротко. Подробности и «почему» — в описаниях PR. Старая история M1 — `docs/archive/forge_progress.md`.
+Формат: коротко. Подробности и «почему» — в описаниях PR. Старая история M1 — в git по тегу `forge-m1-baseline` (`git show forge-m1-baseline:forge_progress.md`, учебные гайды — `git show forge-m1-baseline:docs/LEARNING_GUIDE.md`).
 
 ## Цель прототипа (v0.1-prototype, ~3 дня)
 `forge solve --repo <path> --goal "<что исправить>" --test "<команда тестов>"` (не `forge run`: группа `run` уже занята create/start/watch) →
