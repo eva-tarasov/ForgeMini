@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.sandbox.changeset import Changeset, Snapshot
-from app.services.verification_contract import VerificationVerdict
+from app.domain.verification import VerificationVerdict
 
 SCHEMA_VERSION = 1
 SANDBOX_VERIFICATION_RECORDED = "sandbox_verification_recorded"

@@ -17,9 +17,9 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from app.sandbox.agent_loop import ChatModel, EventSink, LoopBudget, LoopOutcome, run_agent_loop
 from app.sandbox.artifacts import FileArtifactStore
-from app.agent_runtime.error_classification import classify_runtime_error
 from app.sandbox.changeset import Snapshot, SnapshotError
 from app.sandbox.docker_sandbox import DockerSandbox, SandboxError, SandboxLimits
+from app.sandbox.provider_errors import classify_provider_error
 from app.sandbox.tools import TOOL_SCHEMAS
 from app.services.agent_failure import AgentFailureCode
 from app.services.agent_result import AgentFinalResult
@@ -72,7 +72,7 @@ class SandboxRunner:
             raise AgentRunnerError(AgentFailureCode.SANDBOX_ERROR.value) from exc
         except Exception as exc:   # model/provider errors: classify (auth, rate limit, timeout...), keep the detail
             await _report(emit, f"{type(exc).__name__}: {str(exc)[:300]}")
-            raise AgentRunnerError(classify_runtime_error(exc).value) from exc
+            raise AgentRunnerError(classify_provider_error(exc).value) from exc
         changeset = base.changes_to(final)
         self._artifacts.save(request.run_id, base=base, changeset=changeset, outcome=outcome)
         return self._to_result(outcome, changeset.paths, changeset.is_empty, changeset.sha256())

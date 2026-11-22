@@ -31,8 +31,8 @@ from app.sandbox.verification import (
 from app.services.agent_result_codec import AgentResultContractError, decode_agent_result
 from app.services.agent_runs import AgentRunNotFoundError, StaleAgentRunStatusError
 from app.services.task_sync import sync_task_to_run
-from app.services.verification_contract import VerificationVerdict
-from app.services.verification_evidence import metadata_digest
+from app.core.digest import metadata_digest
+from app.domain.verification import VerificationVerdict
 
 logger = logging.getLogger("forge.sandbox.verifier")
 SessionFactory = Callable[[], AsyncSession]

@@ -3,9 +3,9 @@
 import json
 import re
 from dataclasses import dataclass, field
-from hashlib import sha256
 from uuid import UUID
 
+from app.core.digest import metadata_digest  # noqa: F401  (re-export: M1 modules import it from here)
 from app.services.verification_contract import (
     FileDigestCheck,
     FileDigestObservation,
@@ -21,11 +21,6 @@ from app.services.verification_contract import (
 
 VERIFICATION_RECORDED = "verification_recorded"
 MAX_EVIDENCE_BYTES = 32 * 1024
-
-
-def metadata_digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
-    return sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

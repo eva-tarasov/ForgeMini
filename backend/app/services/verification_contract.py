@@ -7,6 +7,7 @@ from enum import StrEnum
 from hashlib import sha256
 from uuid import UUID
 
+from app.domain.verification import VerificationVerdict  # noqa: F401  (re-export: M1 modules import it from here)
 from app.permissions.paths import has_protected_component, parse_logical_path
 from app.tools.repository.baseline import MAX_REVISION_BYTES
 from app.tools.repository.filesystem import MAX_PATH_DEPTH
@@ -23,12 +24,6 @@ _REVISION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 class VerificationContractError(ValueError):
     """Стабильный код ошибки контракта без входных данных."""
-
-
-class VerificationVerdict(StrEnum):
-    PASS = "pass"
-    FAIL = "fail"
-    INCONCLUSIVE = "inconclusive"
 
 
 class ObservationIssue(StrEnum):

@@ -84,3 +84,34 @@ def test_imported_only_by_main_is_live_not_dead(ig):
     assert not {"app.services.coordinator", "app.tools.executor", "app.services.verifier"} & set(r["dead_in_prod"])
     # dead in production but still imported by a test: deleting the module would orphan that test
     assert r["held_by_tests"]["app.agent_runtime.orphan_demo"] == ["test_m1.py"]
+
+
+# ADR-003 ratchet on the REAL repository: kernel -> M1 imports that still exist. The list only shrinks: every cleanup
+# step deletes lines here (C2 cut 6 of the original 20; C3 removes the rest). A NEW kernel -> M1 import, or a swapped
+# one, fails this test: that is the point (a count would let one edge be traded for another).
+REMAINING_BOUNDARY = {
+    ("app.main", "app.api.approvals"),
+    ("app.main", "app.api.evidence"),
+    ("app.main", "app.services.local_approval_access"),
+    ("app.services.agent_run_reads", "app.services.approval_contracts"),
+    ("app.services.agent_run_reads", "app.services.tool_call_audit"),
+    ("app.services.agent_run_reads", "app.services.tool_calls"),
+    ("app.services.agent_run_reads", "app.services.verification_evidence"),
+    ("app.services.agent_runner", "app.services.approval_outcome"),
+    ("app.services.agent_runs", "app.services.approval_outcome"),
+    ("app.services.agent_runs", "app.services.tool_call_audit"),
+    ("app.services.agent_service", "app.services.approval_outcome"),
+    ("app.services.in_process_run_coordinator", "app.schemas.approval"),
+    ("app.services.in_process_run_coordinator", "app.services.approval_contracts"),
+    ("app.services.in_process_run_coordinator", "app.services.approval_preview"),
+}
+
+
+def test_kernel_to_m1_boundary_never_grows():
+    spec = importlib.util.spec_from_file_location("import_graph_real", SCRIPT)
+    real = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(real)
+    boundary = set(real.analyse()["boundary"])
+    assert boundary <= REMAINING_BOUNDARY, f"new kernel -> M1 imports: {sorted(boundary - REMAINING_BOUNDARY)}"
+    assert not (REMAINING_BOUNDARY - boundary), (
+        f"cut done, delete from REMAINING_BOUNDARY: {sorted(REMAINING_BOUNDARY - boundary)}")
