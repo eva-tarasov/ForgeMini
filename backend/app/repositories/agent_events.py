@@ -28,7 +28,7 @@ class AgentEventRepository:
         return list((await self.session.scalars(statement)).all())
 
     async def read_result_snapshot(
-        self, run_id: UUID, *, event_types: tuple[str, ...], limit: int, workspace_id: UUID | None = None,
+        self, run_id: UUID, *, event_types: tuple[str, ...], limit: int,
     ) -> tuple[AgentRunModel, UUID, list] | None:
         """Read the run and bounded ordered history from a single statement snapshot."""
         relevant_events = (
@@ -51,8 +51,6 @@ class AgentEventRepository:
             .join(TaskModel, TaskModel.id == AgentRunModel.task_id)
             .where(AgentRunModel.id == run_id)
         )
-        if workspace_id is not None:
-            statement = statement.where(TaskModel.workspace_id == workspace_id)
         row = (await self.session.execute(statement)).one_or_none()
         if row is None:
             return None

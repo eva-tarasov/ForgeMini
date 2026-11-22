@@ -18,10 +18,10 @@ def offline(monkeypatch):
 
 
 def test_cli_environment_drops_configuration_and_secrets(monkeypatch):
-    for key in ('PYTHONPATH', 'VIRTUAL_ENV', 'FORGE_BASE_URL', 'FORGE_APPROVAL_READ_TOKEN',
+    for key in ('PYTHONPATH', 'VIRTUAL_ENV', 'FORGE_BASE_URL', 'FORGE_SYNTHETIC_TOKEN',
                 'OPENAI_API_KEY', 'POSTGRES_PASSWORD', 'PIP_INDEX_URL'):
         monkeypatch.setenv(key, 'synthetic-sensitive-value')
-    assert not set(('PYTHONPATH', 'VIRTUAL_ENV', 'FORGE_BASE_URL', 'FORGE_APPROVAL_READ_TOKEN',
+    assert not set(('PYTHONPATH', 'VIRTUAL_ENV', 'FORGE_BASE_URL', 'FORGE_SYNTHETIC_TOKEN',
                     'OPENAI_API_KEY', 'POSTGRES_PASSWORD', 'PIP_INDEX_URL')).intersection(release.environment())
     assert release.environment()['PIP_CONFIG_FILE'] == os.devnull
     installer = release.environment(installer=True)

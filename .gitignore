@@ -12,3 +12,6 @@ dist/
 !.env.example
 .ruff_cache/
 .forgemini/
+.coverage
+.coverage.*
+cov*.json

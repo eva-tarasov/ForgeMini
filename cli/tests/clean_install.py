@@ -20,8 +20,6 @@ COMMANDS = {
     'workspace': ('create', 'list'),
     'task': ('create', 'get'),
     'run': ('create', 'get', 'start', 'cancel', 'events', 'result', 'watch'),
-    'approval': ('list', 'get', 'review', 'approve', 'reject'),
-    'evidence': ('list', 'get'),
 }
 
 

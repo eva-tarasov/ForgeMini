@@ -182,7 +182,7 @@ def test_run_events_timeline_without_color(render_terminal, width):
         ("agent_result_recorded", {"preliminary_status": "blocked"}, "Preliminary status: blocked"),
         ("agent_execution_failed", {"code": "execution_failed"}, "Execution failure code: execution_failed"),
         ("verification_recorded", {"verdict": "fail"}, "Verification verdict: fail"),
-        ("tool_call_finished", {}, "Details: none"),
+        ("agent_usage_recorded", {}, "Details: none"),
     ]
     items = [
         {"sequence": 2147483640 + index, "created_at": "2026-11-21T09:30:00+03:00",

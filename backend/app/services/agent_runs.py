@@ -2,22 +2,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AgentEventModel, AgentRunModel
-from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
+from app.db.models import AgentRunModel
+from app.domain.execution import AgentRunStatus
 from app.domain.task import TaskStatus
 from app.domain.transitions import validate_agent_run_transition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
-from app.repositories.approvals import ApprovalRepository
 from app.repositories.tasks import TaskRepository
-from app.repositories.tool_calls import ToolCallRepository
 from app.services.agent_failure import (
     AGENT_EXECUTION_FAILED_EVENT,
     AgentFailure,
-    AgentFailureCode,
     AgentFailureContractError,
     decode_agent_failure,
     encode_agent_failure,
@@ -32,9 +28,7 @@ from app.services.agent_usage_codec import (
     decode_agent_usage,
     encode_agent_usage,
 )
-from app.services.approval_outcome import ApprovalOutcome
 from app.services.tasks import TaskNotFoundError
-from app.services.tool_call_audit import ToolCallErrorCode
 
 
 class AgentRunNotFoundError(Exception):
@@ -238,80 +232,24 @@ class AgentRunService:
             raise AgentFailureContractError("duplicate_execution_failure")
         return decode_agent_failure(events[0].payload)
 
-    async def fail_execution(
-        self, run_id: UUID, failure: AgentFailure, *, approval_failure: ApprovalOutcome | None = None,
-    ) -> None:
+    async def fail_execution(self, run_id: UUID, failure: AgentFailure) -> None:
         try:
             payload = encode_agent_failure(failure)
             run = await self.runs.get_for_update(run_id)
             if run is None:
                 raise AgentRunNotFoundError(run_id)
-            actual = AgentRunStatus(run.status)
-            settled = (
-                actual in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED)
-                and approval_failure is not None
-                and await self._matches_approval_failure(run, failure, approval_failure)
-            )
-            if not settled:
-                _check_expected_status(run, AgentRunStatus.RUNNING)
+            _check_expected_status(run, AgentRunStatus.RUNNING)
             if run.final_result is not None:
                 raise AgentRunResultAlreadyRecordedError("result_already_recorded")
-            if actual is not AgentRunStatus.CANCELLED:
-                existing = await self.events.get_execution_failure_events(run.id)
-                if len(existing) > 1 or (existing and not settled):
-                    raise AgentFailureContractError("duplicate_execution_failure")
-                if not existing:
-                    await self.events.append(run.id, event_type=AGENT_EXECUTION_FAILED_EVENT, payload=payload)
-            if not settled:
-                await transition_locked_agent_run(self.events, run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
+            existing = await self.events.get_execution_failure_events(run.id)
+            if existing:
+                raise AgentFailureContractError("duplicate_execution_failure")
+            await self.events.append(run.id, event_type=AGENT_EXECUTION_FAILED_EVENT, payload=payload)
+            await transition_locked_agent_run(self.events, run, AgentRunStatus.RUNNING, AgentRunStatus.FAILED)
             await self.session.commit()
         except BaseException:
             await self.session.rollback()
             raise
-
-    async def _matches_approval_failure(
-        self, run: AgentRunModel, failure: AgentFailure, evidence: ApprovalOutcome,
-    ) -> bool:
-        """Confirm a terminal outcome while holding the same parent lock as ApprovalGate."""
-        reference, code = evidence.reference, evidence.code
-        ticket = reference.ticket
-        if ticket.run_id != run.id or ticket.tool_name != "apply_patch" or ticket.tool_version != 1:
-            return False
-        if run.status == AgentRunStatus.CANCELLED.value:
-            if code is not ToolCallErrorCode.CANCELLED or failure.code is not AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED:
-                return False
-        elif code is ToolCallErrorCode.CANCELLED:
-            # A committed rejection can win while the global deadline interrupts the waiter.
-            if failure.code is not AgentFailureCode.EXECUTION_DEADLINE_EXCEEDED:
-                return False
-            code = ToolCallErrorCode.APPROVAL_REJECTED
-
-        status = ToolCallStatus.DENIED if code is ToolCallErrorCode.APPROVAL_REJECTED else ToolCallStatus.FAILED
-        call = await ToolCallRepository(self.session).get(run.id, ticket.tool_call_id)
-        if call is None or call.tool_name != ticket.tool_name or call.status != status.value:
-            return False
-        approvals = ApprovalRepository(self.session)
-        approval = await approvals.get(reference.approval_id, ticket.tool_call_id)
-        if approval is None or approval.decided_at is None:
-            return False
-        if approval.status not in (ApprovalStatus.REJECTED.value, ApprovalStatus.APPROVED.value):
-            return False
-        if code is ToolCallErrorCode.APPROVAL_REJECTED and approval.status != ApprovalStatus.REJECTED.value:
-            return False
-        if await approvals.event_payloads(run.id, reference.approval_id, "approval_requested") != [
-            reference.requested_payload()
-        ]:
-            return False
-        statement = select(AgentEventModel.payload).where(
-            AgentEventModel.agent_run_id == run.id,
-            AgentEventModel.event_type == "tool_call_finished",
-            AgentEventModel.payload["tool_call_id"].astext == str(ticket.tool_call_id),
-        ).limit(2)
-        events = list((await self.session.scalars(statement)).all())
-        return (
-            len(events) == 1 and isinstance(events[0], dict)
-            and events[0].get("status") == status.value and events[0].get("error_code") == code.value
-        )
 
     async def record_usage(self, record: AgentUsageRecord) -> None:
         try:

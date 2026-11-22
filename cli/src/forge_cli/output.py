@@ -15,14 +15,6 @@ from rich.table import Table
 from rich.text import Text
 
 from forge_cli.dto import (
-    ApprovalDetailResponse,
-    ApprovalDecisionResponse,
-    ApprovalPatchReview,
-    EvidenceAttemptDetail,
-    EvidenceAttemptSummary,
-    EvidenceListResponse,
-    PendingApprovalListResponse,
-    LiveApprovalPreview,
     AgentRunEventsResponse,
     AgentRunPublicEvent,
     AgentRunResponse,
@@ -260,71 +252,6 @@ def _terminal_result(
     return _detail_panel(title, lines, width)
 
 
-def _evidence_summary_lines(item: EvidenceAttemptSummary) -> list[str]:
-    return [
-        f"Attempt ID: {item.attempt_id}", f"Sequence: {item.sequence}",
-        f"Verdict: {item.verdict}", f"File verdict: {item.file_verdict}",
-        f"Audit complete: {json.dumps(item.audit_complete)}",
-        f"Isolated fixture: {json.dumps(item.isolated_fixture)}", f"Check count: {item.check_count}",
-    ]
-
-
-def _capability_lines(result: BaseModel) -> tuple[str, list[str]] | None:
-    if isinstance(result, ApprovalDecisionResponse):
-        return "Approval decision recorded", [
-            f"Run ID: {result.run_id}", f"Approval ID: {result.approval_id}",
-            f"Decision: {result.decision}", "Recorded: true",
-        ]
-    if isinstance(result, PendingApprovalListResponse):
-        lines = []
-        for item in result.items:
-            lines.extend([
-                f"ID: {item.id}", f"Run ID: {item.run_id}", f"Tool: {item.tool_name}",
-                f"Status: {item.status}", f"Requested at: {item.requested_at.isoformat()}", "",
-            ])
-        return "Pending approvals", lines or ["No pending approvals."]
-    if isinstance(result, ApprovalDetailResponse):
-        lines = [
-            f"ID: {result.id}", f"Run ID: {result.run_id}", f"Tool: {result.tool_name}",
-            f"Status: {result.status}", f"Requested at: {result.requested_at.isoformat()}",
-            f"Decided at: {result.decided_at.isoformat() if result.decided_at else 'not recorded'}",
-        ]
-        if isinstance(result.preview, LiveApprovalPreview):
-            lines.extend(["Preview: live at read", "Content included: false"])
-            for file in result.preview.files:
-                lines.extend([
-                    f"Path: {file.path}", f"Added lines: {file.added_lines}",
-                    f"Removed lines: {file.removed_lines}", f"Hunk count: {file.hunk_count}",
-                ])
-        else:
-            lines.append("Preview unavailable")
-        return "Approval", lines
-    if isinstance(result, ApprovalPatchReview):
-        return "Exact approval review", [
-            f"Run ID: {result.run_id}", f"Approval ID: {result.approval_id}",
-            f"SHA256 fingerprint: {result.patch_sha256}",
-        ]
-    if isinstance(result, EvidenceListResponse):
-        lines = [f"Run ID: {result.run_id}"]
-        for item in result.items:
-            lines.extend([*_evidence_summary_lines(item), ""])
-        if not result.items:
-            lines.append("No evidence on this page.")
-        lines.extend([
-            f"Next after sequence: {result.next_after_sequence}", f"Has more: {json.dumps(result.has_more)}",
-        ])
-        return "Verification evidence", lines
-    if isinstance(result, EvidenceAttemptDetail):
-        lines = _evidence_summary_lines(result)
-        for check in result.checks:
-            lines.extend([
-                f"Check ID: {check.check_id}", f"Criterion index: {check.criterion_index}",
-                f"Path: {check.path}", f"Outcome: {check.outcome}",
-            ])
-        return "Verification attempt", lines
-    return None
-
-
 def print_result(
     result: BaseModel | list[WorkspaceResponse], *, json_output: bool, no_color: bool = False
 ) -> None:
@@ -337,15 +264,6 @@ def print_result(
         return
 
     console, rich_layout = stdout_console(no_color=no_color)
-    capability = _capability_lines(result)
-    if capability is not None:
-        title, lines = capability
-        _print_detail_lines(console, rich_layout, title, lines)
-        if isinstance(result, ApprovalPatchReview):
-            escape = _terminal_value if rich_layout else _escape
-            patch = "\n".join(escape(line) for line in result.patch.split("\n"))
-            console.print(Text(patch, no_wrap=True, overflow="ignore"), soft_wrap=True, end="")
-        return
     if isinstance(result, (AgentRunEventsResponse, AgentRunResultResponse)):
         if isinstance(result, AgentRunEventsResponse):
             title, lines = "AgentRun events", _event_page_lines(result)

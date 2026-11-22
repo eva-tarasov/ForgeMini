@@ -1,7 +1,6 @@
 import asyncio
 import math
 from collections.abc import Awaitable, Callable
-from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,11 +11,10 @@ from app.services.agent_failure import AgentFailure, classify_execution_error
 from app.services.agent_observability import AgentLogContext, AgentObserver, AgentOperation, AgentPhase
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_result_codec import AgentResultContractError, encode_agent_result
-from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest, ApprovalOutcomeRunner
+from app.services.agent_runner import AgentRunner, AgentRunnerError, AgentRunRequest
 from app.services.agent_runs import AgentRunService
 from app.services.agent_usage import AgentUsageSnapshot, UsageCollector, capture_agent_usage
 from app.services.agent_usage_codec import AgentUsageRecord
-from app.services.approval_outcome import ApprovalOutcome, ApprovalOutcomeHolder
 
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60.0
@@ -81,7 +79,6 @@ class AgentService:
             handle = self._active_runs.register(run_id)
             collector: UsageCollector | None = None
             primary_error: BaseException | None = None
-            approval_failure: ApprovalOutcome | None = None
 
             try:
                 with observer.phase(AgentPhase.CLAIM):
@@ -93,16 +90,9 @@ class AgentService:
                     with capture_agent_usage(run_id) as collector:
                         with observer.phase(AgentPhase.RUNNER):
                             handle.runner_active = True
-                            outcome_holder = None
                             try:
-                                invoke = self._runner.run
-                                if isinstance(self._runner, ApprovalOutcomeRunner):
-                                    outcome_holder = ApprovalOutcomeHolder(run_id)
-                                    invoke = partial(self._runner.run_with_approval_outcome, outcome=outcome_holder.port())
-                                result = await self._run_with_deadline(request, invoke)
+                                result = await self._run_with_deadline(request, self._runner.run)
                             finally:
-                                if outcome_holder is not None:
-                                    approval_failure = outcome_holder.take_and_close()
                                 handle.runner_active = False
                     _check_interruption(handle, initial_cancelling)
                     with observer.phase(AgentPhase.RESULT_VALIDATION):
@@ -116,15 +106,9 @@ class AgentService:
                     observer.failure_classified(failure.code)
                     try:
                         with observer.phase(AgentPhase.FAILURE_PERSISTENCE):
-                            if approval_failure is None:
-                                await self._fail(run_id, failure)
-                            else:
-                                await self._fail(run_id, failure, approval_failure=approval_failure)
+                            await self._fail(run_id, failure)
                     except Exception as transition_error:
-                        if approval_failure is None or not approval_failure.interrupted_request:
-                            raise transition_error from execution_error
-                        # Неподтверждённый outcome не разрешает переход и не подменяет исходную ошибку.
-                        execution_error.add_note("agent_failure_persistence_failed")
+                        raise transition_error from execution_error
                     raise
 
                 with observer.phase(AgentPhase.RESULT_PERSISTENCE):
@@ -192,8 +176,6 @@ class AgentService:
         async with self._session_factory() as session:
             await AgentRunService(session).complete_execution(run_id, result)
 
-    async def _fail(
-        self, run_id: UUID, failure: AgentFailure, *, approval_failure: ApprovalOutcome | None = None,
-    ) -> None:
+    async def _fail(self, run_id: UUID, failure: AgentFailure) -> None:
         async with self._session_factory() as session:
-            await AgentRunService(session).fail_execution(run_id, failure, approval_failure=approval_failure)
+            await AgentRunService(session).fail_execution(run_id, failure)

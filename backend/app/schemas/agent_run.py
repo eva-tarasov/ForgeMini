@@ -106,10 +106,7 @@ class RunStepEvent(_PublicEvent):
 
 
 class RunMetadataEvent(_PublicEvent):
-    kind: Literal[
-        "tool_call_proposed", "tool_call_started", "tool_call_finished", "approval_requested",
-        "approval_decided", "agent_usage_recorded", "other",
-    ]
+    kind: Literal["agent_usage_recorded", "other"]
     details: EmptyEventDetails
 
 

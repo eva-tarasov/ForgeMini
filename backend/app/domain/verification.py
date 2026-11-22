@@ -5,6 +5,9 @@ the run reads all speak it. Importing it must not pull any M1 module (ADR-003, c
 """
 from enum import StrEnum
 
+# The PUBLIC event kind under which the API reports a verification (the schema pins it as a Literal).
+VERIFICATION_RECORDED = "verification_recorded"
+
 
 class VerificationVerdict(StrEnum):
     PASS = "pass"                    # tests red on pristine source, green with the changeset in a fresh container
