@@ -289,6 +289,8 @@ class UsageView(_ReadResponse):
     tool_calls: int
     input_tokens: int
     output_tokens: int
+    known_cost_usd: str | None = None      # decimal string from the server; never converted to float
+    cost_status: Literal["estimated", "incomplete", "not_priced", "not_recorded"] = "not_recorded"
 
 
 class RunReport(_ReadResponse):

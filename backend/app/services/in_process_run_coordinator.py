@@ -15,6 +15,7 @@ from app.services.active_runs import ActiveRunRegistry
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunner
 from app.services.agent_runs import AgentRunMetadata, AgentRunNotFoundError, AgentRunService
+from app.services.agent_cost import AgentPricing
 from app.services.agent_service import DEFAULT_EXECUTION_TIMEOUT_SECONDS, AgentService, cancel_agent_run
 
 
@@ -49,6 +50,8 @@ class RunExecutionBinding:
     # Called after execute_run settled (success, failure or cancel). Must be idempotent and only
     # react to persisted state: this is where independent verification and Task sync happen.
     after_run: Callable[[SessionFactory, UUID], Awaitable[None]] | None = None
+    # Tariff for the cost estimate of recorded usage; None = usage is recorded, cost stays unknown.
+    pricing: AgentPricing | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +95,7 @@ class InProcessRunCoordinator:
                 raise RunExecutionUnavailableError() from None
             service = AgentService(
                 self._session_factory, runner, active_runs=self._active_runs,
-                execution_timeout_seconds=self._binding.execution_timeout_seconds)
+                execution_timeout_seconds=self._binding.execution_timeout_seconds, pricing=self._binding.pricing)
             execution = self._execute_then_finalize(service, run_id)
             try:
                 task = asyncio.create_task(execution, name="forge-http-agent-run")

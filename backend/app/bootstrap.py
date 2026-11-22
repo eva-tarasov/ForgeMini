@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -32,6 +33,7 @@ from app.sandbox.artifacts import FileArtifactStore
 from app.sandbox.docker_sandbox import SandboxLimits, default_image
 from app.sandbox.events import make_emit_factory
 from app.sandbox.runner import SandboxJob, SandboxRunner, ToolCallingModel
+from app.services.agent_cost import AgentPricing, ModelTariff
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 from app.services.in_process_run_coordinator import RunExecutionBinding, RunnerConfigurationError
 from app.services.sandbox_verifier import SandboxVerifier
@@ -55,6 +57,27 @@ class ForgeMiniSettings(BaseSettings):
     forge_sandbox_cpus: float = Field(default=1.0, gt=0)
     forge_sandbox_image: str | None = None                              # default image for workspaces without one
     forge_data_dir: Path = Path("./.forgemini")                         # artifacts: patches, transcripts
+    # Tariff of FORGE_MODEL_NAME in USD per 1M tokens, copied by the owner from the provider's price page. Not
+    # hard-coded: prices change and differ per model. Without input+output prices usage is recorded, cost is "unknown".
+    forge_price_input_usd_per_million: Decimal | None = None
+    forge_price_output_usd_per_million: Decimal | None = None
+    forge_price_cached_input_usd_per_million: Decimal | None = None     # optional; see agent_cost (cache split)
+    forge_price_version: str = "env"                                    # free label, e.g. the date you copied it
+
+
+def model_pricing(cfg: ForgeMiniSettings) -> AgentPricing:
+    """One tariff for every call of the sandbox loop. Invalid values fail at startup, not in the middle of a run."""
+    if cfg.forge_price_input_usd_per_million is None or cfg.forge_price_output_usd_per_million is None:
+        return AgentPricing()
+    if not cfg.forge_model_name:
+        raise ValueError("FORGE_PRICE_* is set but FORGE_MODEL_NAME is not: the tariff must name its model")
+    tariff = ModelTariff(
+        provider="openai", model=cfg.forge_model_name, tariff_version=cfg.forge_price_version,
+        input_usd_per_million=cfg.forge_price_input_usd_per_million,
+        output_usd_per_million=cfg.forge_price_output_usd_per_million,
+        cached_input_usd_per_million=cfg.forge_price_cached_input_usd_per_million,
+    )
+    return AgentPricing(research=tariff, finalization=tariff)
 
 
 def openai_model_factory(cfg: ForgeMiniSettings) -> ModelFactory:
@@ -121,7 +144,7 @@ def create_forge_app(
 
     binding = RunExecutionBinding(
         workspace_id=None, build_runner=build_runner,
-        execution_timeout_seconds=cfg.forge_run_timeout_seconds, after_run=finalize)
+        execution_timeout_seconds=cfg.forge_run_timeout_seconds, after_run=finalize, pricing=model_pricing(cfg))
     app = create_app(settings=db_settings, session_factory=session_factory, execution_binding=binding)
     app.state.artifact_store = artifacts
     app.include_router(sandbox_runs_router)

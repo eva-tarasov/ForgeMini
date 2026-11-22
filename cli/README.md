@@ -44,7 +44,7 @@ The CLI sends no credentials: the prototype backend is meant to run on loopback 
 | Command | Input and behavior |
 |---|---|
 | `forge solve --repo PATH --goal TEXT --test CMD` | ForgeMini one-shot: create/reuse a workspace, create a task, start a run, stream agent steps, print the verified report. Optional `--image`, `--name`, `--timeout`, `--no-watch`. Exit code 0 only when the result was independently verified; 1 when not verified; 6 on timeout. |
-| `forge report RUN_UUID` | What happened and why: verdict, evidence (tests without/with the change), agent explanation. |
+| `forge report RUN_UUID` | What happened and why: verdict, evidence (tests without/with the change), agent explanation, token usage and cost (if the server has a tariff: `FORGE_PRICE_*` in `.env`). |
 | `forge patch RUN_UUID` | Print the agent's unified diff (`forge patch UUID > fix.patch`). |
 | `forge health` | Read backend health. |
 | `forge workspace create --name NAME` | Create a workspace. |
