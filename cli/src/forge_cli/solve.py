@@ -22,6 +22,7 @@ from forge_cli.polling import WatchOutcome, watch_run
 
 EXIT_OK = 0
 EXIT_NOT_VERIFIED = 1
+EXIT_APPLY_FAILED = 7
 
 
 def sanitize(text: str, limit: int = 4000) -> str:
@@ -36,6 +37,7 @@ class SolveResult:
     outcome: WatchOutcome
     run_id: str
     exit_code: int
+    patch: str | None = None        # filled only when the caller asked for it (the rich view shows the diff)
 
 
 def ensure_workspace(client: ForgeAPIClient, *, repo: Path, test: str, image: str | None, name: str | None):
@@ -51,7 +53,10 @@ def ensure_workspace(client: ForgeAPIClient, *, repo: Path, test: str, image: st
 def solve(
     client: ForgeAPIClient, *, repo: Path, goal: str, test: str, image: str | None, name: str | None,
     timeout: int, interval: int, emit: Callable[[str], None], watch: bool = True,
+    on_event: Callable[[object], None] | None = None, with_patch: bool = False,
+    on_started: Callable[[], None] | None = None,
 ) -> SolveResult:
+    """`on_event` (if given) receives each public event instead of the plain text line."""
     workspace = ensure_workspace(client, repo=repo, test=test, image=image, name=name)
     task = client.create_task(TaskCreate(
         workspace_id=workspace.id, goal=goal, acceptance_criteria=[_criterion(test)]))
@@ -66,7 +71,10 @@ def solve(
                 "in the server's environment (.env), or Docker is not available. See the server log.") from None
         raise
 
-    emit(f"started; watching (up to {timeout}s)…" if watch else "started.")
+    if on_started is not None:
+        on_started()
+    else:
+        emit(f"started; watching (up to {timeout}s)…" if watch else "started.")
     if not watch:
         return SolveResult(None, WatchOutcome(None, 0, "timeout"), str(run.id), 0)
 
@@ -75,6 +83,9 @@ def solve(
     def on_page(status: AgentRunStatus, page: AgentRunEventsResponse) -> None:
         nonlocal previous
         for event in page.items:
+            if on_event is not None:
+                on_event(event)
+                continue
             line = _event_line(event)
             if line:
                 emit(line)
@@ -84,7 +95,9 @@ def solve(
     if outcome.stop_reason != "terminal":
         return SolveResult(None, outcome, str(run.id), 6 if outcome.stop_reason == "timeout" else 130)
     report = client.get_run_report(run.id)
-    return SolveResult(report, outcome, str(run.id), EXIT_OK if report.run_status == "succeeded" else EXIT_NOT_VERIFIED)
+    patch = client.get_run_patch(run.id) if with_patch and report.has_patch else None
+    return SolveResult(report, outcome, str(run.id), EXIT_OK if report.run_status == "succeeded" else EXIT_NOT_VERIFIED,
+                       patch)
 
 
 def _criterion(test: str) -> str:
@@ -157,10 +170,14 @@ def format_report(report: RunReport, run_id: str) -> str:
     if report.has_patch:
         lines += ["", f"Patch: forge patch {run_id}   (apply with: git apply or patch -p1)"]
     if not verified:
-        hint = _PROVIDER_HINTS.get(report.failure_code or "")
-        if hint:
-            lines += ["", "What to do: " + hint, f"Details of the run: forge run events {run_id}"]
-        else:
-            lines += ["", "Options: refine the goal and run again, fix the tests/requirements, or inspect the "
-                          f"steps with: forge run events {run_id}"]
+        lines += ["", *next_step_lines(report, run_id)]
     return "\n".join(lines)
+
+
+def next_step_lines(report: RunReport, run_id: str) -> list[str]:
+    """What to do after a run that is not verified: depends on WHY (a provider problem is not the task's fault)."""
+    hint = _PROVIDER_HINTS.get(report.failure_code or "")
+    if hint:
+        return ["What to do: " + hint, f"Details of the run: forge run events {run_id}"]
+    return ["Options: refine the goal and run again, fix the tests/requirements, or inspect the "
+            f"steps with: forge run events {run_id}"]

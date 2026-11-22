@@ -45,7 +45,8 @@ _UUID_WIDTH = 36
 _UNSAFE_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
 
 
-def _stdout_console(*, no_color: bool) -> tuple[Console, bool]:
+def stdout_console(*, no_color: bool) -> tuple[Console, bool]:
+    """(console, rich_layout): rich_layout is True only on an interactive terminal with color allowed."""
     stream = sys.stdout
     is_tty = stream.isatty()
     # FORCE_COLOR may affect Rich's capability detection even for a pipe.
@@ -190,7 +191,7 @@ def print_watch_page(
     lines = [f"Observed status: {status_change}"] if status_change is not None else []
     lines.extend(_event_lines(events))
     if lines:
-        console, rich_layout = _stdout_console(no_color=no_color)
+        console, rich_layout = stdout_console(no_color=no_color)
         _print_detail_lines(console, rich_layout, "AgentRun watch", lines)
 
 
@@ -212,7 +213,7 @@ def print_watch_summary(
         }, ensure_ascii=True))
         return
 
-    console, rich_layout = _stdout_console(no_color=no_color)
+    console, rich_layout = stdout_console(no_color=no_color)
     _print_detail_lines(console, rich_layout, "AgentRun observation ended", [
         f"Run ID: {run_id}",
         f"Last observed status: {outcome.last_observed_status or 'unknown'}",
@@ -335,7 +336,7 @@ def print_result(
         typer.echo(json.dumps(payload, ensure_ascii=True))
         return
 
-    console, rich_layout = _stdout_console(no_color=no_color)
+    console, rich_layout = stdout_console(no_color=no_color)
     capability = _capability_lines(result)
     if capability is not None:
         title, lines = capability

@@ -1,8 +1,8 @@
 """Forge command routing over the typed HTTP client."""
 
 from collections.abc import Callable
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, NoReturn, TypeVar
 from uuid import UUID
 
@@ -21,9 +21,12 @@ from forge_cli.dto import (
     WorkspaceResponse,
 )
 from forge_cli.errors import ForgeAPIError, ForgeResponseError, ForgeTransportError
-from forge_cli.output import print_result, print_watch_page, print_watch_summary
+from forge_cli.output import print_result, print_watch_page, print_watch_summary, stdout_console
 from forge_cli.polling import watch_run
-from forge_cli.solve import SolveStartError, format_report, sanitize, solve as run_solve
+from forge_cli.apply import ApplyError, apply_patch
+from forge_cli.repo_source import RepoSourceError, resolve_repo
+from forge_cli.solve import EXIT_APPLY_FAILED, SolveStartError, format_report, sanitize, solve as run_solve
+from forge_cli.solve_view import SolveView
 from forge_cli.config import CapabilityConfigurationError
 
 approval_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -257,7 +260,8 @@ def run_watch(
 
 def solve(
     ctx: typer.Context,
-    repo: Annotated[Path, typer.Option("--repo", help="Project directory (absolute or relative path).")],
+    repo: Annotated[str, typer.Option(
+        "--repo", help="Project directory, or a git URL (https://…, git@host:owner/repo) to clone first.")],
     goal: Annotated[str, typer.Option("--goal", help="What to fix or build, up to 500 characters.")],
     test: Annotated[str, typer.Option("--test", help="Shell command that exits 0 when the project is correct.")],
     image: Annotated[str | None, typer.Option("--image", help="Docker image (default python:3.12-slim).")] = None,
@@ -265,15 +269,25 @@ def solve(
     timeout: Annotated[int, typer.Option(min=10, max=7200, help="Seconds to wait for the run.")] = 900,
     interval: Annotated[int, typer.Option(min=1, max=30, help="Seconds between polls.")] = 2,
     no_watch: Annotated[bool, typer.Option("--no-watch", help="Start the run and return immediately.")] = False,
+    apply: Annotated[bool, typer.Option(
+        "--apply", help="After a VERIFIED result, apply the patch to the repository with git apply.")] = False,
 ) -> None:
     """Fix a repository: agent works in a Docker sandbox, then Forge re-runs your tests independently.
 
     Exit code 0 only when the result was verified; 1 when not verified; 6 on timeout.
     """
     options: CommandOptions = ctx.obj
-    repo_path = repo.expanduser().resolve()
-    if not repo_path.is_dir():
-        _fail(f"--repo is not a directory: {repo_path}", 2)
+    try:
+        source = resolve_repo(repo)
+    except RepoSourceError as exc:
+        _fail(str(exc), 2)
+    repo_path = source.path
+    console, rich_layout = stdout_console(no_color=options.no_color)
+    view = SolveView(console) if rich_layout and not options.json_output else None
+    if view is not None:
+        view.banner(repo_label=source.label, commit=source.commit, goal=goal, test=test)
+    elif source.cloned_from:
+        typer.echo(f"cloned {source.cloned_from} -> {source.path}", err=options.json_output)
 
     def operation(client: ForgeAPIClient):
         # Fail fast and clearly BEFORE creating anything: "connection refused" almost always means the
@@ -292,7 +306,9 @@ def solve(
         return run_solve(
             client, repo=repo_path, goal=goal, test=test, image=image, name=name, timeout=timeout,
             interval=interval, watch=not no_watch,
-            emit=lambda line: typer.echo(sanitize(line, 700), err=options.json_output),
+            emit=(view.note if view else lambda line: typer.echo(sanitize(line, 700), err=options.json_output)),
+            on_event=view.event if view else None, with_patch=view is not None or apply,
+            on_started=view.started if view and not no_watch else None,
         )
 
     try:
@@ -309,10 +325,33 @@ def solve(
         return
     if options.json_output:
         typer.echo(result.report.model_dump_json())
+    elif view is not None:
+        view.verdict(result.report, result.run_id, result.patch)
     else:
         typer.echo(format_report(result.report, result.run_id))
-    if result.exit_code:
-        raise typer.Exit(result.exit_code)
+    exit_code = result.exit_code
+    if apply:
+        exit_code = exit_code or _apply_verified_patch(result, repo_path, view, options)
+    if exit_code:
+        raise typer.Exit(exit_code)
+
+
+def _apply_verified_patch(result, repo_path: Path, view: SolveView | None, options: CommandOptions) -> int:
+    """Only a verified result is ever applied. Returns an exit code (0 = applied)."""
+    if result.patch is None:
+        message = "nothing to apply: the agent made no changes"
+    else:
+        try:
+            apply_patch(repo_path, result.patch)
+        except ApplyError as exc:
+            typer.echo(f"Not applied: {sanitize(str(exc), 600)}", err=True)
+            return EXIT_APPLY_FAILED
+        message = f"applied to {repo_path}  (review: git -C {repo_path} diff)"
+    if view is not None:
+        view.note(message)
+    else:
+        typer.echo(message, err=options.json_output)
+    return 0
 
 
 def report(ctx: typer.Context, run_id: Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="RUN_UUID")]) -> None:

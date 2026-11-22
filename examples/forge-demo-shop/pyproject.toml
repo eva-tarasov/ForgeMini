@@ -1,0 +1,6 @@
+[project]
+name = "shopkit"
+version = "0.3.1"
+description = "Tiny order-pricing library: cart, coupons, shipping, VAT."
+requires-python = ">=3.10"
+dependencies = []

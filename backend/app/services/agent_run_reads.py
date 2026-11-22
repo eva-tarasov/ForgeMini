@@ -165,7 +165,9 @@ def _project_event(run_id: UUID, event: AgentEventModel) -> AgentRunPublicEvent:
 
     if kind == AGENT_STEP_EVENT:
         body = _versioned(payload, 1)
-        return RunStepEvent(kind=kind, details=RunStepDetails(step=body["step"], summary=body["summary"]), **common)
+        extra = {k: body[k] for k in ("turn", "tools", "tool", "target", "ok", "exit_code", "outcome") if k in body}
+        return RunStepEvent(kind=kind, details=RunStepDetails(step=body["step"], summary=body["summary"], **extra),
+                            **common)
     if kind == SANDBOX_VERIFICATION_RECORDED:
         return RunVerificationEvent(kind=VERIFICATION_RECORDED, details=RunVerificationDetails(
             verdict=SandboxVerification.from_payload(payload).verdict), **common)

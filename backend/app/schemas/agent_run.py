@@ -65,6 +65,14 @@ class EmptyEventDetails(_ReadResponse):
 class RunStepDetails(_ReadResponse):
     step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "other"]
     summary: Annotated[str, Field(max_length=600)]
+    # Optional structured twin of `summary` (added later; old events simply lack these fields).
+    turn: int | None = None                                           # index of the model call
+    tools: Annotated[list[Annotated[str, Field(max_length=40)]], Field(max_length=8)] | None = None
+    tool: Annotated[str, Field(max_length=40)] | None = None
+    target: Annotated[str, Field(max_length=200)] | None = None       # a command or a path
+    ok: bool | None = None
+    exit_code: int | None = None
+    outcome: Literal["claimed_done", "cannot_fix"] | None = None
 
 
 class _PublicEvent(_ReadResponse):

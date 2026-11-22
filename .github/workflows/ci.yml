@@ -74,6 +74,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/pyproject.toml
-      - run: pip install -e "backend[dev]"
+          cache-dependency-path: |
+            backend/pyproject.toml
+            cli/pyproject.toml
+      # The CLI is installed too: tests/test_cli_against_real_server.py runs the real `forge` program.
+      - run: pip install -e "backend[dev]" -e "cli[dev]"
       - run: scripts/ci/integration_tests.sh

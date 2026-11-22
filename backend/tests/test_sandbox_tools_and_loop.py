@@ -195,3 +195,33 @@ def test_loop_with_responses_api_block_content_leaks_no_raw_objects_into_events_
     assert blob not in blob_everywhere and "call_id" not in blob_everywhere
     model_events = [d for k, d in events if k == "model_response"]
     assert model_events[0]["tool_calls"] == ["bash"] and model_events[0]["text"] == ""
+
+
+# --- structured step events (for rendering a live timeline without parsing prose) ---------------------
+
+def test_step_payload_has_structured_fields_next_to_the_summary():
+    from app.sandbox.events import step_payload
+    p = step_payload("tool_result", {"name": "bash", "is_error": False, "turn": 2,
+                                     "tool_input": {"command": "python -m unittest"}, "args": "x",
+                                     "result": "exit code: 1\n..FAILED"})
+    assert (p["turn"], p["tool"], p["ok"], p["target"], p["exit_code"]) == (2, "bash", True, "python -m unittest", 1)
+    q = step_payload("tool_result", {"name": "edit_file", "is_error": True, "turn": 3,
+                                     "tool_input": {"path": "a.py"}, "args": "x", "result": "ERROR: no match"})
+    assert q["ok"] is False and q["target"] == "a.py" and "exit_code" not in q
+    assert step_payload("model_response", {"step": 4, "text": "", "tool_calls": ["bash", "read_file"]})["tools"] == \
+        ["bash", "read_file"]
+    assert step_payload("finish", {"status": "cannot_fix", "summary": "x"})["outcome"] == "cannot_fix"
+
+
+def test_loop_reports_tool_inputs_but_never_file_contents():
+    events: list[tuple[str, dict]] = []
+
+    async def sink(kind, data):
+        events.append((kind, data))
+
+    secret_body = "S" * 5000
+    loop(ScriptedModel([
+        tool_turn("edit_file", {"path": "new.py", "old_str": "", "new_str": secret_body}),
+        tool_turn("finish", {"status": "done", "summary": "ok"})]), emit=sink)
+    edit = next(d for k, d in events if k == "tool_result" and d["name"] == "edit_file")
+    assert edit["tool_input"] == {"path": "new.py"} and secret_body not in repr(edit["tool_input"])

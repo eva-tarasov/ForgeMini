@@ -53,7 +53,7 @@ def block_network(monkeypatch):
 def server(monkeypatch):
     """Fake Forge: run is already terminal at the first poll, so no test ever sleeps."""
     st = SimpleNamespace(calls=[], workspaces=[], start_status=202, run_status="succeeded",
-                         report=report_body(), patch=PATCH, bodies={})
+                         report=report_body(), patch=PATCH, bodies={}, events=None)
 
     def handler(request: httpx.Request) -> httpx.Response:
         key = f"{request.method} {request.url.path}"
@@ -82,12 +82,14 @@ def server(monkeypatch):
             return httpx.Response(200, json={"id": RUN, "task_id": TASK, "attempt_number": 1,
                                              "status": st.run_status, "created_at": "2026-01-01T00:00:00+00:00"})
         if key == f"GET /agent-runs/{RUN}/events":
-            return httpx.Response(200, json={"items": [
+            items = st.events or [
                 {"sequence": 1, "created_at": "2026-01-01T00:00:00+00:00", "kind": "agent_step",
                  "details": {"step": "tool_result", "summary": "ran tests \x1b[31mRED\x1b[0m"}},
                 {"sequence": 2, "created_at": "2026-01-01T00:00:01+00:00", "kind": "verification_recorded",
                  "details": {"verdict": "pass"}},
-            ], "next_after_sequence": 2, "has_more": False})
+            ]
+            return httpx.Response(200, json={"items": items, "next_after_sequence": items[-1]["sequence"],
+                                             "has_more": False})
         if key == f"GET /agent-runs/{RUN}/report":
             return httpx.Response(200, json=st.report)
         if key == f"GET /agent-runs/{RUN}/patch":
@@ -281,3 +283,154 @@ def test_report_without_usage_field_is_still_accepted(server, tmp_path):
     server.report = body
     result = runner.invoke(app, solve_args(tmp_path))
     assert result.exit_code == 0 and "Usage:" not in result.output
+
+
+# --- rich terminal view (interactive terminals only) ----------------------------------------------------
+
+def _step(seq, **details):
+    return {"sequence": seq, "created_at": "2026-01-01T00:00:00+00:00", "kind": "agent_step", "details": details}
+
+
+def _rich_events():
+    return [
+        _step(1, step="tool_result", summary="s", turn=1, tool="bash", ok=True, exit_code=1,
+              target="python -m unittest"),
+        _step(2, step="tool_result", summary="s", turn=2, tool="edit_file", ok=True, target="shopkit/shipping.py"),
+        _step(3, step="tool_result", summary="s", turn=3, tool="finish", ok=True),
+        _step(4, step="finish", summary="s", outcome="claimed_done"),
+        {"sequence": 5, "created_at": "2026-01-01T00:00:01+00:00", "kind": "agent_run_status_changed",
+         "details": {"from": "running", "to": "verifying"}},
+    ]
+
+
+def _tty_console(monkeypatch):
+    import io
+
+    from rich.console import Console
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, color_system="truecolor", width=110, markup=False,
+                      highlight=False)
+    monkeypatch.setattr(commands, "stdout_console", lambda *, no_color: (console, True))
+    return console, buf
+
+
+def test_rich_view_shows_repo_steps_verification_and_diff(server, tmp_path, monkeypatch):
+    server.events = _rich_events()
+    console, buf = _tty_console(monkeypatch)
+    result = runner.invoke(app, solve_args(tmp_path))
+    assert result.exit_code == 0, result.output
+    out = buf.getvalue()
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", out)
+    assert "ForgeMini" in plain and "fix average" in plain and "python -m pytest -q" in plain
+    assert "$ python -m unittest" in plain and "exit 1" in plain
+    assert "edit  shopkit/shipping.py" in plain
+    assert "agent claims it is done" in plain and "re-runs the tests" in plain
+    assert "· finish" not in plain
+    assert "Tests on the original code" in plain and "Test files untouched" in plain
+    assert "-x" in plain and "+y" in plain                       # the diff is shown
+    assert "VERIFIED" in plain and "NOT VERIFIED" not in plain
+    assert f"forge patch {RUN} | git apply" in plain
+    assert "\x1b[" in out                                        # and it is actually coloured
+    assert f"GET /agent-runs/{RUN}/patch" in server.calls
+
+
+def test_rich_view_says_not_verified_and_flags_touched_tests(server, tmp_path, monkeypatch):
+    bad = report_body(run_status="failed", task_status="failed", has_patch=False)
+    bad["verification"].update(verdict="fail", protected_violations=["tests/test_cart.py"])
+    server.report = bad
+    server.run_status = "failed"
+    server.events = _rich_events()
+    console, buf = _tty_console(monkeypatch)
+    result = runner.invoke(app, solve_args(tmp_path))
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+    assert result.exit_code == 1
+    assert "NOT VERIFIED (failed)" in plain and "tests/test_cart.py" in plain and "✗" in plain
+    assert f"GET /agent-runs/{RUN}/patch" not in server.calls       # no patch -> not requested
+
+
+def test_rich_view_is_off_for_json_and_for_pipes(server, tmp_path, monkeypatch):
+    server.events = _rich_events()
+    console, buf = _tty_console(monkeypatch)
+    result = runner.invoke(app, ["--json", *solve_args(tmp_path)])
+    assert json.loads(result.stdout)["run_status"] == "succeeded" and buf.getvalue() == ""
+    monkeypatch.setattr(commands, "stdout_console", lambda *, no_color: (console, False))   # a pipe / CI
+    plain = runner.invoke(app, solve_args(tmp_path))
+    assert "RESULT: SUCCEEDED" in plain.output and "\x1b" not in plain.output   # CliRunner is not a TTY
+
+
+def test_rich_view_does_not_interpret_markup_or_escapes_from_the_server(server, tmp_path, monkeypatch):
+    server.events = [_step(1, step="tool_result", summary="s", tool="bash", ok=True, exit_code=0,
+                           target="echo [red]HIDDEN[/red] \x1b[2J \x1b]0;pwned\x07")]
+    console, buf = _tty_console(monkeypatch)
+    runner.invoke(app, solve_args(tmp_path))
+    out = buf.getvalue()
+    assert "[red]HIDDEN[/red]" in out                              # printed literally, not applied
+    assert "\x1b[2J" not in out and "\x1b]0;" not in out          # control sequences stripped
+
+
+def test_solve_with_a_refused_url_exits_2_and_makes_no_request(server):
+    result = runner.invoke(app, solve_args("https://user:token@github.com/o/r.git"))
+    assert result.exit_code == 2 and "credentials" in result.output
+    assert server.calls == []
+
+
+# --- --apply ----------------------------------------------------------------------------------------------
+
+def _git_repo(path, content="x\n"):
+    import subprocess
+    (path / "calc").mkdir()
+    (path / "calc" / "ops.py").write_text(content)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "."], ["commit", "-q", "-m", "init"]):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+
+
+def test_apply_puts_the_verified_patch_into_the_working_tree(server, tmp_path):
+    _git_repo(tmp_path)
+    result = runner.invoke(app, solve_args(tmp_path, "--apply"))
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "calc" / "ops.py").read_text() == "y\n" and "applied to" in result.output
+
+
+def test_apply_never_touches_the_tree_when_the_result_is_not_verified(server, tmp_path):
+    _git_repo(tmp_path)
+    server.report = report_body(run_status="failed", task_status="failed")
+    server.run_status = "failed"
+    result = runner.invoke(app, solve_args(tmp_path, "--apply"))
+    assert result.exit_code == 1 and (tmp_path / "calc" / "ops.py").read_text() == "x\n"
+    assert "applied to" not in result.output
+
+
+def test_apply_conflict_exits_7_and_leaves_the_tree_alone(server, tmp_path):
+    _git_repo(tmp_path, content="something else\n")
+    result = runner.invoke(app, solve_args(tmp_path, "--apply"))
+    assert result.exit_code == 7 and "Not applied" in result.output
+    assert (tmp_path / "calc" / "ops.py").read_text() == "something else\n"
+
+
+def test_without_apply_the_tree_is_never_modified(server, tmp_path):
+    _git_repo(tmp_path)
+    assert runner.invoke(app, solve_args(tmp_path)).exit_code == 0
+    assert (tmp_path / "calc" / "ops.py").read_text() == "x\n"
+
+
+def test_rich_view_prints_ids_one_per_line_and_keeps_check_rows_on_one_line(server, tmp_path, monkeypatch):
+    server.events = _rich_events()
+    console, buf = _tty_console(monkeypatch)
+    runner.invoke(app, solve_args(tmp_path))
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue()).splitlines()
+    assert any(line.strip().startswith("workspace ") and "task " not in line for line in plain)
+    assert any(line.strip().startswith("run ") for line in plain)
+    original = [i for i, line in enumerate(plain) if "Tests on the original code" in line]
+    assert original and "exit 1" in plain[original[0]]                     # the verdict is on the same line
+
+
+def test_rich_view_tells_what_to_do_when_the_provider_failed(server, tmp_path, monkeypatch):
+    server.report = report_body(run_status="failed", task_status="failed", failure_code="provider_auth",
+                                has_patch=False, verification=None, agent_summary=None)
+    server.run_status = "failed"
+    console, buf = _tty_console(monkeypatch)
+    result = runner.invoke(app, solve_args(tmp_path))
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+    assert result.exit_code == 1 and "NOT VERIFIED (failed)" in plain
+    assert "What to do: OpenAI rejected the API key" in plain and "forge run events" in plain

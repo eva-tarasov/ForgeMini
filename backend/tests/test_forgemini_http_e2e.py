@@ -132,6 +132,11 @@ def test_full_happy_path_over_http(api):
         events = client.get(f"/agent-runs/{run['id']}/events?limit=100").json()["items"]
         kinds = [e["kind"] for e in events]
         assert kinds.count("agent_step") >= 8 and "verification_recorded" in kinds
+        step_details = [e["details"] for e in events if e["kind"] == "agent_step"]
+        bash_runs = [d for d in step_details if d.get("tool") == "bash"]
+        assert bash_runs[0]["exit_code"] != 0 and bash_runs[-1]["exit_code"] == 0      # red first, green at the end
+        assert any(d.get("tool") == "edit_file" and d["target"] == "calc/ops.py" and d["ok"] for d in step_details)
+        assert [d["outcome"] for d in step_details if d["step"] == "finish"] == ["claimed_done"]
         steps = [e["details"]["summary"] for e in events if e["kind"] == "agent_step"]
         assert any("FAILED" in s for s in steps), "the live log must show the agent seeing the red test"
         assert [e["details"]["to"] for e in events if e["kind"] == "agent_run_status_changed"] == \

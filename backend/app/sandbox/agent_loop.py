@@ -88,6 +88,15 @@ def message_text(content: object) -> str:
     return "\n".join(p.strip() for p in parts if p.strip())
 
 
+def _tool_input(name: str, args: object) -> dict[str, str]:
+    """The few fields of a tool call worth showing live (a command or a path); never whole file contents."""
+    if not isinstance(args, dict):
+        return {}
+    key = {"bash": "command", "read_file": "path", "edit_file": "path"}.get(name)
+    value = args.get(key) if key else None
+    return {key: value[:200]} if key and isinstance(value, str) else {}
+
+
 def _preview(text: str, n: int = 600) -> str:
     """Head + tail: for test output the verdict (FAILED / OK) is at the END."""
     if len(text) <= n:
@@ -141,7 +150,8 @@ async def run_agent_loop(
             out.tool_calls += 1
             messages.append(ToolMessage(res.content, tool_call_id=call["id"],
                                         status="error" if res.is_error else "success"))
-            await note("tool_result", name=call["name"], is_error=res.is_error,
+            await note("tool_result", name=call["name"], is_error=res.is_error, turn=step,
+                       tool_input=_tool_input(call["name"], call["args"]),
                        args=_preview(str(call["args"]), 200), result=_preview(res.content))
             if res.finish is not None:
                 out.status = "claimed_done" if res.finish.status == "done" else "cannot_fix"
