@@ -53,10 +53,14 @@ run_group forge_task04_ci FORGE_TASK04_TEST_DB=forge_task04_ci -- \
 run_group forge_task05_ci FORGE_TASK05_TEST_DB=forge_task05_ci -- \
   tests/test_execution_schema_integration.py
 
+# C5 migration: walks its own DB down and up with the real alembic command (ADR-003).
+run_group forge_migration_ci FORGE_MIGRATION_TEST_DB=forge_migration_ci -- \
+  tests/test_m1_cleanup_migration_integration.py
+
 # Everything else that needs the "task06 / week4_audit" fixture DB (the kernel's run lifecycle, reads and
 # persistence tests plus the ForgeMini sandbox/E2E tests).
 run_group "$T06" FORGE_TASK06_TEST_DB="$T06" -- \
-  $(cd tests && ls *_integration.py | grep -vE '^(test_schema_integration|test_postgres_integration|test_repository_integration|test_execution_schema_integration)\.py$' | sed 's|^|tests/|') \
+  $(cd tests && ls *_integration.py | grep -vE '^(test_schema_integration|test_postgres_integration|test_repository_integration|test_execution_schema_integration|test_m1_cleanup_migration_integration)\.py$' | sed 's|^|tests/|') \
   tests/test_service_transactions.py \
   tests/test_forgemini_http_e2e.py \
   tests/test_demo_shop_e2e.py \

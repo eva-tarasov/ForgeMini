@@ -11,7 +11,7 @@ from app.domain.task import TaskStatus
 def test_task_status_is_a_distinct_domain_enum():
     assert TaskStatus is not AgentRunStatus
     assert {status.value for status in TaskStatus} == {
-        "queued", "running", "waiting_approval", "verifying", "succeeded", "failed", "cancelled",
+        "queued", "running", "verifying", "succeeded", "failed", "cancelled",
     }
     assert all(type(status) is TaskStatus for status in TaskStatus)
 

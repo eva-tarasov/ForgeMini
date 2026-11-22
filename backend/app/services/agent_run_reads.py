@@ -163,7 +163,7 @@ def _validate_result(run: AgentRunModel, events: list) -> AgentRunResultResponse
         (status in (AgentRunStatus.VERIFYING, AgentRunStatus.SUCCEEDED) and preliminary != "ready_for_verification")
         or (preliminary == "blocked" and status is not AgentRunStatus.FAILED)
         or (preliminary is not None and status in (
-            AgentRunStatus.QUEUED, AgentRunStatus.RUNNING, AgentRunStatus.WAITING_APPROVAL,
+            AgentRunStatus.QUEUED, AgentRunStatus.RUNNING,
         ))
         or (failure is not None and (status is not AgentRunStatus.FAILED or preliminary is not None))
         or ((verdict is VerificationVerdict.PASS) != (status is AgentRunStatus.SUCCEEDED))

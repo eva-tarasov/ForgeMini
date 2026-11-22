@@ -6,7 +6,6 @@ from uuid import UUID
 class TaskStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
-    WAITING_APPROVAL = "waiting_approval"
     VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
