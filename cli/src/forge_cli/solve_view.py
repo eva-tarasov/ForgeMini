@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from forge_cli.dto import RunReport, VerificationView
-from forge_cli.solve import cost_text, next_step_lines, sanitize
+from forge_cli.solve import cost_text, describe_test_run, next_step_lines, sanitize
 
 MAX_DIFF_LINES = 70
 ARROW = "▸"
@@ -172,9 +172,9 @@ class SolveView:
         patched_ok = v.patched is not None and v.patched.exit_code == 0 and not v.patched.timed_out
         untouched = not v.protected_violations
         table.add_row(*self._mark(base_ok, "Tests on the original code"),
-                      (f"exit {v.baseline.exit_code}, expected: fail (there was a bug)" if v.baseline else "not run"))
+                      (f"{describe_test_run(v.baseline)} · expected: fail (there was a bug)" if v.baseline else "not run"))
         table.add_row(*self._mark(patched_ok, "Tests with the patch, fresh container"),
-                      (f"exit {v.patched.exit_code}, expected: pass" if v.patched else "not run"))
+                      (f"{describe_test_run(v.patched)} · expected: pass" if v.patched else "not run"))
         table.add_row(*self._mark(untouched, "Test files untouched"),
                       "expected: the agent may not edit tests" if untouched else
                       "changed: " + ", ".join(sanitize(p, 80) for p in v.protected_violations))

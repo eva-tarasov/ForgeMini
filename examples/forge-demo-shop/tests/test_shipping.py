@@ -10,3 +10,6 @@ class TestShipping(unittest.TestCase):
 
     def test_large_order_ships_free(self):
         self.assertEqual(shipping_cost(Decimal("120.00")), Decimal("0.00"))
+
+    def test_order_just_below_threshold_pays_flat_rate(self):
+        self.assertEqual(shipping_cost(Decimal("49.99")), FLAT_RATE)

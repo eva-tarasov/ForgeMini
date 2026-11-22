@@ -109,8 +109,8 @@ def test_verified_success_exit_zero_and_creates_configured_workspace(server, tmp
     result = runner.invoke(app, solve_args(tmp_path, "--image", "python:3.12-slim"))
     assert result.exit_code == 0, result.output
     assert "SUCCEEDED" in result.output and "independent re-run" in result.output
-    assert "Tests WITHOUT the change: exit code 1" in result.output
-    assert "Tests WITH the change:    exit code 0" in result.output
+    assert "Tests WITHOUT the change: exit 1" in result.output
+    assert "Tests WITH the change:    exit 0" in result.output
     ws = server.bodies["POST /workspaces"]
     assert ws == {"name": tmp_path.name, "source_path": str(tmp_path.resolve()),
                   "test_command": "python -m pytest -q", "image": "python:3.12-slim"}
@@ -515,3 +515,32 @@ def test_verified_panel_shows_the_cost_or_says_why_not(cost, status, shown):
     text = console.export_text()
     assert "VERIFIED" in text
     assert (shown in text) if shown else ("cost" not in text.lower() and "$" not in text)
+
+
+# --- F′ (2): the verdict card speaks in tests, not exit codes -------------------------------------------------------
+from forge_cli.solve import count_tests, describe_test_run  # noqa: E402
+
+
+@pytest.mark.parametrize("tail,expected", [
+    ("FAIL: test_a\n----\nRan 2 tests in 0.001s\n\nFAILED (failures=2)\n", (2, 2)),
+    ("Ran 5 tests in 0.010s\n\nFAILED (failures=1, errors=2)\n", (3, 5)),
+    ("..\n----\nRan 2 tests in 0.000s\n\nOK\n", (0, 2)),
+    ("Ran 0 tests in 0.000s\n\nNO TESTS RAN\n", (0, 0)),
+    ("==== 2 failed, 3 passed in 0.12s ====", (2, 5)),
+    ("==== 1 failed, 1 error in 0.50s ====", (2, 2)),
+    ("======= 4 passed in 1.02s =======", (0, 4)),
+    ("FAILED", None),                                          # no summary we recognise: no invented number
+    ("", None),
+])
+def test_counts_come_only_from_the_runners_own_summary(tail, expected):
+    assert count_tests(tail) == expected
+
+
+@pytest.mark.parametrize("tail,exit_code,timed_out,line", [
+    ("Ran 2 tests in 0.0s\n\nFAILED (failures=2)", 1, False, "2 of 2 failed (exit 1)"),
+    ("Ran 2 tests in 0.0s\n\nOK", 0, False, "all 2 passed (exit 0)"),
+    ("Ran 0 tests in 0.0s\n\nNO TESTS RAN", 5, False, "no tests ran (exit 5)"),
+    ("killed", 137, True, "exit 137 (timed out)"),
+])
+def test_describe_test_run(tail, exit_code, timed_out, line):
+    assert describe_test_run(SimpleNamespace(output_tail=tail, exit_code=exit_code, timed_out=timed_out)) == line

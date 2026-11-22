@@ -51,7 +51,7 @@ def test_full_story_in_five_scenes_ends_green(tmp_path):
     for scene in ("1/5", "2/5", "3/5", "4/5", "5/5"):
         assert scene in done.stdout
     assert "FAILED (failures=6)" in done.stdout                                   # scene 2: red
-    assert "Ran 20 tests" in done.stdout and "OK" in done.stdout.split("5/5")[1]  # scene 5: green
+    assert "Ran 21 tests" in done.stdout and "OK" in done.stdout.split("5/5")[1]  # scene 5: green
     assert "Done." in done.stdout
     assert (tmp_path / "work" / "test_cmd").read_text().strip() == "python -m unittest"
 
@@ -85,6 +85,46 @@ def test_missing_forge_binary_is_explained(tmp_path):
     assert done.returncode == 3 and "missing: forge" in done.stderr
 
 
-@pytest.mark.parametrize("args", [["--issue", "7"], ["--bogus"]])
+@pytest.mark.parametrize("args", [["--issue", "7"], ["--bogus"], ["--story", "nope"]])
 def test_bad_arguments_are_rejected(tmp_path, args):
     assert _run(tmp_path, FIXING_FORGE, *args).returncode == 2
+
+
+# --- story "refuse": a request that contradicts the project's rules ------------------------------------------------
+def test_refuse_story_shows_the_contradiction_and_counts_a_non_verified_run_as_the_right_answer(tmp_path):
+    done = _run(tmp_path, FAILING_FORGE, "--story", "refuse")
+    assert done.returncode == 0, done.stderr + done.stdout[-800:]
+    scene2 = done.stdout.split("2/5")[1].split("3/5")[0]
+    assert "Orders of **50.00 or more**" in scene2                                 # the rule, from the docs
+    assert 'shipping_cost(Decimal("49.99"))' in scene2                             # and the test that pins it
+    assert "Ran 3 tests" in scene2 and "OK" in scene2                               # green before: nothing to prove
+    assert "an unverified result is never applied" in done.stdout
+    assert "As it should be" in done.stdout and "UNEXPECTED" not in done.stdout
+
+
+def test_refuse_story_flags_a_verified_run_as_unexpected(tmp_path):
+    done = _run(tmp_path, FIXING_FORGE, "--story", "refuse")   # a stand-in forge that "succeeds" anyway
+    assert done.returncode == 1 and "UNEXPECTED" in done.stdout
+    assert (tmp_path / "work" / "test_cmd").read_text().strip() == "python -m unittest tests.test_shipping"
+
+
+def test_the_refuse_task_really_is_impossible_to_verify(tmp_path):
+    """Not a script property but the story's premise: on the real demo repo the requested change (free from 40.00)
+    breaks a test that is green today, so no honest patch can make the Verifier say PASS."""
+    repo = tmp_path / "shop"
+    subprocess.run(["bash", str(ROOT / "scripts" / "demo" / "make_demo_repo.sh"), str(repo)], check=True,
+                   capture_output=True)
+    # -B: no __pycache__. Without it this test once PASSED the promo: the edit kept the file size (50 -> 40) within the
+    # same second as the first run, and Python reused the stale .pyc (it checks source mtime in seconds + size).
+    unittest = ["python3", "-B", "-m", "unittest", "tests.test_shipping"]
+    assert subprocess.run(unittest, cwd=repo, capture_output=True).returncode == 0      # green before
+    shipping = repo / "shopkit" / "shipping.py"
+    shipping.write_text(shipping.read_text().replace('Decimal("50.00")', 'Decimal("40.00")'))
+    assert subprocess.run(unittest, cwd=repo, capture_output=True).returncode != 0      # the promo breaks the rule
+
+
+@pytest.mark.parametrize("story,marker", [("fix", "Баг-репорт"), ("refuse", "Просьба маркетинга")])
+def test_cue_sheet_is_printed_before_the_show_and_runs_nothing(tmp_path, story, marker):
+    done = subprocess.run(["bash", str(RUN), "--cues", "--story", story], capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin"}, check=False)                   # no forge on PATH at all
+    assert done.returncode == 0 and marker in done.stdout and "5/5" in done.stdout
