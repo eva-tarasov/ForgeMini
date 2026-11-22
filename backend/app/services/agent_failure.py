@@ -24,6 +24,8 @@ class AgentFailureCode(StrEnum):
     GRAPH_EXECUTION_FAILED = "graph_execution_failed"
     STRUCTURED_OUTPUT_INVALID = "structured_output_invalid"
     INVALID_RUNNER_RESULT = "invalid_runner_result"
+    SANDBOX_ERROR = "sandbox_error"
+    WORKSPACE_NOT_CONFIGURED = "workspace_not_configured"
     EXECUTION_FAILED = "execution_failed"
 
 

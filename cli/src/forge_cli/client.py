@@ -26,6 +26,7 @@ from forge_cli.dto import (
     AgentRunStartResponse,
     ErrorResponse,
     HealthResponse,
+    RunReport,
     TaskCreate,
     TaskResponse,
     WorkspaceCreate,
@@ -185,6 +186,34 @@ class ForgeAPIClient:
             params={"after_sequence": after_sequence, "limit": limit},
             response_matches=page_matches,
         )
+
+    def get_run_report(self, run_id: UUID) -> RunReport:
+        if not isinstance(run_id, UUID):
+            raise TypeError("run_id must be a UUID.")
+        return self._request(
+            "GET", "/agent-runs/{run_id}/report", 200, TypeAdapter(RunReport),
+            path=f"/agent-runs/{run_id}/report", response_matches=lambda report: report.run_id == run_id,
+        )
+
+    def get_run_patch(self, run_id: UUID) -> str:
+        """The unified diff as text (plain-text endpoint, so no JSON adapter)."""
+        if not isinstance(run_id, UUID):
+            raise TypeError("run_id must be a UUID.")
+        endpoint = "/agent-runs/{run_id}/patch"
+        try:
+            response = self._client.request("GET", f"/agent-runs/{run_id}/patch")
+        except httpx.TimeoutException:
+            raise ForgeTransportError("GET", endpoint, "timeout") from None
+        except httpx.ConnectError:
+            raise ForgeTransportError("GET", endpoint, "connection") from None
+        except httpx.RequestError:
+            raise ForgeTransportError("GET", endpoint, "transport_failure") from None
+        if response.status_code != 200:
+            raise ForgeAPIError("GET", endpoint, response.status_code, 200, None)
+        try:
+            return response.content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ForgeResponseError("GET", endpoint, response.status_code) from None
 
     def get_run_result(self, run_id: UUID) -> AgentRunResultResponse:
         if not isinstance(run_id, UUID):

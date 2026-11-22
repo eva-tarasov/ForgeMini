@@ -77,7 +77,7 @@ def test_http_persistence_rollback_and_lifecycle(test_data, monkeypatch):
         assert workspace_response.status_code == 201
         workspace = workspace_response.json()
         created["workspaces"].append(UUID(workspace["id"]))
-        assert set(workspace) == {"id", "name"}
+        assert set(workspace) == {"id", "name", "source_path", "test_command", "image"}
         workspaces = client.get("/workspaces")
         assert workspaces.status_code == 200
         assert workspace in workspaces.json()

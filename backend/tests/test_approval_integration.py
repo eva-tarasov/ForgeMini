@@ -89,7 +89,7 @@ def database(tmp_path):
                     async with factory.begin() as session:
                         assert await session.scalar(text("SELECT current_database()")) == name
                         assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
-                        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "1d972cc34fbe"
+                        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a7c3e91d4b20"
                         session.add(WorkspaceModel(id=workspace_id, name="synthetic approval fixture"))
                         await session.flush()
                         session.add(TaskModel(

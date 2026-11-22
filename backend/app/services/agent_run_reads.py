@@ -19,6 +19,8 @@ from app.schemas.agent_run import (
     RunMetadataEvent,
     RunPreliminaryDetails,
     RunPreliminaryEvent,
+    RunStepDetails,
+    RunStepEvent,
     RunTransitionDetails,
     RunTransitionEvent,
     RunVerificationDetails,
@@ -31,12 +33,15 @@ from app.services.agent_usage_codec import AGENT_USAGE_RECORDED_EVENT, AgentUsag
 from app.services.approval_contracts import ApprovalReference
 from app.services.tool_call_audit import ToolCallAudit, ToolCallErrorCode, encode_tool_call_event
 from app.services.tool_calls import ToolCallTicket
+from app.sandbox.events import AGENT_STEP_EVENT
+from app.sandbox.verification import SANDBOX_VERIFICATION_RECORDED, SandboxVerification
 from app.services.verification_contract import VerificationVerdict
 from app.services.verification_evidence import VERIFICATION_RECORDED, VerificationEvidence, decode_evidence, metadata_digest
 
 
 _TOOL_KINDS = frozenset({"tool_call_proposed", "tool_call_started", "tool_call_finished"})
-_RESULT_KINDS = (AGENT_EXECUTION_FAILED_EVENT, AGENT_USAGE_RECORDED_EVENT, VERIFICATION_RECORDED)
+_RESULT_KINDS = (AGENT_EXECUTION_FAILED_EVENT, AGENT_USAGE_RECORDED_EVENT, VERIFICATION_RECORDED,
+                 SANDBOX_VERIFICATION_RECORDED)
 MAX_RESULT_EVENTS = 512
 
 
@@ -158,6 +163,13 @@ def _project_event(run_id: UUID, event: AgentEventModel) -> AgentRunPublicEvent:
             raise ValueError("foreign_verification_event")
         return RunVerificationEvent(kind=kind, details=RunVerificationDetails(verdict=evidence.verdict), **common)
 
+    if kind == AGENT_STEP_EVENT:
+        body = _versioned(payload, 1)
+        return RunStepEvent(kind=kind, details=RunStepDetails(step=body["step"], summary=body["summary"]), **common)
+    if kind == SANDBOX_VERIFICATION_RECORDED:
+        return RunVerificationEvent(kind=VERIFICATION_RECORDED, details=RunVerificationDetails(
+            verdict=SandboxVerification.from_payload(payload).verdict), **common)
+
     if kind in _TOOL_KINDS:
         _validate_tool_event(kind, payload)
     elif kind == "approval_requested":
@@ -201,6 +213,14 @@ def _validate_result(
             if usage is not None:
                 raise ValueError("duplicate_agent_usage")
             usage = _project_usage(decode_agent_usage(run.id, payload))
+        elif kind == SANDBOX_VERIFICATION_RECORDED:
+            sandbox_evidence = SandboxVerification.from_payload(payload)
+            if (
+                verdict is not None or result_digest is None
+                or payload.get("result_sha256") != result_digest
+            ):
+                raise ValueError("inconsistent_sandbox_verification_history")
+            verdict = sandbox_evidence.verdict
         elif kind == VERIFICATION_RECORDED:
             evidence = decode_evidence(payload)
             binding = evidence.plan.binding

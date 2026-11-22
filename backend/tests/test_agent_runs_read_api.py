@@ -57,7 +57,7 @@ def test_openapi_describes_safe_event_discriminator_result_and_query_contract(cl
     assert set(types) == {
         "agent_run_status_changed", "tool_call_proposed", "tool_call_started", "tool_call_finished",
         "approval_requested", "approval_decided", "agent_result_recorded", "agent_execution_failed",
-        "agent_usage_recorded", "verification_recorded", "other",
+        "agent_usage_recorded", "verification_recorded", "agent_step", "other",
     }
     assert set(schemas["AgentRunResultResponse"]["properties"]) == {
         "run_id", "run_status", "preliminary_status", "execution_failure_code", "verification_verdict", "usage",

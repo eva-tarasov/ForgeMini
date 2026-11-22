@@ -86,8 +86,9 @@ def get_run_coordinator(request: Request) -> InProcessRunCoordinator | None:
     return getattr(request.app.state, "run_coordinator", None)
 
 
-def _execution_unavailable() -> ApiError:
-    return ApiError(503, "RUN_EXECUTION_UNAVAILABLE", "Local AgentRun execution is unavailable")
+def _execution_unavailable(reason: str = "") -> ApiError:
+    message = "Local AgentRun execution is unavailable"
+    return ApiError(503, "RUN_EXECUTION_UNAVAILABLE", f"{message}: {reason}" if reason else message)
 
 
 @router.post(
@@ -120,7 +121,7 @@ async def start_agent_run(
     except RunCapacityExceededError as exc:
         raise ApiError(429, "RUN_CAPACITY_EXCEEDED", "Local execution capacity exhausted") from exc
     except RunExecutionUnavailableError as exc:
-        raise _execution_unavailable() from exc
+        raise _execution_unavailable(str(exc)) from exc
     response.headers["Location"] = f"/agent-runs/{run_id}"
     return AgentRunStartResponse(run_id=run_id, accepted=True)
 

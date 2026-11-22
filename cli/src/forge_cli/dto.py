@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import (
     AwareDatetime,
+    model_serializer,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -29,11 +30,28 @@ class WorkspaceCreate(BaseModel):
     name: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
     ]
+    # ForgeMini run configuration; all optional so `forge workspace create --name X` is unchanged.
+    source_path: Annotated[str, StringConstraints(min_length=1, max_length=1000)] | None = None
+    test_command: Annotated[str, StringConstraints(min_length=1, max_length=1000)] | None = None
+    image: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_config(self, handler):
+        # Old request bodies were exactly {"name": ...}; keep that when nothing is configured.
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class WorkspaceResponse(BaseModel):
     id: UUID
     name: str
+    source_path: str | None = None
+    test_command: str | None = None
+    image: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_config(self, handler):
+        # Unconfigured workspaces keep the exact pre-ForgeMini JSON shape ({"id","name"}).
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class TaskCreate(BaseModel):
@@ -101,7 +119,7 @@ AgentFailureCode = Literal[
     "provider_rate_limited", "provider_quota_exhausted", "provider_rate_limit_unknown",
     "provider_auth", "provider_request_rejected", "provider_unavailable", "provider_error",
     "graph_budget_exceeded", "graph_execution_failed", "structured_output_invalid",
-    "invalid_runner_result", "execution_failed",
+    "invalid_runner_result", "sandbox_error", "workspace_not_configured", "execution_failed",
 ]
 
 
@@ -132,6 +150,11 @@ class EmptyEventDetails(_ReadResponse):
     pass
 
 
+class RunStepDetails(_ReadResponse):
+    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "other"]
+    summary: Annotated[str, Field(max_length=600)]
+
+
 class _PublicEvent(_ReadResponse):
     sequence: Annotated[int, Field(ge=1, le=MAX_EVENT_SEQUENCE)]
     created_at: WireDatetime
@@ -157,6 +180,11 @@ class RunVerificationEvent(_PublicEvent):
     details: RunVerificationDetails
 
 
+class RunStepEvent(_PublicEvent):
+    kind: Literal["agent_step"]
+    details: RunStepDetails
+
+
 class RunMetadataEvent(_PublicEvent):
     kind: Literal[
         "tool_call_proposed", "tool_call_started", "tool_call_finished", "approval_requested",
@@ -166,7 +194,8 @@ class RunMetadataEvent(_PublicEvent):
 
 
 AgentRunPublicEvent = Annotated[
-    RunTransitionEvent | RunPreliminaryEvent | RunFailureEvent | RunVerificationEvent | RunMetadataEvent,
+    RunTransitionEvent | RunPreliminaryEvent | RunFailureEvent | RunVerificationEvent | RunStepEvent
+    | RunMetadataEvent,
     Field(discriminator="kind"),
 ]
 
@@ -363,3 +392,36 @@ class ApprovalDecisionResponse(_CapabilityResponse):
         if value is not True:
             raise ValueError("Expected the JSON boolean true.")
         return True
+
+
+class CommandRunView(_ReadResponse):
+    exit_code: int
+    timed_out: bool
+    output_tail: str
+
+
+class VerificationView(_ReadResponse):
+    verdict: VerificationVerdict
+    reason: str
+    test_command: str
+    image: str
+    changed_paths: list[str]
+    protected_violations: list[str]
+    patched: CommandRunView | None
+    baseline: CommandRunView | None
+    duration_ms: int
+
+
+class RunReport(_ReadResponse):
+    """GET /agent-runs/{id}/report: the one-call answer to "what happened and why?"."""
+
+    run_id: UUID
+    task_id: UUID
+    run_status: AgentRunStatus
+    task_status: str
+    goal: str
+    agent_summary: str | None
+    blocked_reason: str | None
+    failure_code: str | None
+    verification: VerificationView | None
+    has_patch: bool

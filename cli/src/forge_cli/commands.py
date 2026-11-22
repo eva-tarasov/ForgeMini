@@ -1,6 +1,7 @@
 """Forge command routing over the typed HTTP client."""
 
 from collections.abc import Callable
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Annotated, NoReturn, TypeVar
 from uuid import UUID
@@ -22,6 +23,7 @@ from forge_cli.dto import (
 from forge_cli.errors import ForgeAPIError, ForgeResponseError, ForgeTransportError
 from forge_cli.output import print_result, print_watch_page, print_watch_summary
 from forge_cli.polling import watch_run
+from forge_cli.solve import SolveStartError, format_report, sanitize, solve as run_solve
 from forge_cli.config import CapabilityConfigurationError
 
 approval_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -251,6 +253,66 @@ def run_watch(
         _fail("AgentRun observation deadline expired.", 6)
     if outcome.stop_reason == "interrupted":
         _fail("AgentRun observation interrupted.", 130)
+
+
+def solve(
+    ctx: typer.Context,
+    repo: Annotated[Path, typer.Option("--repo", help="Project directory (absolute or relative path).")],
+    goal: Annotated[str, typer.Option("--goal", help="What to fix or build, up to 500 characters.")],
+    test: Annotated[str, typer.Option("--test", help="Shell command that exits 0 when the project is correct.")],
+    image: Annotated[str | None, typer.Option("--image", help="Docker image (default python:3.12-slim).")] = None,
+    name: Annotated[str | None, typer.Option("--name", help="Workspace name (default: directory name).")] = None,
+    timeout: Annotated[int, typer.Option(min=10, max=7200, help="Seconds to wait for the run.")] = 900,
+    interval: Annotated[int, typer.Option(min=1, max=30, help="Seconds between polls.")] = 2,
+    no_watch: Annotated[bool, typer.Option("--no-watch", help="Start the run and return immediately.")] = False,
+) -> None:
+    """Fix a repository: agent works in a Docker sandbox, then Forge re-runs your tests independently.
+
+    Exit code 0 only when the result was verified; 1 when not verified; 6 on timeout.
+    """
+    options: CommandOptions = ctx.obj
+    repo_path = repo.expanduser().resolve()
+    if not repo_path.is_dir():
+        _fail(f"--repo is not a directory: {repo_path}", 2)
+
+    def operation(client: ForgeAPIClient):
+        return run_solve(
+            client, repo=repo_path, goal=goal, test=test, image=image, name=name, timeout=timeout,
+            interval=interval, watch=not no_watch,
+            emit=lambda line: typer.echo(sanitize(line, 700), err=options.json_output),
+        )
+
+    try:
+        result = _with_client(options, operation, transport_hint=_RUN_TRANSPORT_HINT)
+    except SolveStartError as exc:
+        _fail(str(exc), 4)
+    if no_watch:
+        return  # ids were already printed by solve(); the run continues on the server
+    if result.report is None:
+        if result.outcome.stop_reason == "timeout":
+            _fail(f"Still running after {timeout}s. Keep watching: forge run watch {result.run_id}", 6)
+        if result.outcome.stop_reason == "interrupted":
+            _fail(f"Interrupted. The run continues on the server: forge run watch {result.run_id}", 130)
+        return
+    if options.json_output:
+        typer.echo(result.report.model_dump_json())
+    else:
+        typer.echo(format_report(result.report, result.run_id))
+    if result.exit_code:
+        raise typer.Exit(result.exit_code)
+
+
+def report(ctx: typer.Context, run_id: Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="RUN_UUID")]) -> None:
+    """Show what happened in a run and why (verdict, evidence, agent's explanation)."""
+    options: CommandOptions = ctx.obj
+    data = _with_client(options, lambda client: client.get_run_report(run_id))
+    typer.echo(data.model_dump_json() if options.json_output else format_report(data, str(run_id)))
+
+
+def patch(ctx: typer.Context, run_id: Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="RUN_UUID")]) -> None:
+    """Print the agent's patch as a unified diff (redirect it: forge patch UUID > fix.patch)."""
+    options: CommandOptions = ctx.obj
+    typer.echo(_with_client(options, lambda client: client.get_run_patch(run_id)), nl=False)
 
 
 RunArgument = Annotated[UUID, typer.Argument(parser=_parse_uuid, metavar="RUN_UUID")]

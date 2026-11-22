@@ -31,6 +31,8 @@ POLICY = {
     "graph_execution_failed": "review_required",
     "structured_output_invalid": "review_required",
     "invalid_runner_result": "review_required",
+    "sandbox_error": "review_required",
+    "workspace_not_configured": "review_required",
     "execution_failed": "review_required",
 }
 

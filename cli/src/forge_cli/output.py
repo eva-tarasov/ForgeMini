@@ -32,6 +32,7 @@ from forge_cli.dto import (
     RunFailureDetails,
     RunPreliminaryDetails,
     RunTransitionDetails,
+    RunStepDetails,
     RunVerificationDetails,
     TaskResponse,
     WorkspaceResponse,
@@ -119,6 +120,8 @@ def _event_lines(events: list[AgentRunPublicEvent]) -> list[str]:
             lines.append(f"Execution failure code: {details.code}")
         elif isinstance(details, RunVerificationDetails):
             lines.append(f"Verification verdict: {details.verdict}")
+        elif isinstance(details, RunStepDetails):
+            lines.append(f"Step ({details.step}): {details.summary}")
         else:
             lines.append("Details: none")
         lines.append("")

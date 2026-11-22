@@ -62,6 +62,11 @@ class EmptyEventDetails(_ReadResponse):
     pass
 
 
+class RunStepDetails(_ReadResponse):
+    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "other"]
+    summary: Annotated[str, Field(max_length=600)]
+
+
 class _PublicEvent(_ReadResponse):
     sequence: Annotated[int, Field(ge=1, le=MAX_EVENT_SEQUENCE)]
     created_at: AwareDatetime
@@ -87,6 +92,11 @@ class RunVerificationEvent(_PublicEvent):
     details: RunVerificationDetails
 
 
+class RunStepEvent(_PublicEvent):
+    kind: Literal["agent_step"]
+    details: RunStepDetails
+
+
 class RunMetadataEvent(_PublicEvent):
     kind: Literal[
         "tool_call_proposed", "tool_call_started", "tool_call_finished", "approval_requested",
@@ -96,7 +106,8 @@ class RunMetadataEvent(_PublicEvent):
 
 
 AgentRunPublicEvent = Annotated[
-    RunTransitionEvent | RunPreliminaryEvent | RunFailureEvent | RunVerificationEvent | RunMetadataEvent,
+    RunTransitionEvent | RunPreliminaryEvent | RunFailureEvent | RunVerificationEvent | RunStepEvent
+    | RunMetadataEvent,
     Field(discriminator="kind"),
 ]
 

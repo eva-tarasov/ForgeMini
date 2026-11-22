@@ -6,3 +6,7 @@ from uuid import UUID
 class Workspace:
     id: UUID
     name: str
+    # Run configuration (ForgeMini). None for workspaces created before it existed.
+    source_path: str | None = None
+    test_command: str | None = None
+    image: str | None = None

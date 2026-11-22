@@ -12,8 +12,12 @@ class WorkspaceService:
         self.session = session
         self.repository = repository
 
-    async def create_workspace(self, name: str) -> Workspace:
-        workspace = Workspace(id=uuid4(), name=name)
+    async def create_workspace(
+        self, name: str, *, source_path: str | None = None, test_command: str | None = None,
+        image: str | None = None,
+    ) -> Workspace:
+        workspace = Workspace(id=uuid4(), name=name, source_path=source_path,
+                              test_command=test_command, image=image)
         try:
             await self.repository.add(workspace)
             await self.session.commit()

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -16,7 +16,7 @@ from app.services.active_runs import ActiveRunRegistry
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunner
 from app.services.agent_runs import AgentRunMetadata, AgentRunNotFoundError, AgentRunService
-from app.services.agent_service import AgentService, cancel_agent_run
+from app.services.agent_service import DEFAULT_EXECUTION_TIMEOUT_SECONDS, AgentService, cancel_agent_run
 from app.services.approval_contracts import ApprovalDecision
 from app.services.approval_preview import (
     ApprovalDecisionConflictError, ApprovalDecisionPort, ApprovalPreviewReader, ApprovalPreviewTarget,
@@ -33,6 +33,10 @@ class RunExecutionUnavailableError(Exception):
     pass
 
 
+class RunnerConfigurationError(Exception):
+    """The runner cannot be built because of a user-fixable setting. The message is shown to the user."""
+
+
 class RunAlreadyStartedError(Exception):
     pass
 
@@ -45,8 +49,12 @@ class RunCapacityExceededError(Exception):
 class RunExecutionBinding:
     """Backend-selected workspace and synchronous, side-effect-free runner composition."""
 
-    workspace_id: UUID
+    workspace_id: UUID | None   # None = this app serves every workspace (ForgeMini)
     build_runner: Callable[[SessionFactory, UUID], AgentRunner]
+    execution_timeout_seconds: float = DEFAULT_EXECUTION_TIMEOUT_SECONDS
+    # Called after execute_run settled (success, failure or cancel). Must be idempotent and only
+    # react to persisted state: this is where independent verification and Task sync happen.
+    after_run: Callable[[SessionFactory, UUID], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,10 +92,14 @@ class InProcessRunCoordinator:
                 runner = self._binding.build_runner(self._session_factory, run_id)
                 if not callable(getattr(runner, "run", None)):
                     raise TypeError("invalid_runner")
+            except RunnerConfigurationError as exc:
+                raise RunExecutionUnavailableError(str(exc)) from None
             except Exception:
                 raise RunExecutionUnavailableError() from None
-            service = AgentService(self._session_factory, runner, active_runs=self._active_runs)
-            execution = service.execute_run(run_id)
+            service = AgentService(
+                self._session_factory, runner, active_runs=self._active_runs,
+                execution_timeout_seconds=self._binding.execution_timeout_seconds)
+            execution = self._execute_then_finalize(service, run_id)
             try:
                 task = asyncio.create_task(execution, name="forge-http-agent-run")
             except BaseException:
@@ -96,6 +108,18 @@ class InProcessRunCoordinator:
             # No suspension between creating the task and handing ownership to the app.
             self._execution = _Execution(run_id, task, runner)
             task.add_done_callback(self._observe_completion)
+
+    async def _execute_then_finalize(self, service: AgentService, run_id: UUID) -> AgentFinalResult:
+        try:
+            return await service.execute_run(run_id)
+        finally:
+            hook = self._binding.after_run
+            if hook is not None:
+                try:
+                    # shielded: a cancelled run must still get its Task synced and its evidence recorded
+                    await asyncio.shield(hook(self._session_factory, run_id))
+                except Exception:
+                    logger.exception("http_agent_run_after_hook_failed")
 
     async def cancel(self, run_id: UUID) -> AgentRunMetadata:
         await self._bound_run(run_id)
@@ -107,7 +131,7 @@ class InProcessRunCoordinator:
         active = self._execution
         if (
             self._closing or active is None or active.task.done() or active.task.cancelling()
-            or active.run_id != target.run_id or self._binding.workspace_id != target.workspace_id
+            or active.run_id != target.run_id or self._binding.workspace_id not in (None, target.workspace_id)
         ):
             return None
         return active.runner
@@ -141,7 +165,7 @@ class InProcessRunCoordinator:
             if run is None:
                 raise AgentRunNotFoundError(run_id)
             task = await TaskRepository(session).get(run.task_id)
-            if task is None or task.workspace_id != self._binding.workspace_id:
+            if task is None or self._binding.workspace_id not in (None, task.workspace_id):
                 raise RunExecutionUnavailableError()
             return AgentRunMetadata.from_record(run)
 

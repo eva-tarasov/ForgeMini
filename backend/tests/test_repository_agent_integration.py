@@ -109,7 +109,7 @@ def database(tmp_path, monkeypatch):
                 async with setup.begin() as session:
                     assert await session.scalar(text("SELECT current_database()")) == name
                     assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
-                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "1d972cc34fbe"
+                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a7c3e91d4b20"
                     session.add(WorkspaceModel(id=workspace_id, name="synthetic repository workspace"))
                     await session.flush()
                     session.add(TaskModel(id=task_id, workspace_id=workspace_id, goal=GOAL,

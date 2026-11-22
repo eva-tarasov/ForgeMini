@@ -87,7 +87,7 @@ def database(settings):
                 async with factory() as session:
                     assert await session.scalar(text("SELECT current_database()")) == settings.postgres_db
                     assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
-                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "1d972cc34fbe"
+                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a7c3e91d4b20"
                     session.add(WorkspaceModel(id=workspace_id, name="synthetic result persistence"))
                     await session.flush()
                     session.add(TaskModel(

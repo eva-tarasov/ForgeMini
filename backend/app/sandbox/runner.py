@@ -17,9 +17,11 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from app.sandbox.agent_loop import ChatModel, EventSink, LoopBudget, LoopOutcome, run_agent_loop
 from app.sandbox.artifacts import FileArtifactStore
-from app.sandbox.changeset import Snapshot
+from app.agent_runtime.error_classification import classify_runtime_error
+from app.sandbox.changeset import Snapshot, SnapshotError
 from app.sandbox.docker_sandbox import DockerSandbox, SandboxError, SandboxLimits
 from app.sandbox.tools import TOOL_SCHEMAS
+from app.services.agent_failure import AgentFailureCode
 from app.services.agent_result import AgentFinalResult
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
 
@@ -51,18 +53,26 @@ class SandboxRunner:
         self._emit_factory = emit_factory
 
     async def run(self, request: AgentRunRequest) -> AgentFinalResult:
-        job = await self._resolve_job(request)
-        base = await asyncio.to_thread(Snapshot.from_directory, job.source_dir)
+        emit = self._emit_factory(request) if self._emit_factory else None
         try:
+            job = await self._resolve_job(request)
+            base = await asyncio.to_thread(Snapshot.from_directory, job.source_dir)
             async with await DockerSandbox.start(image=job.image, source=base, limits=self._limits) as sandbox:
                 outcome = await run_agent_loop(
                     self._model.bind_tools(TOOL_SCHEMAS), sandbox, goal=request.goal,
-                    test_command=job.test_command, budget=self._budget,
-                    emit=self._emit_factory(request) if self._emit_factory else None,
+                    test_command=job.test_command, budget=self._budget, emit=emit,
                 )
                 final = await sandbox.snapshot()
-        except SandboxError as exc:
-            raise AgentRunnerError(f"sandbox_error: {exc}") from exc
+        except AgentRunnerError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except (SandboxError, SnapshotError) as exc:
+            await _report(emit, f"{type(exc).__name__}: {exc}")
+            raise AgentRunnerError(AgentFailureCode.SANDBOX_ERROR.value) from exc
+        except Exception as exc:   # model/provider errors: classify (auth, rate limit, timeout...), keep the detail
+            await _report(emit, f"{type(exc).__name__}: {str(exc)[:300]}")
+            raise AgentRunnerError(classify_runtime_error(exc).value) from exc
         changeset = base.changes_to(final)
         self._artifacts.save(request.run_id, base=base, changeset=changeset, outcome=outcome)
         return self._to_result(outcome, changeset.paths, changeset.is_empty, changeset.sha256())
@@ -84,3 +94,13 @@ class SandboxRunner:
         return AgentFinalResult(summary=outcome.summary or reason, status="blocked",
                                 relevant_components=paths, assumptions=(), observations=(),
                                 blocked_reason=reason)
+
+
+async def _report(emit: EventSink | None, detail: str) -> None:
+    """Best effort: the run is already failing, a broken event write must not hide the real error."""
+    if emit is None:
+        return
+    try:
+        await emit("error", {"detail": detail})
+    except Exception:
+        pass

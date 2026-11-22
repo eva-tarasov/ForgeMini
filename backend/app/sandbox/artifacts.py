@@ -29,11 +29,18 @@ class FileArtifactStore:
         (d / "transcript.json").write_text(json.dumps(outcome.transcript, indent=1, ensure_ascii=False))
         summary = {k: v for k, v in asdict(outcome).items() if k != "transcript"}
         summary["changeset_sha256"] = changeset.sha256()
+        summary["base_sha256"] = base.sha256()
         summary["changed_paths"] = list(changeset.paths)
         (d / "outcome.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
 
     def load_changeset(self, run_id: UUID) -> Changeset:
         return Changeset.from_json((self._dir(run_id) / "changeset.json").read_text())
+
+    def load_outcome(self, run_id: UUID) -> dict:
+        return json.loads((self._dir(run_id) / "outcome.json").read_text())
+
+    def has_run(self, run_id: UUID) -> bool:
+        return (self._dir(run_id) / "outcome.json").is_file()
 
     def patch_text(self, run_id: UUID) -> str:
         return (self._dir(run_id) / "patch.diff").read_text()

@@ -115,6 +115,14 @@ class Snapshot:
                 tar.addfile(info, io.BytesIO(entry.data))
         return buf.getvalue()
 
+    def sha256(self) -> str:
+        """Fingerprint of the whole tree; lets the Verifier detect that the source moved under a run."""
+        h = hashlib.sha256()
+        for p in sorted(self.files):
+            e = self.files[p]
+            h.update(p.encode() + b"\0" + str(e.mode).encode() + b"\0" + hashlib.sha256(e.data).digest())
+        return h.hexdigest()
+
     # ---- comparison ---------------------------------------------------
     def changes_to(self, other: Snapshot) -> Changeset:
         """What must be done to `self` to obtain `other`."""

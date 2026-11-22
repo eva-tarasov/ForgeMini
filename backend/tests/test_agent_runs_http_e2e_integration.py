@@ -61,7 +61,7 @@ def http_run(database, tmp_path, caplog):
             async with database() as (factory, (workspace_id, _), task_ids):
                 async with factory() as session:
                     assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
-                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "1d972cc34fbe"
+                    assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a7c3e91d4b20"
                 binding = RepositoryFixtureBinding(
                     workspace_id, tmp_path, FixtureBaseline("fixture-v1", {FILE: "previous\n"}),
                     frozenset({Capability.REPOSITORY_READ}), (PathScope(FILE),),

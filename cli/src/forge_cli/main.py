@@ -5,7 +5,9 @@ from typing import Annotated
 
 import typer
 
-from forge_cli.commands import CommandOptions, approval_app, evidence_app, health, run_app, task_app, workspace_app
+from forge_cli.commands import (
+    CommandOptions, approval_app, evidence_app, health, patch, report, run_app, solve, task_app, workspace_app,
+)
 from forge_cli.config import resolve_base_url
 
 app = typer.Typer(
@@ -15,6 +17,9 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 app.command()(health)
+app.command()(solve)
+app.command()(report)
+app.command()(patch)
 app.add_typer(approval_app, name="approval", help="Read approvals and exact patch reviews.")
 app.add_typer(evidence_app, name="evidence", help="Read verification evidence.")
 app.add_typer(workspace_app, name="workspace", help="Create and list workspaces.")
