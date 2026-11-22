@@ -57,8 +57,17 @@ fi
 docker info >/dev/null 2>&1 || fail "Docker is not running or not reachable." "Start Docker Desktop and retry."
 ok "docker daemon"
 if [[ "${SKIP_COMPOSE:-0}" != "1" ]]; then
-  docker compose up -d --wait postgres >/dev/null 2>&1 || fail "PostgreSQL did not become healthy." \
-    "docker compose logs postgres | tail -20"
+  # Keep compose's output: on a first start the usual failure is that the image cannot be DOWNLOADED
+  # (no internet, Docker Hub blocked or rate-limited). Then no container exists and `compose logs` is empty,
+  # so "did not become healthy" would send the user to the wrong place.
+  if ! out="$(docker compose up -d --wait postgres 2>&1)"; then
+    echo "$out" | tail -5 >&2
+    if grep -qiE "pull|resolve reference|registry|manifest|toomanyrequests" <<<"$out"; then
+      fail "Cannot download the PostgreSQL image (see the error above)." \
+        "Check the internet connection and access to Docker Hub, then retry."
+    fi
+    fail "PostgreSQL did not become healthy." "docker compose logs postgres | tail -20"
+  fi
 fi
 "$PY" - "$PG_HOST" "$PG_PORT" <<'PYEOF' || fail "Cannot reach PostgreSQL on $PG_HOST:$PG_PORT." "docker compose ps; check POSTGRES_PORT in .env"
 import socket, sys

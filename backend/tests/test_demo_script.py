@@ -25,6 +25,11 @@ FIXING_FORGE = textwrap.dedent('''\
         "    return max((discount_amount(c, subtotal) for c in coupons), default=ZERO)")
     PY
 ''')
+START_ERROR_FORGE = textwrap.dedent('''\
+    #!/usr/bin/env bash
+    [[ "$1" == "health" ]] && exit 0
+    echo "The server cannot start runs. Most likely OPENAI_API_KEY / FORGE_MODEL_NAME are not set" >&2; exit 4
+''')
 FAILING_FORGE = textwrap.dedent('''\
     #!/usr/bin/env bash
     [[ "$1" == "health" ]] && exit 0
@@ -128,3 +133,15 @@ def test_cue_sheet_is_printed_before_the_show_and_runs_nothing(tmp_path, story, 
     done = subprocess.run(["bash", str(RUN), "--cues", "--story", story], capture_output=True, text=True,
                           env={"PATH": "/usr/bin:/bin"}, check=False)                   # no forge on PATH at all
     assert done.returncode == 0 and marker in done.stdout and "5/5" in done.stdout
+
+
+# --- a run that never produced an answer is not a result ------------------------------------------------------------
+# Found in the outsider run without an API key: `forge solve` exits 4, and the "refuse" story used to count that
+# as the honest "no" and exit 0, i.e. a false success.
+@pytest.mark.parametrize("story", ["fix", "refuse"])
+def test_a_run_that_could_not_start_stops_the_demo_with_its_exit_code(tmp_path, story):
+    done = _run(tmp_path, START_ERROR_FORGE, "--story", story)
+    assert done.returncode == 4, done.stdout[-800:]
+    assert "Demo stopped" in done.stdout and "setup problem" in done.stdout
+    assert "4/5" not in done.stdout                                              # no "result" scenes after it
+    assert "As it should be" not in done.stdout and "legitimate outcome" not in done.stdout
