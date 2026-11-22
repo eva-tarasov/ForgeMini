@@ -21,6 +21,10 @@ from app.sandbox.tools import Toolbox
 SYSTEM_PROMPT = """You are a software engineer fixing a problem in a repository that is checked out in /workspace.
 You work inside an isolated sandbox with NO network access: you cannot install packages.
 
+Environment (a minimal Python image):
+- Available in bash: grep, find, sed, awk, cat, head, tail, diff, and `python`. Use `grep -rn` to search.
+- NOT installed: rg (ripgrep), git, patch, curl, wget. Do not try them; change files with the edit_file tool.
+
 Workflow:
 1. Explore the repo (bash: ls, grep, cat) and RUN the test command first to see the real failure.
 2. Find the root cause. Make the smallest change that fixes it (edit_file).

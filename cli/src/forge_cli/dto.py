@@ -412,6 +412,13 @@ class VerificationView(_ReadResponse):
     duration_ms: int
 
 
+class UsageView(_ReadResponse):
+    steps: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+
+
 class RunReport(_ReadResponse):
     """GET /agent-runs/{id}/report: the one-call answer to "what happened and why?"."""
 
@@ -425,3 +432,4 @@ class RunReport(_ReadResponse):
     failure_code: str | None
     verification: VerificationView | None
     has_patch: bool
+    usage: UsageView | None = None

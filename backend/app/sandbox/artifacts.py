@@ -42,5 +42,11 @@ class FileArtifactStore:
     def has_run(self, run_id: UUID) -> bool:
         return (self._dir(run_id) / "outcome.json").is_file()
 
+    def has_patch(self, run_id: UUID) -> bool:
+        """True only if the run produced a NON-EMPTY diff. has_run() is also true for a run that changed nothing
+        (e.g. an honest cannot_fix), and offering "the patch" for that is misleading."""
+        path = self._dir(run_id) / "patch.diff"
+        return path.is_file() and bool(path.read_text().strip())
+
     def patch_text(self, run_id: UUID) -> str:
         return (self._dir(run_id) / "patch.diff").read_text()

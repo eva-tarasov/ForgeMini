@@ -37,6 +37,14 @@ class VerificationView(BaseModel):
     duration_ms: int
 
 
+class UsageView(BaseModel):
+    """What the agent loop consumed. No money value on purpose: prices depend on the model and change."""
+    steps: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+
+
 class RunReport(BaseModel):
     run_id: UUID
     task_id: UUID
@@ -48,6 +56,7 @@ class RunReport(BaseModel):
     failure_code: str | None           # infrastructure/provider failure, if the run never finished
     verification: VerificationView | None
     has_patch: bool
+    usage: UsageView | None = None     # None when the run never produced an outcome (e.g. provider failure)
 
 
 def _store(request: Request) -> FileArtifactStore | None:
@@ -74,18 +83,22 @@ async def get_run_report(run_id: UUID, session: Annotated[AsyncSession, Depends(
     verification = next((SandboxVerification.from_payload(e.payload) for e in reversed(events)
                          if e.event_type == SANDBOX_VERIFICATION_RECORDED), None)
     store = _store(request)
+    usage = None
+    if store and store.has_run(run_id):
+        outcome = store.load_outcome(run_id)
+        usage = UsageView(**{k: int(outcome.get(k, 0)) for k in ("steps", "tool_calls", "input_tokens", "output_tokens")})
     return RunReport(
         run_id=run.id, task_id=run.task_id, run_status=run.status, task_status=task.status if task else "unknown",
         goal=task.goal if task else "", agent_summary=summary, blocked_reason=blocked, failure_code=failure,
-        verification=_view(verification), has_patch=bool(store and store.has_run(run_id)),
+        verification=_view(verification), has_patch=bool(store and store.has_patch(run_id)), usage=usage,
     )
 
 
 @router.get("/agent-runs/{run_id}/patch", response_class=PlainTextResponse)
 async def get_run_patch(run_id: UUID, request: Request) -> str:
     store = _store(request)
-    if store is None or not store.has_run(run_id):
-        raise ApiError(404, "PATCH_NOT_FOUND", "No patch was produced for this run")
+    if store is None or not store.has_patch(run_id):
+        raise ApiError(404, "PATCH_NOT_FOUND", "The agent made no changes in this run")
     return store.patch_text(run_id)
 
 

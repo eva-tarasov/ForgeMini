@@ -119,6 +119,9 @@ def test_full_happy_path_over_http(api):
         assert v["baseline"]["exit_code"] != 0 and v["patched"]["exit_code"] == 0
         assert v["changed_paths"] == ["calc/ops.py"] and report["agent_summary"] == "average used floor division"
 
+        assert report["has_patch"] is True
+        # 4 scripted model turns, each reporting 100 input / 10 output tokens, 4 tool calls (incl. finish)
+        assert report["usage"] == {"steps": 4, "tool_calls": 4, "input_tokens": 400, "output_tokens": 40}
         patch = client.get(f"/agent-runs/{run['id']}/patch")
         assert patch.status_code == 200 and "+    return sum(numbers) / len(numbers)" in patch.text
 
@@ -148,6 +151,10 @@ def test_honest_failure_explains_why_and_task_is_failed(api):
         report = client.get(f"/agent-runs/{run['id']}/report").json()
         assert report["task_status"] == "failed" and report["verification"] is None
         assert "contradicts test_division_by_zero_raises" in report["blocked_reason"]
+        # live-run finding: the agent changed nothing, so there is no patch to offer (was: has_patch=true)
+        assert report["has_patch"] is False
+        assert report["usage"]["steps"] == 2
+        assert client.get(f"/agent-runs/{run['id']}/patch").status_code == 404
         assert client.get(f"/agent-runs/{run['id']}/result").status_code == 200
 
 

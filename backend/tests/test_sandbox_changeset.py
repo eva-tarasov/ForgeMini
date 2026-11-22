@@ -87,3 +87,20 @@ def test_from_directory_rejects_oversized_file(tmp_path, monkeypatch):
     (tmp_path / "big").write_bytes(b"x" * 11)
     with pytest.raises(SnapshotError):
         Snapshot.from_directory(tmp_path)
+
+
+# --- live-run finding: "has a patch" must mean a NON-EMPTY diff ------------------------------------------
+
+def test_artifact_store_has_patch_only_for_non_empty_diffs(tmp_path):
+    from uuid import uuid4
+    from app.sandbox.artifacts import FileArtifactStore
+    store = FileArtifactStore(tmp_path)
+    changed, unchanged, missing = uuid4(), uuid4(), uuid4()
+    for run_id, diff in ((changed, "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"), (unchanged, "")):
+        d = tmp_path / str(run_id)
+        d.mkdir()
+        (d / "outcome.json").write_text("{}")
+        (d / "patch.diff").write_text(diff)
+    assert store.has_patch(changed) is True
+    assert store.has_run(unchanged) is True and store.has_patch(unchanged) is False   # ran, changed nothing
+    assert store.has_patch(missing) is False

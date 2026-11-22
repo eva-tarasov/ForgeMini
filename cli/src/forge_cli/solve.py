@@ -149,6 +149,11 @@ def format_report(report: RunReport, run_id: str) -> str:
                          + (" (timed out)" if v.patched.timed_out else ""))
             if v.patched.exit_code != 0:
                 lines += ["", "Last test output:", "  " + sanitize(v.patched.output_tail, 1500).replace("\n", "\n  ")]
+    if report.usage is not None:
+        u = report.usage
+        tokens = (f"{u.input_tokens:,} input / {u.output_tokens:,} output tokens"
+                  if u.input_tokens or u.output_tokens else "token usage not reported by the provider")
+        lines += ["", f"Usage: {u.steps} model calls, {u.tool_calls} tool calls, {tokens}"]
     if report.has_patch:
         lines += ["", f"Patch: forge patch {run_id}   (apply with: git apply or patch -p1)"]
     if not verified:

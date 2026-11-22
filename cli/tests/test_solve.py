@@ -26,7 +26,7 @@ def report_body(**override):
     body = {
         "run_id": RUN, "task_id": TASK, "run_status": "succeeded", "task_status": "succeeded",
         "goal": "fix", "agent_summary": "Fixed average.", "blocked_reason": None, "failure_code": None,
-        "has_patch": True,
+        "has_patch": True, "usage": {"steps": 5, "tool_calls": 6, "input_tokens": 12345, "output_tokens": 678},
         "verification": {
             "verdict": "pass", "reason": "tests red before, green after", "test_command": "pytest",
             "image": "python:3.12-slim", "changed_paths": ["calc/ops.py"], "protected_violations": [],
@@ -266,3 +266,18 @@ def test_ordinary_failure_keeps_the_task_oriented_advice(server, tmp_path):
     server.report = report_body(run_status="failed", task_status="failed", blocked_reason="cannot fix",
                                 has_patch=False, verification=None)
     assert "refine the goal" in runner.invoke(app, solve_args(tmp_path)).output
+
+
+def test_report_shows_usage_and_says_so_when_tokens_are_not_reported(server, tmp_path):
+    out = runner.invoke(app, solve_args(tmp_path)).output
+    assert "Usage: 5 model calls, 6 tool calls, 12,345 input / 678 output tokens" in out
+    server.report = report_body(usage={"steps": 3, "tool_calls": 2, "input_tokens": 0, "output_tokens": 0})
+    assert "token usage not reported by the provider" in runner.invoke(app, solve_args(tmp_path)).output
+
+
+def test_report_without_usage_field_is_still_accepted(server, tmp_path):
+    body = report_body()
+    body.pop("usage")                                  # e.g. a run that failed before producing an outcome
+    server.report = body
+    result = runner.invoke(app, solve_args(tmp_path))
+    assert result.exit_code == 0 and "Usage:" not in result.output

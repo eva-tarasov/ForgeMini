@@ -119,3 +119,34 @@ def test_start_with_missing_image_fails_cleanly_and_leaks_nothing():
         run(body())
     assert subprocess.run(["docker", "ps", "-aq", "--filter", "label=forge.sandbox=1"],
                           capture_output=True, text=True).stdout.strip() == ""
+
+
+# --- live-run finding: the model wasted calls on `rg`, which the stock image does not have -------------
+
+import os  # noqa: E402
+
+from app.sandbox.agent_loop import SYSTEM_PROMPT  # noqa: E402
+
+PROMPT_SAYS_AVAILABLE = ["grep", "find", "sed", "awk", "cat", "head", "tail", "diff", "python"]
+PROMPT_SAYS_MISSING = ["rg", "git", "patch", "curl", "wget"]
+
+
+def test_prompt_environment_claims_are_stated_in_the_prompt():
+    for tool in PROMPT_SAYS_AVAILABLE + PROMPT_SAYS_MISSING:
+        assert tool in SYSTEM_PROMPT, f"{tool} is tested here but not mentioned in the prompt"
+
+
+def test_tools_the_prompt_promises_exist_in_the_sandbox_image():
+    async def body(sb):
+        for tool in PROMPT_SAYS_AVAILABLE:
+            assert (await sb.exec(f"command -v {tool}")).exit_code == 0, f"prompt promises {tool}, image lacks it"
+    run(_with_sandbox(body))
+
+
+@pytest.mark.skipif(os.environ.get("FORGE_SANDBOX_IMAGE") not in (None, "", "python:3.12-slim"),
+                    reason="the 'not installed' claims hold for the stock python:3.12-slim image only")
+def test_tools_the_prompt_says_are_missing_really_are_missing_in_the_stock_image():
+    async def body(sb):
+        for tool in PROMPT_SAYS_MISSING:
+            assert (await sb.exec(f"command -v {tool}")).exit_code != 0, f"prompt says {tool} is absent, but it exists"
+    run(_with_sandbox(body))
