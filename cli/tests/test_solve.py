@@ -60,6 +60,8 @@ def server(monkeypatch):
         st.calls.append(key)
         if request.content:
             st.bodies[key] = json.loads(request.content)
+        if key == "GET /health":
+            return httpx.Response(200, json={"status": "ok"})
         if key == "GET /workspaces":
             return httpx.Response(200, json=st.workspaces)
         if key == "POST /workspaces":
@@ -225,3 +227,42 @@ def test_sanitize_keeps_newlines_and_truncates():
 def test_workspace_create_body_is_unchanged_when_unconfigured():
     assert WorkspaceCreate(name="n").model_dump(mode="json") == {"name": "n"}
     assert WorkspaceCreate(name="n", test_command="t").model_dump(mode="json") == {"name": "n", "test_command": "t"}
+
+
+def test_unreachable_server_gives_actionable_message_and_creates_nothing(monkeypatch, tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(commands, "ForgeAPIClient",
+                        lambda base_url: ForgeAPIClient(base_url, transport=httpx.MockTransport(handler)))
+    result = runner.invoke(app, solve_args(tmp_path))
+    assert result.exit_code == 3
+    assert "scripts/start.sh" in result.output and "may have taken effect" not in result.output
+    assert calls == ["/health"]  # nothing was created before the check failed
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("provider_auth", "OPENAI_API_KEY"),
+    ("provider_connection", "internet connection"),
+    ("provider_request_rejected", "FORGE_MODEL_NAME"),
+    ("provider_quota_exhausted", "billing"),
+    ("sandbox_error", "Docker"),
+])
+def test_provider_failures_point_at_the_real_cause_not_at_the_task(server, tmp_path, code, expected):
+    server.run_status = "failed"
+    server.report = report_body(run_status="failed", task_status="failed", agent_summary=None,
+                                failure_code=code, has_patch=False, verification=None)
+    result = runner.invoke(app, solve_args(tmp_path))
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert "refine the goal" not in result.output
+
+
+def test_ordinary_failure_keeps_the_task_oriented_advice(server, tmp_path):
+    server.run_status = "failed"
+    server.report = report_body(run_status="failed", task_status="failed", blocked_reason="cannot fix",
+                                has_patch=False, verification=None)
+    assert "refine the goal" in runner.invoke(app, solve_args(tmp_path)).output

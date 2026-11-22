@@ -141,3 +141,57 @@ def test_events_are_emitted_in_order():
     loop(ScriptedModel([tool_turn("bash", {"command": "ls"}),
                         tool_turn("finish", {"status": "done", "summary": "s"})]), emit=sink)
     assert events == ["model_response", "tool_result", "model_response", "tool_result", "finish"]
+
+
+# --- live-run finding: the Responses API returns content as a list of blocks -------------------------
+
+from app.sandbox.agent_loop import message_text  # noqa: E402
+
+
+def test_message_text_ignores_reasoning_and_tool_call_blocks():
+    content = [
+        {"id": "rs_1", "summary": [], "type": "reasoning", "content": [], "encrypted_content": "gAAAAAB-SECRET-BLOB"},
+        {"type": "function_call", "name": "bash", "arguments": '{"command": "ls"}', "call_id": "call_1"},
+    ]
+    assert message_text(content) == ""
+
+
+def test_message_text_keeps_text_blocks_of_both_kinds_in_order():
+    content = [{"type": "reasoning", "encrypted_content": "x"}, {"type": "text", "text": "first"},
+               {"type": "output_text", "text": " second "}, "plain"]
+    assert message_text(content) == "first\nsecond\nplain"
+
+
+def test_message_text_plain_string_and_unknown_shapes():
+    assert message_text("hello") == "hello"
+    assert message_text(None) == ""
+    assert message_text({"type": "text", "text": "not a list"}) == ""
+
+
+def test_step_summary_has_no_raw_api_objects_for_block_content():
+    from app.sandbox.events import step_payload
+    text = message_text([{"type": "reasoning", "encrypted_content": "gAAAA-BLOB"}])
+    summary = step_payload("model_response", {"step": 1, "text": text, "tool_calls": ["bash", "bash"]})["summary"]
+    assert summary == "step 1: bash, bash"
+    assert "call_id" not in summary and "encrypted" not in summary and "BLOB" not in summary
+
+
+def test_loop_with_responses_api_block_content_leaks_no_raw_objects_into_events_or_transcript():
+    """Exactly the shape a live OpenAI run produced: content = [reasoning(encrypted), function_call...]."""
+    from langchain_core.messages import AIMessage
+    blob = "gAAAAAB-ENCRYPTED-REASONING-BLOB"
+    turn = AIMessage(
+        content=[{"id": "rs_1", "summary": [], "type": "reasoning", "content": [], "encrypted_content": blob},
+                 {"type": "function_call", "name": "bash", "call_id": "call_1", "arguments": '{"command": "ls"}'}],
+        tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call_1", "type": "tool_call"}])
+    events: list[tuple[str, dict]] = []
+
+    async def sink(kind, data):
+        events.append((kind, data))
+
+    out = loop(ScriptedModel([turn, tool_turn("finish", {"status": "done", "summary": "ok"})]), emit=sink)
+    assert out.status == "claimed_done"
+    blob_everywhere = repr(events) + repr(out.transcript)
+    assert blob not in blob_everywhere and "call_id" not in blob_everywhere
+    model_events = [d for k, d in events if k == "model_response"]
+    assert model_events[0]["tool_calls"] == ["bash"] and model_events[0]["text"] == ""

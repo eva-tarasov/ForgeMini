@@ -108,6 +108,22 @@ def _event_line(event) -> str | None:
     return None
 
 
+# What to do next depends on WHY the run failed: a provider problem is not a problem with the task.
+_PROVIDER_HINTS = {
+    "provider_auth": "OpenAI rejected the API key. Check OPENAI_API_KEY in .env (scripts/setup.sh), then restart the server.",
+    "provider_connection": "The server could not reach OpenAI. Check your internet connection / proxy / VPN.",
+    "provider_timeout": "OpenAI did not answer in time. Try again; raise FORGE_MODEL_TIMEOUT_SECONDS in .env if it repeats.",
+    "provider_rate_limited": "OpenAI rate limit hit. Wait a minute and try again.",
+    "provider_rate_limit_unknown": "OpenAI rate limit hit. Wait a minute and try again.",
+    "provider_quota_exhausted": "OpenAI quota/billing is exhausted for this key. Check your OpenAI account.",
+    "provider_request_rejected": "OpenAI rejected the request. Most often FORGE_MODEL_NAME is wrong or not available to your key.",
+    "provider_unavailable": "OpenAI is temporarily unavailable. Try again later.",
+    "provider_error": "OpenAI returned an error. See the server log (terminal 1) for details.",
+    "sandbox_error": "The Docker sandbox failed. Is Docker running? See the server log (terminal 1).",
+    "workspace_not_configured": "The workspace has no source path / test command (create it via forge solve).",
+}
+
+
 def format_report(report: RunReport, run_id: str) -> str:
     verified = report.run_status == "succeeded"
     lines = ["", "=" * 60,
@@ -136,6 +152,10 @@ def format_report(report: RunReport, run_id: str) -> str:
     if report.has_patch:
         lines += ["", f"Patch: forge patch {run_id}   (apply with: git apply or patch -p1)"]
     if not verified:
-        lines += ["", "Options: refine the goal and run again, fix the tests/requirements, or inspect the "
-                      f"steps with: forge run events {run_id}"]
+        hint = _PROVIDER_HINTS.get(report.failure_code or "")
+        if hint:
+            lines += ["", "What to do: " + hint, f"Details of the run: forge run events {run_id}"]
+        else:
+            lines += ["", "Options: refine the goal and run again, fix the tests/requirements, or inspect the "
+                          f"steps with: forge run events {run_id}"]
     return "\n".join(lines)

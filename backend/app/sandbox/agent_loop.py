@@ -62,6 +62,28 @@ class LoopOutcome:
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
 
+def message_text(content: object) -> str:
+    """The human-readable text of a model message, whatever shape the provider returned.
+
+    OpenAI's Responses API returns `content` as a LIST of blocks (reasoning with an encrypted payload,
+    function_call, text...). str() of that list is what a live run first showed: raw API objects in the
+    progress stream and in transcript.json. Only text blocks are text; everything else is not.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in ("text", "output_text"):
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(p.strip() for p in parts if p.strip())
+
+
 def _preview(text: str, n: int = 600) -> str:
     """Head + tail: for test output the verdict (FAILED / OK) is at the END."""
     if len(text) <= n:
@@ -95,7 +117,7 @@ async def run_agent_loop(
         usage = getattr(ai, "usage_metadata", None) or {}
         out.input_tokens += usage.get("input_tokens", 0)
         out.output_tokens += usage.get("output_tokens", 0)
-        text = ai.content if isinstance(ai.content, str) else str(ai.content)
+        text = message_text(ai.content)
         await note("model_response", step=step, text=_preview(text),
                    tool_calls=[c["name"] for c in ai.tool_calls])
 

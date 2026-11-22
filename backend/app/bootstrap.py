@@ -10,6 +10,7 @@ Settings come from the environment / project-root .env (the OpenAI key lives ONL
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -52,6 +53,7 @@ class ForgeMiniSettings(BaseSettings):
     forge_agent_max_steps: int = Field(default=25, ge=1, le=200)
     forge_sandbox_memory: str = "1g"
     forge_sandbox_cpus: float = Field(default=1.0, gt=0)
+    forge_sandbox_image: str | None = None                              # default image for workspaces without one
     forge_data_dir: Path = Path("./.forgemini")                         # artifacts: patches, transcripts
 
 
@@ -71,6 +73,9 @@ def create_forge_app(
     session_factory: SessionFactory | None = None, model_factory: ModelFactory | None = None,
 ) -> FastAPI:
     cfg = forge or ForgeMiniSettings()
+    if cfg.forge_sandbox_image:
+        # default_image() reads os.environ only; this makes a value from .env effective too.
+        os.environ["FORGE_SANDBOX_IMAGE"] = cfg.forge_sandbox_image
     artifacts = FileArtifactStore(cfg.forge_data_dir / "runs")
     make_model = model_factory or openai_model_factory(cfg)
     run_limits = SandboxLimits(memory=cfg.forge_sandbox_memory, cpus=cfg.forge_sandbox_cpus)

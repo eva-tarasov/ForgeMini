@@ -276,6 +276,19 @@ def solve(
         _fail(f"--repo is not a directory: {repo_path}", 2)
 
     def operation(client: ForgeAPIClient):
+        # Fail fast and clearly BEFORE creating anything: "connection refused" almost always means the
+        # server is simply not running, and the generic "request may have taken effect" hint would mislead.
+        try:
+            client.get_health()
+        except ForgeTransportError as exc:
+            if exc.reason == "connection":
+                _fail(
+                    f"Cannot reach the Forge server at {options.base_url}.\n"
+                    "Start it in ANOTHER terminal (from the repository root):  scripts/start.sh\n"
+                    "and wait for the line 'Uvicorn running on ...'. Then run this command again.",
+                    3,
+                )
+            raise
         return run_solve(
             client, repo=repo_path, goal=goal, test=test, image=image, name=name, timeout=timeout,
             interval=interval, watch=not no_watch,
