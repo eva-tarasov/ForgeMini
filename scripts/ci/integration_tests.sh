@@ -63,4 +63,5 @@ run_group "$T06" \
   tests/test_service_transactions.py \
   tests/test_forgemini_http_e2e.py \
   tests/test_demo_shop_e2e.py \
-  tests/test_cli_against_real_server.py   # these names do not end in _integration.py, so they are listed explicitly
+  tests/test_cli_against_real_server.py \
+  tests/test_evals_e2e.py   # these names do not end in _integration.py, so they are listed explicitly

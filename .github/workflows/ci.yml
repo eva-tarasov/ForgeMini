@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check backend cli
+      - run: ruff check backend cli evals
 
   unit:
     # No database: integration tests skip themselves when their env gate is absent.
@@ -39,6 +39,8 @@ jobs:
       - name: Backend unit tests
         working-directory: backend
         run: python -m pytest -q
+      - name: Eval harness tests (hidden oracles are tested against the buggy and the fixed repositories)
+        run: python -m pytest -q evals/tests
       - name: CLI tests
         working-directory: cli
         # Three demo-launcher tests hard-code the author's laptop path

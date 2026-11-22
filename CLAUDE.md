@@ -29,6 +29,8 @@ ForgeMini — рабочий прототип «Forge»: даём репозит
 - Унаследованное и **замораживаемое** (уберём после прототипа, ADR-003..): LangGraph-графы (`agent_runtime/*_graph.py`), fixture-инструменты, approved `apply_patch`, path-permissions.
 - Переиспользуем: domain/state machines, репозитории, `AgentService.execute_run`, учёт стоимости, public API, CLI.
 
+- `evals/` — мини-evals (`scripts/eval.sh`): задачи, скрытые оракулы, раннер, отчёт. Метрика №1 — ложные успехи.
+
 ## Команды
 ```bash
 # Unit-тесты (без БД; интеграционные скипаются)
