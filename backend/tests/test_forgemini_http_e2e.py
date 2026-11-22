@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import time
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,7 +56,7 @@ def api(tmp_path):
     created = {"workspaces": []}
     holder = {"turns": []}
 
-    def build(turns, *, key_present=True):
+    def build(turns, *, key_present=True, **settings):
         holder["turns"] = turns
 
         def factory():
@@ -63,7 +64,7 @@ def api(tmp_path):
                 from app.services.in_process_run_coordinator import RunnerConfigurationError
                 raise RunnerConfigurationError("OPENAI_API_KEY and FORGE_MODEL_NAME must be set in the server environment (.env)")
             return ScriptedModel(holder["turns"])
-        app = create_forge_app(ForgeMiniSettings(forge_data_dir=tmp_path / "data", openai_api_key=None),
+        app = create_forge_app(ForgeMiniSettings(forge_data_dir=tmp_path / "data", openai_api_key=None, **settings),
                                db_settings=_db_settings(), model_factory=factory)
         return TestClient(app)
 
@@ -105,6 +106,34 @@ def wait_terminal(client, run_id, timeout=300):
     raise AssertionError(f"run did not finish; last status {status}")
 
 
+
+def _with_cache_split(turns, cached):
+    """Same scripted turns, but the provider also says how many input tokens came from its cache."""
+    return [t.model_copy(update={"usage_metadata": {**t.usage_metadata,
+                                                     "input_token_details": {"cache_read": cached}}})
+            for t in turns]
+
+
+@pytest.mark.parametrize("turns,cost,status", [
+    # 4 calls x (80 fresh input x $2 + 20 cached x $0.5 + 10 output x $8) per 1M tokens = $0.001
+    (_with_cache_split(FIX_AVERAGE, 20), Decimal("0.001"), "estimated"),
+    # cache split NOT reported and cached price differs from input price: Forge refuses to guess any call's cost
+    (FIX_AVERAGE, None, "incomplete"),
+], ids=["cache-split-known", "cache-split-unknown"])
+def test_run_cost_is_estimated_from_the_owner_tariff(api, turns, cost, status):
+    build, make_run, _ = api
+    tariff = {"forge_model_name": "synthetic-model", "forge_price_input_usd_per_million": "2",
+              "forge_price_output_usd_per_million": "8", "forge_price_cached_input_usd_per_million": "0.5"}
+    with build(turns, **tariff) as client:
+        _, run = make_run(client, AVG)
+        assert client.post(f"/agent-runs/{run['id']}/start").status_code == 202
+        assert wait_terminal(client, run["id"]) == "succeeded"
+        usage = client.get(f"/agent-runs/{run['id']}/report").json()["usage"]
+        assert usage["cost_status"] == status
+        assert (None if usage["known_cost_usd"] is None else Decimal(usage["known_cost_usd"])) == cost
+        result = client.get(f"/agent-runs/{run['id']}/result").json()["usage"]
+        assert result["cost_complete"] is (status == "estimated") and result["known_total_tokens"] == 440
+
 def test_full_happy_path_over_http(api):
     build, make_run, _ = api
     with build(FIX_AVERAGE) as client:
@@ -121,7 +150,9 @@ def test_full_happy_path_over_http(api):
 
         assert report["has_patch"] is True
         # 4 scripted model turns, each reporting 100 input / 10 output tokens, 4 tool calls (incl. finish)
-        assert report["usage"] == {"steps": 4, "tool_calls": 4, "input_tokens": 400, "output_tokens": 40}
+        # no tariff configured: tokens are known, money is explicitly "not priced" (never shown as $0)
+        assert report["usage"] == {"steps": 4, "tool_calls": 4, "input_tokens": 400, "output_tokens": 40,
+                                   "known_cost_usd": None, "cost_status": "not_priced"}
         patch = client.get(f"/agent-runs/{run['id']}/patch")
         assert patch.status_code == 200 and "+    return sum(numbers) / len(numbers)" in patch.text
 
@@ -129,6 +160,9 @@ def test_full_happy_path_over_http(api):
         result = client.get(f"/agent-runs/{run['id']}/result")
         assert result.status_code == 200
         assert result.json()["run_status"] == "succeeded" and result.json()["verification_verdict"] == "pass"
+        # every sandbox model call reached the kernel UsageCollector (before C4-finding: usage was null here)
+        assert result.json()["usage"] == {"known_total_tokens": 440, "usage_complete": True,
+                                          "known_cost_usd": None, "cost_complete": False}
         events = client.get(f"/agent-runs/{run['id']}/events?limit=100").json()["items"]
         kinds = [e["kind"] for e in events]
         assert kinds.count("agent_step") >= 8 and "verification_recorded" in kinds

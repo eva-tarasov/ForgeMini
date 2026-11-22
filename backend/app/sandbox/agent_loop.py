@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.sandbox.docker_sandbox import DockerSandbox
+from app.sandbox.model_usage import invoke_observed
 from app.sandbox.tools import Toolbox
 
 SYSTEM_PROMPT = """You are a software engineer fixing a problem in a repository that is checked out in /workspace.
@@ -124,7 +125,7 @@ async def run_agent_loop(
 
     nudges = 0
     for step in range(1, budget.max_steps + 1):
-        ai = await model.ainvoke(messages)
+        ai = await invoke_observed(model, messages)      # also reports the call to the kernel UsageCollector
         messages.append(ai)
         out.steps = step
         usage = getattr(ai, "usage_metadata", None) or {}

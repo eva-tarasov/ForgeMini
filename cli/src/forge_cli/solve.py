@@ -7,6 +7,7 @@ terminal control characters before it is printed.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from forge_cli.client import ForgeAPIClient
@@ -15,6 +16,7 @@ from forge_cli.dto import (
     AgentRunStatus,
     RunReport,
     TaskCreate,
+    UsageView,
     WorkspaceCreate,
 )
 from forge_cli.errors import ForgeAPIError
@@ -24,6 +26,23 @@ EXIT_OK = 0
 EXIT_NOT_VERIFIED = 1
 EXIT_APPLY_FAILED = 7
 
+
+
+def cost_text(usage: UsageView) -> str:
+    """Human cost line. Unknown is never shown as $0: the status says why the number is missing or only a floor."""
+    def money(value: str) -> str:
+        amount = Decimal(value)
+        return f"${amount:.4f}" if amount >= Decimal("0.0001") or amount == 0 else "< $0.0001"
+    if usage.cost_status == "estimated" and usage.known_cost_usd is not None:
+        text = money(usage.known_cost_usd)
+        return text if text.startswith("<") else f"≈ {text}"
+    if usage.cost_status == "incomplete":
+        if usage.known_cost_usd is None:
+            return "unknown (the provider did not report usage for the model calls)"
+        return f"at least {money(usage.known_cost_usd)} (some model calls could not be priced)"
+    if usage.cost_status == "not_priced":
+        return "not priced (set FORGE_PRICE_INPUT/OUTPUT_USD_PER_MILLION in the server .env)"
+    return ""
 
 def sanitize(text: str, limit: int = 4000) -> str:
     """Drop control characters (ANSI escapes included) except newline and tab."""
@@ -167,6 +186,9 @@ def format_report(report: RunReport, run_id: str) -> str:
         tokens = (f"{u.input_tokens:,} input / {u.output_tokens:,} output tokens"
                   if u.input_tokens or u.output_tokens else "token usage not reported by the provider")
         lines += ["", f"Usage: {u.steps} model calls, {u.tool_calls} tool calls, {tokens}"]
+        cost = cost_text(u)
+        if cost:
+            lines.append(f"Cost: {cost}")
     if report.has_patch:
         lines += ["", f"Patch: forge patch {run_id}   (apply with: git apply or patch -p1)"]
     if not verified:

@@ -434,3 +434,29 @@ def test_rich_view_tells_what_to_do_when_the_provider_failed(server, tmp_path, m
     plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
     assert result.exit_code == 1 and "NOT VERIFIED (failed)" in plain
     assert "What to do: OpenAI rejected the API key" in plain and "forge run events" in plain
+
+
+# --- run cost line (usage wired to the kernel collector; prices come from the server .env) -------------------------
+from forge_cli.dto import UsageView  # noqa: E402
+from forge_cli.solve import cost_text  # noqa: E402
+
+
+def _usage(cost, status):
+    return UsageView(steps=4, tool_calls=4, input_tokens=400, output_tokens=40, known_cost_usd=cost, cost_status=status)
+
+
+@pytest.mark.parametrize("cost,status,expected", [
+    ("0.001000", "estimated", "≈ $0.0010"),
+    ("0.00000003", "estimated", "< $0.0001"),            # tiny, but never rounded down to a misleading $0.0000
+    ("0.0004", "incomplete", "at least $0.0004 (some model calls could not be priced)"),
+    (None, "incomplete", "unknown (the provider did not report usage for the model calls)"),
+    (None, "not_priced", "not priced (set FORGE_PRICE_INPUT/OUTPUT_USD_PER_MILLION in the server .env)"),
+    (None, "not_recorded", ""),
+])
+def test_cost_line_never_shows_unknown_as_zero(cost, status, expected):
+    assert cost_text(_usage(cost, status)) == expected
+
+
+def test_report_from_an_older_server_without_cost_fields_still_parses():
+    usage = UsageView.model_validate({"steps": 1, "tool_calls": 1, "input_tokens": 1, "output_tokens": 1})
+    assert (usage.known_cost_usd, usage.cost_status, cost_text(usage)) == (None, "not_recorded", "")

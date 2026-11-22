@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from forge_cli.dto import RunReport, VerificationView
-from forge_cli.solve import next_step_lines, sanitize
+from forge_cli.solve import cost_text, next_step_lines, sanitize
 
 MAX_DIFF_LINES = 70
 ARROW = "▸"
@@ -179,6 +179,8 @@ class SolveView:
             head.append(f"   {u.steps} model calls · {u.tool_calls} tool calls", style="dim")
             if u.input_tokens or u.output_tokens:
                 head.append(f" · {u.input_tokens:,} in / {u.output_tokens:,} out tokens", style="dim")
+            if u.cost_status in ("estimated", "incomplete") and u.known_cost_usd is not None:
+                head.append(f" · {cost_text(u)}", style="dim")
         head.append(f" · {took:.0f}s", style="dim")
         lines: list = [head]
         if report.has_patch:
