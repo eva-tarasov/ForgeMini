@@ -151,6 +151,12 @@ def analyse() -> dict:
     everything = set(graph)
     keep_now = reachable(graph, KERNEL_ROOTS, SEAMS)
     unreachable_now = sorted(everything - keep_now)
+    # "unreachable from the kernel" is NOT "unused": app.main registers routers, so a module imported only by
+    # app.main is a LIVE public endpoint. Count the seams' own imports as roots to find what is dead in production.
+    seam_imports = set().union(*(graph.get(s, set()) for s in SEAMS))
+    alive_in_prod = reachable(graph, KERNEL_ROOTS + sorted(seam_imports), [])
+    dead_in_prod = sorted(everything - alive_in_prod)
+    only_via_main = sorted(set(unreachable_now) - set(dead_in_prod))
     m1 = {m for m in everything if M1_RE.fullmatch(m)}
     # the boundary: imports that go from the kernel INTO the M1 set. Each is one place to refactor before deleting.
     boundary = sorted((a, b) for a, targets in graph.items() if a not in m1 for b in targets if b in m1)
@@ -177,8 +183,11 @@ def analyse() -> dict:
         for m in mods:
             if m in m1:
                 importers[m].append(name)
+    # dead in production but alive in TESTS: tests use them as fixtures. Deleting the module orphans those tests.
+    held_by_tests = {m: sorted(t for t, mods in tests.items() if m in mods) for m in dead_in_prod}
     test_loc = {p.name: sum(1 for line in p.read_text().splitlines() if line.strip()) for p in TESTS.glob("*.py")}
-    return {"m1": sorted(m1), "unreachable_now": unreachable_now, "boundary": boundary, "loc": loc,
+    return {"m1": sorted(m1), "unreachable_now": unreachable_now, "dead_in_prod": dead_in_prod,
+            "only_via_main": only_via_main, "held_by_tests": held_by_tests, "boundary": boundary, "loc": loc,
             "per_pkg": dict(per_pkg), "test_classes": {k: sorted(v) for k, v in classes.items()},
             "m1_test_importers": dict(importers), "total_loc": sum(loc.values()),
             "tests_total": len(tests), "tests_loc": sum(test_loc.values()), "test_loc": test_loc}
@@ -186,13 +195,16 @@ def analyse() -> dict:
 
 def markdown(r: dict) -> str:
     m1_loc = sum(r["loc"][m] for m in r["m1"])
-    dead_now = sum(r["loc"][m] for m in r["unreachable_now"])
+    dead_now = sum(r["loc"][m] for m in r["dead_in_prod"])
+    via_main = sum(r["loc"][m] for m in r["only_via_main"])
     out = [f"Backend `app/`: **{r['total_loc']:,}** non-empty lines in {len(r['loc'])} modules.", "",
            f"- proposal: **{len(r['m1'])} modules / {m1_loc:,} lines ({m1_loc / r['total_loc']:.0%})** are inherited M1 weight;",
-           f"- already unreachable from the kernel today (deletable right now): **{dead_now:,}** lines in "
-           f"{len(r['unreachable_now'])} modules;",
-           f"- the rest ({m1_loc - dead_now:,} lines) is still imported by the kernel through **{len(r['boundary'])} "
-           "boundary imports** (table below): refactor first, then delete.", "",
+           f"- **dead in production** (nothing imports them, not even app.main): **{dead_now:,}** lines in "
+           f"{len(r['dead_in_prod'])} modules. Still NOT freely deletable: tests use them as fixtures (table below);",
+           f"- **live only through app.main** (public endpoints approvals/evidence): {via_main:,} lines in "
+           f"{len(r['only_via_main'])} modules. Removing them changes the public API (a decision, ADR-003 Q1);",
+           f"- the rest is imported by the kernel through **{len(r['boundary'])} boundary imports** (table below): "
+           "refactor first, then delete.", "",
            "| package | kernel lines | M1 lines |", "|---|---:|---:|"]
     for pkg, v in sorted(r["per_pkg"].items()):
         if v["kernel"] or v["m1"]:
@@ -200,8 +212,12 @@ def markdown(r: dict) -> str:
     out += ["", "### Boundary: kernel module -> M1 module it imports", "", "| kernel module | imports (M1) |", "|---|---|"]
     for a, b in r["boundary"]:
         out.append(f"| `{a}` | `{b}` |")
-    dead = set(r["unreachable_now"])
-    out += ["", "### M1 modules", "", "| module | lines | tests importing it | unreachable today |", "|---|---:|---:|:---:|"]
+    out += ["", "### Dead in production, and who still keeps each alive in tests", "",
+            "| module | lines | tests importing it |", "|---|---:|---:|"]
+    for m in sorted(r["dead_in_prod"], key=lambda m: (-len(r["held_by_tests"][m]), m)):
+        out.append(f"| `{m}` | {r['loc'][m]:,} | {len(r['held_by_tests'][m])} |")
+    dead = set(r["dead_in_prod"])
+    out += ["", "### M1 modules", "", "| module | lines | tests importing it | dead in production |", "|---|---:|---:|:---:|"]
     for m in sorted(r["m1"], key=lambda m: (-r["loc"][m], m)):
         out.append(f"| `{m}` | {r['loc'][m]:,} | {len(r['m1_test_importers'].get(m, []))} | {'yes' if m in dead else ''} |")
     out += ["", f"### Tests ({r['tests_total']} files, {r['tests_loc']:,} lines)", "",

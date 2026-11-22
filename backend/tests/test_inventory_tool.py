@@ -30,7 +30,8 @@ def ig(tmp_path, monkeypatch):
     for rel, body in files.items():
         (app / rel).write_text(body)
     (tests / "test_kernel.py").write_text("from app.services.verifier import V\n")
-    (tests / "test_m1.py").write_text("from app.agent_runtime.graph import G\nfrom app.tools.executor import run\n")
+    (tests / "test_m1.py").write_text(
+        "from app.agent_runtime.graph import G\nfrom app.tools.executor import run\nfrom app.agent_runtime.orphan_demo import X\n")
     (tests / "test_mixed.py").write_text("from app.services.verifier import V\nfrom app.tools.executor import run\n")
     (tests / "test_mixed_kernel.py").write_text(
         "from app.services.verifier import V\nfrom app.main import create_app\nfrom app.tools.executor import run\n")
@@ -70,3 +71,16 @@ def test_boundary_and_test_classification(ig):
     assert classes["mixed, mostly kernel (<50% M1 imports): edit the M1 half out"] == {"test_mixed_kernel.py"}
     assert classes["kernel only: stays"] == {"test_kernel.py"}
     assert classes["no app imports (generic/support)"] == {"test_plain.py"}
+
+
+def test_imported_only_by_main_is_live_not_dead(ig):
+    """The ADR-003 mistake, pinned: app.main registers routers, so a module that ONLY main imports is a live endpoint.
+    "Unreachable from the kernel" overstated what is deletable (24 modules claimed, 15 really dead in production)."""
+    r = ig.analyse()
+    assert "app.services.coordinator" in r["unreachable_now"]                         # looks unused from the kernel...
+    assert "app.services.coordinator" not in r["dead_in_prod"]                        # ...but main imports it: live
+    assert {"app.services.coordinator", "app.tools.executor"} <= set(r["only_via_main"])
+    assert "app.agent_runtime.orphan_demo" in r["dead_in_prod"]
+    assert not {"app.services.coordinator", "app.tools.executor", "app.services.verifier"} & set(r["dead_in_prod"])
+    # dead in production but still imported by a test: deleting the module would orphan that test
+    assert r["held_by_tests"]["app.agent_runtime.orphan_demo"] == ["test_m1.py"]
