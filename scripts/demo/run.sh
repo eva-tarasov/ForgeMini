@@ -169,6 +169,16 @@ set +e
 (cd "$WORK" && forge solve --repo forge-demo-shop --goal "$GOAL" --test "$SANDBOX_TEST" --apply)   # the command shown
 SOLVE_RC=$?
 set -e
+# Only 0 (verified) and 1 (ran, NOT verified) are results. Anything else (4: the server cannot start runs,
+# e.g. no OPENAI_API_KEY; 6: timeout; 7: verified but not applied; ...) means the run never produced an answer.
+# Without this stop the "refuse" story would call a missing API key "the right answer" and exit 0:
+# a false success, the one outcome the whole project exists to prevent.
+if [[ $SOLVE_RC -ne 0 && $SOLVE_RC -ne 1 ]]; then
+  echo
+  echo "${B}Demo stopped:${R} forge solve could not finish (exit $SOLVE_RC). That is a setup problem, not a result: see the message above."
+  say "Work directory: $WORK  (rm -rf it when done)"
+  exit "$SOLVE_RC"
+fi
 pause
 
 # ── 4. the result ──────────────────────────────────────────────────────────────────────────────────────────────
