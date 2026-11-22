@@ -3,10 +3,13 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from langchain_openai import ChatOpenAI
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -21,6 +24,10 @@ from app.services.agent_runs import AgentRunCreateConflictError, AgentRunService
 from app.services.agent_service import AgentService
 from test_task_idempotency_integration import database
 
+
+# The fixture DB must be migrated to the CURRENT head (read from the migration scripts, so a new migration does not
+# require editing this test; it used to hard-code the revision and broke on every migration).
+ALEMBIC_HEAD = ScriptDirectory.from_config(Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))).get_current_head()
 
 pytestmark = pytest.mark.skipif(
     os.getenv("FORGE_TASK06_TEST_DB") is None, reason="set FORGE_TASK06_TEST_DB to opt in to AgentRun HTTP tests",
@@ -38,7 +45,7 @@ def task_case(database):
             task_ids.add(task_id)
             async with factory.begin() as session:
                 assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
-                assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a7c3e91d4b20"
+                assert await session.scalar(text("SELECT version_num FROM alembic_version")) == ALEMBIC_HEAD
                 session.add(TaskModel(id=task_id, workspace_id=workspace, goal="Run API fixture",
                                       acceptance_criteria=["Persist an initial run"], status=status))
             try:

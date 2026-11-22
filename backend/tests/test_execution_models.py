@@ -5,8 +5,8 @@ from sqlalchemy import CheckConstraint, DateTime, String, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app.db.base import Base
-from app.db.models import AgentEventModel, AgentRunModel, ApprovalModel, ArtifactModel, ToolCallModel
-from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
+from app.db.models import AgentEventModel, AgentRunModel
+from app.domain.execution import AgentRunStatus
 
 
 @pytest.mark.parametrize(
@@ -14,16 +14,13 @@ from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
     [
         (AgentRunModel, "task_id", "tasks.id", "created_at"),
         (AgentEventModel, "agent_run_id", "agent_runs.id", "created_at"),
-        (ToolCallModel, "agent_run_id", "agent_runs.id", "created_at"),
-        (ApprovalModel, "tool_call_id", "tool_calls.id", "requested_at"),
-        (ArtifactModel, "agent_run_id", "agent_runs.id", "created_at"),
     ],
 )
 def test_common_metadata(model, parent_column, target, timestamp):
     table = model.__table__
     assert Base.metadata.tables[table.name] is table
     assert isinstance(table.c.id.type, Uuid) and table.c.id.primary_key
-    nullable_columns = {ApprovalModel: {"decided_at"}, AgentRunModel: {"final_result"}}
+    nullable_columns = {AgentRunModel: {"final_result"}}
     assert {c.name for c in table.c if c.nullable} == nullable_columns.get(model, set())
     parent = table.c[parent_column]
     assert isinstance(parent.type, Uuid)
@@ -36,7 +33,7 @@ def test_common_metadata(model, parent_column, target, timestamp):
     assert column.server_default is not None
 
 
-@pytest.mark.parametrize("model,enum", [(AgentRunModel, AgentRunStatus), (ToolCallModel, ToolCallStatus), (ApprovalModel, ApprovalStatus)])
+@pytest.mark.parametrize("model,enum", [(AgentRunModel, AgentRunStatus)])
 def test_status_checks_match_domain_enum(model, enum):
     table = model.__table__
     assert isinstance(table.c.status.type, String)
@@ -48,26 +45,26 @@ def test_status_checks_match_domain_enum(model, enum):
 def test_unique_and_other_checks():
     for model, columns in [(AgentRunModel, ["task_id", "attempt_number"]), (AgentEventModel, ["agent_run_id", "sequence"])]:
         assert any([c.name for c in constraint.columns] == columns for constraint in model.__table__.constraints if isinstance(constraint, UniqueConstraint))
-    assert not any(isinstance(c, UniqueConstraint) and [col.name for col in c.columns] == ["tool_call_id"] for c in ApprovalModel.__table__.constraints)
     for model, names in [
         (AgentRunModel, {"ck_agent_runs_attempt_positive", "ck_agent_runs_status", "ck_agent_runs_final_result_object"}),
         (AgentEventModel, {"ck_agent_events_sequence_positive", "ck_agent_events_type_not_blank"}),
-        (ToolCallModel, {"ck_tool_calls_name_not_blank", "ck_tool_calls_status"}),
-        (ApprovalModel, {"ck_approvals_status"}),
-        (ArtifactModel, {"ck_artifacts_kind_not_blank", "ck_artifacts_storage_ref_not_blank"}),
     ]:
         assert {c.name for c in model.__table__.constraints if isinstance(c, CheckConstraint)} == names
     assert isinstance(AgentEventModel.__table__.c.payload.type, JSONB)
     final_result = AgentRunModel.__table__.c.final_result
     assert isinstance(final_result.type, JSONB) and final_result.type.none_as_null
     assert final_result.default is None and final_result.server_default is None
-    assert ApprovalModel.__table__.c.decided_at.nullable
-    assert ApprovalModel.__table__.c.decided_at.type.timezone
     run_checks = {str(c.sqltext) for c in AgentRunModel.__table__.constraints if isinstance(c, CheckConstraint)}
     event_checks = {str(c.sqltext) for c in AgentEventModel.__table__.constraints if isinstance(c, CheckConstraint)}
     assert "attempt_number >= 1" in run_checks
     assert "final_result IS NULL OR jsonb_typeof(final_result) = 'object'" in run_checks
     assert "sequence >= 1" in event_checks
-    for model, field in [(AgentEventModel, "event_type"), (ToolCallModel, "tool_name"), (ArtifactModel, "kind"), (ArtifactModel, "storage_ref")]:
+    for model, field in [(AgentEventModel, "event_type")]:
         checks = {str(c.sqltext) for c in model.__table__.constraints if isinstance(c, CheckConstraint)}
         assert f"{field} ~ '[^[:space:]]'" in checks
+
+
+def test_m1_tables_are_gone_from_the_metadata():
+    """ADR-003 C5: tool use is an agent_step event and artifacts are files; the M1 tables have no model any more."""
+    assert not {"tool_calls", "approvals", "artifacts"} & set(Base.metadata.tables)
+    assert "waiting_approval" not in {status.value for status in AgentRunStatus}

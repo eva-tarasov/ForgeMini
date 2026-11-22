@@ -14,8 +14,7 @@ class InvalidTaskTransition(ValueError):
 
 _ALLOWED = MappingProxyType({
     TaskStatus.QUEUED: frozenset({TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
-    TaskStatus.RUNNING: frozenset({TaskStatus.WAITING_APPROVAL, TaskStatus.VERIFYING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
-    TaskStatus.WAITING_APPROVAL: frozenset({TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
+    TaskStatus.RUNNING: frozenset({TaskStatus.VERIFYING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
     TaskStatus.VERIFYING: frozenset({TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}),
     TaskStatus.SUCCEEDED: frozenset(),
     TaskStatus.FAILED: frozenset(),

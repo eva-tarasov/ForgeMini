@@ -8,10 +8,8 @@ from app.domain.transitions import InvalidAgentRunTransition, validate_agent_run
 
 ALLOWED = {
     (Status.QUEUED, Status.RUNNING), (Status.QUEUED, Status.FAILED), (Status.QUEUED, Status.CANCELLED),
-    (Status.RUNNING, Status.WAITING_APPROVAL), (Status.RUNNING, Status.VERIFYING),
+    (Status.RUNNING, Status.VERIFYING),
     (Status.RUNNING, Status.FAILED), (Status.RUNNING, Status.CANCELLED),
-    (Status.WAITING_APPROVAL, Status.RUNNING), (Status.WAITING_APPROVAL, Status.FAILED),
-    (Status.WAITING_APPROVAL, Status.CANCELLED),
     (Status.VERIFYING, Status.SUCCEEDED), (Status.VERIFYING, Status.FAILED),
     (Status.VERIFYING, Status.CANCELLED),
 }

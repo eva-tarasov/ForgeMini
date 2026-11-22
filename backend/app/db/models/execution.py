@@ -2,12 +2,12 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.domain.execution import AgentRunStatus, ApprovalStatus, ToolCallStatus
+from app.domain.execution import AgentRunStatus
 
 
 def status_check(enum: type[Enum], name: str) -> CheckConstraint:
@@ -48,38 +48,3 @@ class AgentEventModel(Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-
-class ToolCallModel(Base):
-    __tablename__ = "tool_calls"
-    __table_args__ = (
-        CheckConstraint("tool_name ~ '[^[:space:]]'", name="ck_tool_calls_name_not_blank"),
-        status_check(ToolCallStatus, "ck_tool_calls_status"),
-    )
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    agent_run_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("agent_runs.id", ondelete="RESTRICT"), nullable=False, index=True)
-    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-
-
-class ApprovalModel(Base):
-    __tablename__ = "approvals"
-    __table_args__ = (status_check(ApprovalStatus, "ck_approvals_status"),)
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    tool_call_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("tool_calls.id", ondelete="RESTRICT"), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class ArtifactModel(Base):
-    __tablename__ = "artifacts"
-    __table_args__ = (
-        CheckConstraint("kind ~ '[^[:space:]]'", name="ck_artifacts_kind_not_blank"),
-        CheckConstraint("storage_ref ~ '[^[:space:]]'", name="ck_artifacts_storage_ref_not_blank"),
-    )
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    agent_run_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("agent_runs.id", ondelete="RESTRICT"), nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String(100), nullable=False)
-    storage_ref: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

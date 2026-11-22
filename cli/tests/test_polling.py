@@ -140,8 +140,6 @@ def test_watch_observes_lifecycle_and_advances_cursor():
         ("succeeded", "succeeded", "terminal"),
         ("failed", "failed", "terminal"),
         ("cancelled", "cancelled", "terminal"),
-        ("waiting_approval", "waiting_approval", "waiting_approval"),
-        ("waiting_approval", "running", "waiting_approval"),
     ],
 )
 def test_watch_drains_stop_state_across_cycles(status, next_status, reason):
@@ -243,7 +241,6 @@ def invoke_watch(monkeypatch):
 
 @pytest.mark.parametrize("status, reason", [
     ("succeeded", "terminal"), ("failed", "terminal"), ("cancelled", "terminal"),
-    ("waiting_approval", "waiting_approval"),
 ])
 def test_watch_json_reports_observation_without_rich(invoke_watch, monkeypatch, status, reason):
     def forbidden_console(*args, **kwargs):
@@ -267,7 +264,7 @@ def test_watch_json_reports_observation_without_rich(invoke_watch, monkeypatch, 
 def test_watch_human_output_reports_changes_once_without_color(invoke_watch, tty):
     http = ScriptedHTTP([
         metadata("running"), page(1), metadata("running"), page(cursor=1),
-        metadata("waiting_approval"), page(4),
+        metadata("succeeded"), page(4),
     ])
 
     result = invoke_watch(http, FakeClock(), tty=tty, json_output=False)
@@ -275,11 +272,11 @@ def test_watch_human_output_reports_changes_once_without_color(invoke_watch, tty
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
     assert result.stdout.count("Observed status: running") == 1
-    assert result.stdout.count("Observed status: waiting_approval") == 1
+    assert result.stdout.count("Observed status: succeeded") == 1
     assert result.stdout.count("#1  ") == result.stdout.count("#4  ") == 1
-    assert "Last observed status: waiting_approval" in result.stdout
+    assert "Last observed status: succeeded" in result.stdout
     assert "Next after sequence: 4" in result.stdout
-    assert "Stop reason: waiting_approval" in result.stdout
+    assert "Stop reason: terminal" in result.stdout
     assert "\x1b" not in result.stdout
     assert ("╭─ AgentRun watch " in result.stdout) is tty
     check_requests(http, [0, 1, 1])
