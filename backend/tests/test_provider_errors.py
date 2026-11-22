@@ -48,10 +48,13 @@ def test_exception_types(error, expected):
     assert classify_provider_error(error) is AgentFailureCode(expected)
 
 
-def test_sandbox_runner_does_not_import_langgraph():
-    """The cut itself: importing the prototype's runner must not drag the LangGraph graphs in (it used to)."""
-    code = ("import sys, app.sandbox.runner; "
-            "bad = sorted(m for m in sys.modules if m.startswith(('langgraph', 'app.agent_runtime'))); "
+def test_production_app_does_not_import_langgraph_or_langchain():
+    """ADR-003 guard (C2 cut, C4 removal): composing the whole app — HTTP app, bootstrap, sandbox runner — must not
+    import LangGraph, the `langchain` meta-package or the deleted M1 runtime. Only langchain_core (message types) and
+    langchain_openai (the chat model) are dependencies of the prototype."""
+    code = ("import sys, app.main, app.bootstrap, app.sandbox.runner; "
+            "bad = sorted(m for m in sys.modules if m.split('.')[0] in ('langgraph', 'langchain') "
+            "or m.startswith('app.agent_runtime')); "
             "print(bad); sys.exit(1 if bad else 0)")
     done = subprocess.run([sys.executable, "-c", code], cwd=BACKEND, capture_output=True, text=True)
-    assert done.returncode == 0, f"sandbox.runner still imports: {done.stdout.strip()} {done.stderr[-300:]}"
+    assert done.returncode == 0, f"production imports: {done.stdout.strip()} {done.stderr[-300:]}"

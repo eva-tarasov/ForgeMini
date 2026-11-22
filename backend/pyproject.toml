@@ -15,14 +15,12 @@ dependencies = [
     "alembic>=1.13,<2.0",
     "langchain-core>=1.6,<2",
     "langchain-openai>=1.6,<2",
-    "langgraph==1.2.21",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "httpx",
-    "langchain==1.4.10",
 ]
 
 [tool.setuptools.packages.find]

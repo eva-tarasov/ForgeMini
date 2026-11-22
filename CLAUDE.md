@@ -24,9 +24,9 @@ ForgeMini — рабочий прототип «Forge»: даём репозит
 5. После каждого PR обновляй `PROGRESS.md` (коротко: статус + решения + открытые вопросы).
 
 ## Карта кода
-- `backend/app/` — FastAPI-монолит: `domain/` (state machines Task/AgentRun), `services/`, `repositories/`, `api/`, `sandbox/` (Docker-песочница, цикл агента, Verifier), `agent_runtime/` (унаследованное, уйдёт в C4), `db/`.
+- `backend/app/` — FastAPI-монолит: `domain/` (state machines Task/AgentRun), `services/`, `repositories/`, `api/`, `sandbox/` (Docker-песочница, цикл агента, Verifier), `db/`.
 - `backend/alembic/` — миграции. `cli/` — `forge-cli` (Typer, ходит только по HTTP).
-- Унаследованное, **ещё не удалённое** (ADR-003): LangGraph-граф `agent_runtime/` (C4), таблицы `tool_calls`/`approvals` и `WAITING_APPROVAL` (C5). Слой approvals/evidence, fixture-инструменты и path-permissions уже удалены (C3).
+- Унаследованное, **ещё не удалённое** (ADR-003): таблицы `tool_calls`/`approvals` и `WAITING_APPROVAL` (C5). Удалены: слой approvals/evidence, fixture-инструменты, path-permissions (C3), LangGraph и `agent_runtime/` (C4). Из LangChain остались только `langchain-core` (типы сообщений) и `langchain-openai` (модель).
 - Переиспользуем: domain/state machines, репозитории, `AgentService.execute_run`, учёт стоимости, public API, CLI.
 
 - `evals/` — мини-evals (`scripts/eval.sh`): задачи, скрытые оракулы, раннер, отчёт. Метрика №1 — ложные успехи.

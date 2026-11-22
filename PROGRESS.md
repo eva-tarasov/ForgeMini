@@ -23,7 +23,8 @@
 | 6 | **C1: инвентаризация M1 + ADR-003** (`scripts/inventory/import_graph.py`) | ✅ PR #9 (влит) |
 | 7 | **C1-поправка**: «мёртвое» ≠ «можно удалить»; ADR-003 и ROADMAP пересмотрены (слои C2–C5, новые этапы F и G) | ✅ PR #10 (влит) |
 | 8 | **C2: подготовительные разрезы** (шесть швов ядро→M1: 20 → 14) | ✅ PR #13 (влит) |
-| 9 | **C3: слой approvals/evidence** (публичный API + CLI + сервисы + `tools/` + `permissions/` + 40 тест-файлов M1; −22 941 строка) | ✅ PR #14 (на ревью) |
+| 9 | **C3: слой approvals/evidence** (публичный API + CLI + сервисы + `tools/` + `permissions/` + 40 тест-файлов M1; −22 941 строка) | ✅ PR #14 (влит) |
+| 10 | **C4: LangGraph из ядра** (`agent_runtime/` + зависимости `langgraph`, `langchain`; 12 тест-файлов) | ✅ PR «C4 LangGraph» (на ревью) |
 
 ## Базовая линия (для статьи: «до»)
 - Unit: 1622 passed / 481 skipped (без БД) на момент форка; после Day 1: 1669 passed (+47 тестов sandbox). Integration (PG 16 локально): 424 passed / 29 skipped.
@@ -127,12 +128,21 @@
 - **Порядок слияния и конфликты (урок для статьи):** PR стояли стопкой (#12 → #13 → #14, база каждого — предыдущая ветка). #12 и #13 влиты **squash-ом**: в `claude/main` лёг один новый коммит, а исходный коммит C2 в историю не вошёл. Ветка C3 содержала и его, и свой коммит, поэтому GitHub увидел «одни и те же файлы изменены по-разному» → 6 конфликтов (`PROGRESS.md`, `domain/verification.py`, `agent_run_reads.py`, `verification_{contract,evidence}.py`, `test_inventory_tool.py`). Решение: `git merge origin/claude/main` в ветку C3 (force-push из сессии запрещён, merge — нет); во всех конфликтах правильной оказалась сторона C3 — они возникли ровно там, где C3 удаляет то, что C2 только что переносил. Как избежать: стопку с squash-слиянием надо перебазировать (`git rebase --onto`) после каждого слияния либо сливать merge-коммитом.
 - **Остаётся (C4/C5):** `WAITING_APPROVAL` в state machine, check-constraint и CLI-polling; таблицы `tool_calls`/`approvals` и ORM-модели; M1-enum'ы в `domain/execution.py`; LangGraph — C4.
 
+### C4: LangGraph из ядра (шаг 10)
+- **Удалено:** `app/agent_runtime/` (LangGraph-граф, финализация, демо, fixture-инструменты, своя `ModelSettings`), зависимости `langgraph` и dev-`langchain`, 12 тест-файлов. `app/` 4 802 → **4 073** строки (71 модуль); унаследованного M1 в коде **0**.
+- **Проверено, что работает без них**, а не «должно»: свежий venv из `pyproject.toml` — `langgraph`/`langchain` *не установлены*; unit, CLI, evals и весь `integration_tests.sh` зелёные. Плюс защитный тест: импорт `app.main` + `app.bootstrap` + `app.sandbox.runner` не тянет `langgraph`, `langchain` и `app.agent_runtime` (мутант `import langgraph` в bootstrap — пойман).
+- **Покрытие ядра:** 0 регрессий (путь 2 → 1 → 0). Пять файлов использовали LangGraph-раннер как фикстуру для ядра; их ядровые ветки (ошибки записи результата/отказа/usage, откат, «отказ не записался — видна именно эта ошибка, исходная в `__cause__`», правила перехода в `VERIFYING`) теперь в `test_run_service_contract_integration.py` и `test_agent_run_service.py` на простых двойниках. Четыре мутанта убиты.
+- **Мёртвое удалено, а не покрыто:** `AgentService.get_run_result/get_run_failure/get_run_usage` и `AgentRunService.get_final_result/get_failure/get_usage` в проде никто не вызывал — только удалённые M1-тесты.
+- **Находка (для статьи и решения):** в ядре два пути учёта токенов. Цикл песочницы считает токены сам и отдаёт их в отчёт `/sandbox-runs` (это видят `forge report` и evals). Ядровой путь `UsageCollector` → событие `agent_usage_recorded` → `usage` + оценка стоимости в `/result` в проде **никто не наполняет**: его наполнял только LangGraph-раннер. У живых ForgeMini-ранов `usage` в `/result` = `null`. В C4 поведение не менял; контракт ядра закреплён тестом с раннером-двойником.
+- **Моя ошибка при проверке:** в первом прогоне чистого venv отфильтровал строку с `PATH` из env-файла, а в ней были и `POSTGRES_*`, и `FORGE_SANDBOX_IMAGE` → 16 «падений» песочницы (тянулся `python:3.12-slim` из Docker Hub) и молча пустой интеграционный прогон. Разобрался по тексту ошибок до выводов; с полным окружением — зелёное.
+
 ## Решения владельца после C1
 - Таблицы `tool_calls`/`approvals` — снять миграцией. `docs/archive/` — удалить (история в теге `forge-m1-baseline`). Репозиторий делаем публичным; в статье раскрываем роль AI и названия моделей.
 - Новое требование: **демо для менеджеров**: понятный интерфейс, синтетический сценарий (этап F в ROADMAP).
 - Подтверждено: удаляем публичные `approval`/`evidence` (API + CLI). Лицензия **MIT**. **Веб-демо не делаем**: CLI-демо (F′). Личный e-mail из истории убрать: новый репозиторий с переписанной историей (подвох с `refs/pull/*`, ROADMAP G).
 
 ## Открытые вопросы
+- **Учёт токенов (из C4):** подключить цикл песочницы к `UsageCollector` (≈10 строк: `start_call/finish_call` на каждый вызов модели; даст `usage` и оценку стоимости в `/result` и `forge report`) или удалить ядровой путь usage? Моя рекомендация — подключить (стоимость рана — ровно то, что спросит менеджер на демо).
 - ~~`DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60`~~ — решено в Day 2: `execution_timeout_seconds` настраивается в bootstrap (`ForgeMiniSettings`).
 - `TaskResponse` не содержит `status` (статус задачи — только в `forge report`: `task_status`). Добавить в публичный контракт?
 - Защита тестов покрывает тестовые файлы, но не `pyproject.toml` / `setup.cfg` / `conftest.py`-подобные конфиги: агент может изменить конфигурацию запуска тестов (остаточный риск).

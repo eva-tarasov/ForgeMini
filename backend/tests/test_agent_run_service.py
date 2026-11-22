@@ -11,7 +11,8 @@ from app.domain.transitions import InvalidAgentRunTransition
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.services.agent_runs import (
-    AgentRunNotFoundError, AgentRunService, StaleAgentRunStatusError,
+    AgentRunNotFoundError,
+    AgentRunResultRequiredError, AgentRunService, StaleAgentRunStatusError,
     VerificationEvidenceRequiredError,
 )
 
@@ -173,3 +174,21 @@ def test_event_repository_sequences_and_does_not_commit():
     session.add.assert_called_once_with(event)
     session.commit.assert_not_awaited()
     session.rollback.assert_not_awaited()
+
+
+# ADR-003 (C4): RUNNING -> VERIFYING requires a stored result that ASKS for verification. Previously only the LangGraph
+# runner tests reached these guards; the rule belongs to the kernel, so it is pinned here directly.
+@pytest.mark.parametrize("final_result,reason", [
+    (None, "final_result_required"),
+    ({"schema_version": 1, "result": {
+        "summary": "s", "status": "blocked", "relevant_components": [], "assumptions": [], "observations": [],
+        "blocked_reason": "synthetic"}}, "result_not_ready_for_verification"),
+])
+def test_verifying_requires_a_ready_result_and_rolls_back(final_result, reason):
+    service, session, run = make_service("running")
+    run.final_result = final_result
+    with pytest.raises(AgentRunResultRequiredError, match=reason):
+        asyncio.run(service.transition_status(run.id, Status.RUNNING, Status.VERIFYING))
+    service.events.add_status_changed.assert_not_awaited()
+    session.rollback.assert_awaited_once()
+    assert run.status == "running"
