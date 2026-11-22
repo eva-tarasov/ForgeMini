@@ -544,3 +544,21 @@ def test_counts_come_only_from_the_runners_own_summary(tail, expected):
 ])
 def test_describe_test_run(tail, exit_code, timed_out, line):
     assert describe_test_run(SimpleNamespace(output_tail=tail, exit_code=exit_code, timed_out=timed_out)) == line
+
+
+# --- the refuse demo printed the agent's reason twice ("Agent says" + "Why it stopped") ----------------------------
+from forge_cli.solve import stop_reason_text  # noqa: E402
+
+WORDS = "The requested threshold of 40.00 contradicts the uneditable shipping test."
+
+
+@pytest.mark.parametrize("summary,reason,shown", [
+    (WORDS, f"agent_cannot_fix: {WORDS}", "agent_cannot_fix (the agent says it cannot do this; its reasons are above)"),
+    (WORDS, WORDS, None),                                                       # identical: say it once
+    ("Fixed it", "agent_reported_done_but_changed_nothing", "agent_reported_done_but_changed_nothing"),
+    ("gave up", "step_budget_exhausted after 25 steps", "step_budget_exhausted after 25 steps"),
+    (None, "agent_cannot_fix: something", "agent_cannot_fix: something"),       # no summary: keep everything
+    ("x", None, None),
+])
+def test_why_it_stopped_never_repeats_what_the_agent_said(summary, reason, shown):
+    assert stop_reason_text(SimpleNamespace(agent_summary=summary, blocked_reason=reason)) == shown

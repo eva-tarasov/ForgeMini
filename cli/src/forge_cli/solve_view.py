@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from forge_cli.dto import RunReport, VerificationView
-from forge_cli.solve import cost_text, describe_test_run, next_step_lines, sanitize
+from forge_cli.solve import cost_text, describe_test_run, next_step_lines, sanitize, stop_reason_text
 
 MAX_DIFF_LINES = 70
 ARROW = "▸"
@@ -153,8 +153,9 @@ class SolveView:
             parts += [Text(""), Text("The patch (what the agent changed):", style="bold"), colorize_diff(diff)]
         if report.agent_summary:
             parts += [Text("Agent says:", style="bold"), _t(report.agent_summary, 1200)]
-        if report.blocked_reason:
-            parts += [Text("Why it stopped:", style="bold"), _t(report.blocked_reason, 1200)]
+        stop = stop_reason_text(report)
+        if stop:
+            parts += [Text("Why it stopped:", style="bold"), _t(stop, 1200)]
         self.console.print(Rule(Text("result", style="bold"), style="green" if verified else "red"))
         self.console.print(Group(*parts))
         self.console.print(self._result_panel(report, run_id, verified))

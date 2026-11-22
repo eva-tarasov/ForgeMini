@@ -198,6 +198,25 @@ _PROVIDER_HINTS = {
 }
 
 
+_STOP_CODES = {
+    "agent_cannot_fix": "the agent says it cannot do this; its reasons are above",
+}
+
+
+def stop_reason_text(report: RunReport) -> str | None:
+    """'Why it stopped', without repeating 'Agent says'. The server stores e.g. "agent_cannot_fix: <the agent's own
+    words>" (the full form stays in the API); on screen the same paragraph appeared twice in the live refuse demo."""
+    reason = report.blocked_reason
+    if not reason:
+        return None
+    code, sep, rest = reason.partition(": ")
+    summary = (report.agent_summary or "").strip()
+    if summary and reason.strip() == summary:
+        return None                                   # nothing beyond what "Agent says" already shows
+    if sep and summary and rest.strip() == summary:
+        return f"{code} ({_STOP_CODES.get(code, 'details above')})"
+    return reason
+
 def format_report(report: RunReport, run_id: str) -> str:
     verified = report.run_status == "succeeded"
     lines = ["", "=" * 60,
@@ -206,8 +225,9 @@ def format_report(report: RunReport, run_id: str) -> str:
     v = report.verification
     if report.agent_summary:
         lines += ["", "Agent says:", "  " + sanitize(report.agent_summary, 1500).replace("\n", "\n  ")]
-    if report.blocked_reason:
-        lines += ["", "Why it stopped:", "  " + sanitize(report.blocked_reason, 1500).replace("\n", "\n  ")]
+    stop = stop_reason_text(report)
+    if stop:
+        lines += ["", "Why it stopped:", "  " + sanitize(stop, 1500).replace("\n", "\n  ")]
     if report.failure_code:
         lines += ["", f"Run failure code: {sanitize(report.failure_code, 80)} (details: see the server log / 'forge run events')"]
     if v is not None:
