@@ -5,6 +5,7 @@ Everything the server sends here is UNTRUSTED text (test output, model text): it
 terminal control characters before it is printed.
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -27,6 +28,47 @@ EXIT_NOT_VERIFIED = 1
 EXIT_APPLY_FAILED = 7
 
 
+
+
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
+_UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.M)
+_PYTEST_SUMMARY = re.compile(r"^=+ (.*?) in [\d.]+s.*=+$", re.M)
+
+
+def count_tests(output_tail: str) -> tuple[int, int] | None:
+    """(failed, total) from the test runner's OWN summary line, or None if there is none we recognise.
+
+    unittest: "Ran 2 tests ..." + "OK" / "FAILED (failures=2, errors=1)"; pytest: "=== 2 failed, 3 passed in 0.1s ===".
+    Errors count as failed. Anything unrecognised returns None and the caller falls back to the exit code: a number
+    we guessed would be worse than no number.
+    """
+    ran = _UNITTEST_RAN.findall(output_tail)
+    if ran:
+        total = int(ran[-1])
+        failed_line = _UNITTEST_FAILED.findall(output_tail)
+        failed = sum(int(n) for n in re.findall(r"(?:failures|errors)=(\d+)", failed_line[-1])) if failed_line else 0
+        return min(failed, total), total
+    summary = _PYTEST_SUMMARY.findall(output_tail)
+    if summary:
+        counts = {kind: int(n) for n, kind in re.findall(r"(\d+) (failed|passed|errors?)", summary[-1])}
+        failed = counts.get("failed", 0) + counts.get("error", 0) + counts.get("errors", 0)
+        total = failed + counts.get("passed", 0)
+        return (failed, total) if total else None
+    return None
+
+
+def describe_test_run(run) -> str:
+    """'2 of 2 failed (exit 1)' when the summary is readable, else 'exit 1' — the verdict wording never depends on it."""
+    counts = count_tests(run.output_tail or "")
+    timed_out = " (timed out)" if run.timed_out else ""
+    if counts is None:
+        return f"exit {run.exit_code}{timed_out}"
+    failed, total = counts
+    if total == 0:
+        return f"no tests ran (exit {run.exit_code}){timed_out}"
+    if failed:
+        return f"{failed} of {total} failed (exit {run.exit_code}){timed_out}"
+    return f"all {total} passed (exit {run.exit_code}){timed_out}"
 
 def cost_text(usage: UsageView) -> str:
     """Human cost line. Unknown is never shown as $0: the status says why the number is missing or only a floor."""
@@ -175,10 +217,9 @@ def format_report(report: RunReport, run_id: str) -> str:
         if v.protected_violations:
             lines.append("Forbidden changes (test files): " + ", ".join(sanitize(p, 200) for p in v.protected_violations))
         if v.baseline:
-            lines.append(f"Tests WITHOUT the change: exit code {v.baseline.exit_code}")
+            lines.append(f"Tests WITHOUT the change: {describe_test_run(v.baseline)}")
         if v.patched:
-            lines.append(f"Tests WITH the change:    exit code {v.patched.exit_code}"
-                         + (" (timed out)" if v.patched.timed_out else ""))
+            lines.append(f"Tests WITH the change:    {describe_test_run(v.patched)}")
             if v.patched.exit_code != 0:
                 lines += ["", "Last test output:", "  " + sanitize(v.patched.output_tail, 1500).replace("\n", "\n  ")]
     if report.usage is not None:
