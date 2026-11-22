@@ -1,8 +1,8 @@
-# Forge CLI v0.1
+# Forge CLI
 
-Forge CLI is a standalone HTTP client for the existing Forge backend. Package version is `0.1.0`. Python 3.11 or later is required. The current release checks use Python 3.13. Support for the declared minimum Python version still needs a separate interpreter run.
+Forge CLI is a standalone HTTP client for the ForgeMini backend. Package version is `0.1.0`. Python 3.11 or later is required. The current release checks use Python 3.13. Support for the declared minimum Python version still needs a separate interpreter run.
 
-The backend owns persistence, authorization, execution and verification. Installing the CLI requires Typer, Rich, HTTPX and Pydantic from its declared dependencies. Backend Python packages are unnecessary for normal CLI use. See [release evidence and handoff](RELEASE_V0_1.md) for current and historical acceptance results.
+The backend owns persistence, authorization, execution and verification. Installing the CLI requires Typer, Rich, HTTPX and Pydantic from its declared dependencies. Backend Python packages are unnecessary for normal CLI use.
 
 ## Installation
 
@@ -20,7 +20,7 @@ For a distributed wheel, use `python -m pip install forge_cli-0.1.0-py3-none-any
 The reproducible clean-wheel acceptance launcher builds from the current source, installs the wheel and its dependencies into a fresh temporary venv, and exercises the installed command outside the repository.
 
 ```sh
-cd /Users/dev/Desktop/myFirstForge-week4cli
+cd <path-to-your-ForgeMini-checkout>
 cli/.venv/bin/python cli/tests/clean_install.py
 ```
 
@@ -28,7 +28,7 @@ This uses normal pip build isolation. Build dependencies and runtime dependencie
 
 All build sources, wheel artifacts, venv and working directory are under a new `/tmp/forge-cli-release-*` directory. A deterministic HTTP server binds an ephemeral IPv4 loopback port for two health requests. The launcher checks all command help, version, package import origin, dependencies, JSON/plain streams and local UUID rejection. It removes the server and temporary directory before printing its final JSON report. Pip stages each have a 180-second limit, venv creation 60 seconds, and CLI probes 15 seconds each. Subprocess groups are terminated if interrupted or timed out. Package-index output is captured and omitted from diagnostics to protect configured credentials.
 
-## Configuration and credentials
+## Configuration
 
 Global options precede the command. Base URL precedence is `--base-url`, then `FORGE_BASE_URL`, then `http://127.0.0.1:8000`. Use an absolute HTTP(S) URL with a host and optional port/path. Credentials embedded in a URL, query strings, fragments and control characters are rejected locally.
 
@@ -37,9 +37,7 @@ cli/.venv/bin/forge --base-url http://127.0.0.1:8000 --json health
 cli/.venv/bin/forge --no-color workspace list
 ```
 
-Read commands for approvals and evidence require `FORGE_APPROVAL_READ_TOKEN`. Exact patch review and decisions require the separate `FORGE_APPROVAL_REVIEW_TOKEN`. Configure them in the local environment through your normal secret-management process. Help/version and unrelated commands do not need these capabilities. Tests generate their own synthetic values.
-
-Tokens follow the backend contract of 32–512 characters from `A-Z a-z 0-9 . _ ~ + / -` with optional trailing `=` padding. The review token does not replace a missing read token. Each authenticated request carries its selected capability in the Authorization bearer header. The client has no global authorization header and rejects bearer use over plaintext HTTP except to IPv4 `127.0.0.0/8`, IPv6 `::1`, or exact hostname `localhost`. It disables environment proxy handling and redirects, uses a five-second HTTP timeout with a two-second connect timeout, and performs no automatic request retries.
+The CLI sends no credentials: the prototype backend is meant to run on loopback (`127.0.0.1`) and has no authentication yet (see "Security boundaries"). The client disables environment proxy handling and redirects, uses a five-second HTTP timeout with a two-second connect timeout, and performs no automatic request retries.
 
 ## Commands
 
@@ -60,13 +58,6 @@ Tokens follow the backend contract of 32–512 characters from `A-Z a-z 0-9 . _ 
 | `forge run events UUID` | Read one event page, optional `--after-sequence` and `--limit`. |
 | `forge run result UUID` | Read preliminary/result/verification/usage snapshot. |
 | `forge run watch UUID` | Bounded GET-only observation. |
-| `forge approval list RUN_UUID` | Read pending approvals. |
-| `forge approval get RUN_UUID APPROVAL_UUID` | Read metadata and structural preview. |
-| `forge approval review RUN_UUID APPROVAL_UUID` | Read exact patch and checked fingerprint using review capability. |
-| `forge approval approve RUN_UUID APPROVAL_UUID --reviewed-patch-sha256 SHA256 --confirm` | Record explicit approval of the reviewed patch. |
-| `forge approval reject RUN_UUID APPROVAL_UUID --confirm` | Record explicit rejection. |
-| `forge evidence list RUN_UUID` | Read one page with optional `--after-sequence` and `--limit`. |
-| `forge evidence get RUN_UUID ATTEMPT_UUID` | Read an attempt with individual check outcomes. |
 
 UUIDs in this reference identify values returned by prior commands. For a fully executable fixture demonstration with generated IDs, use the guarded launcher below. All command-specific help works offline.
 
@@ -78,17 +69,9 @@ The supported local coordinator binds one trusted workspace and owns execution i
 
 `run watch` defaults to an interval of 2 seconds (1–30), a timeout of 120 seconds (1–600) and cursor 0. Each cycle reads metadata and one page of at most 50 events. It stops after draining a terminal or waiting_approval state. Ctrl-C stops observation with exit 130 and leaves backend cancellation to an explicit command. In JSON mode, interruption or timeout emits no successful snapshot. Human output may already contain observed pages. The polling deadline and cycle count are bounded. An in-flight HTTP call may finish after the polling deadline under the client's HTTP timeout.
 
-Event pages accept limit 1–100 (default 50). Evidence pages accept limit 1–20 (default 20). Both use an integer cursor in 0–2147483647. Sequence gaps are valid. The client checks monotonic progression, next-cursor consistency and has_more semantics. Empty pages keep the input cursor.
+Event pages accept limit 1–100 (default 50) and use an integer cursor in 0–2147483647. Sequence gaps are valid. The client checks monotonic progression, next-cursor consistency and has_more semantics. Empty pages keep the input cursor.
 
-`ready_for_verification` describes a preliminary result. Independently recorded evidence supplies pass/fail/inconclusive verdicts and per-check outcomes. The trusted fixture demonstrations call the existing VerificationService separately after execution. Their verified success has `run_status=succeeded` and `verification_verdict=pass`. Production orchestration that automatically drives this verification remains future work.
-
-## Approval safety
-
-Read the exact patch using `approval review` before deciding. The client validates its UTF-8 size (maximum 64 KiB), IDs and domain-separated fingerprint `sha256(b"forge:apply_patch:v1\0" + patch.encode("utf-8"))`. Use that unchanged lowercase fingerprint explicitly with approve. The CLI never performs an implicit review or sends the patch body in a decision POST.
-
-Approval requires `--confirm`. HTTP 200 means the decision was recorded. Subsequent execution and verification have separate outcomes. Stale/conflicting decisions return 409. On decision transport failure, the CLI directs the caller to `forge approval get` and leaves the outcome unknown.
-
-Structural preview states are `live_at_read` and `unavailable`. Preview unavailable carries no implication about patch contents. Exact patch JSON preserves the original string. Human output preserves line boundaries and spaces, escapes terminal controls, and uses Rich Text for untrusted content. The CLI does not save patch files automatically.
+`ready_for_verification` describes the agent's *preliminary* result; it is a claim, not a success. After the agent finishes, Forge itself re-runs the tests in a fresh container and records the verdict (`pass` / `fail` / `inconclusive`) with evidence (tests without and with the change). Only that verdict can set `run_status=succeeded` — the agent never can. `forge report RUN_UUID` prints the verdict and the evidence.
 
 ## Output and errors
 
@@ -108,54 +91,20 @@ Untrusted names, paths, diffs and text cannot become Rich markup or terminal com
 
 Usage fields expose known token/cost totals and completeness flags. Unknown values differ from a recorded zero. Provider cost has no guaranteed cap or completeness.
 
-## Local E2E demonstrations
+## Demo
 
-Previously accepted owner evidence covers CLI-05 TCP/PostgreSQL, bounded paid-provider smoke, active cancellation and Terminal checks, plus CLI-06's four-scenario TCP matrix and interactive approve/reject. The latest owner acceptance for CLI-07 [PR #68](https://github.com/eva-tarasov/myFirstForge/pull/68), reviewed commit `760f8c64d75874a0ddf462299bb20fdbaf1d7b33`, additionally confirms the repeated TCP/PostgreSQL four-scenario matrix PASS and an interactive approve/reject session ending with SESSION_ENDED. Cleanup completed in both runs. Personal evidence/result inspection in Terminal 2 was not established on that interactive run. Paid OpenAI smoke was not repeated in CLI-07. See the release matrix for separate historical and latest owner attribution.
-
-The clearest full fixture path is `run_approval_e2e.zsh tcp`. It exercises Workspace → Task → AgentRun → ToolCall → Approval → Execution → independent Verification → persisted Evidence using real TCP/PostgreSQL and offline LangGraph. Approve writes once, reject/cancel leave bytes unchanged, and a held successful response checks timeout without automatic retry.
-
-Only after explicit owner approval, use the existing disposable container `forge-week4-step06-4d6f653603`, DB `forge_task06_week4_audit_4d6f653603`, port 50088, PostgreSQL 17.11 and revision `1d972cc34fbe`. Require exclusive fixture access, empty business tables, free loopback port 58066 and the existing backend venv at `/Users/dev/Desktop/forge/backend/.venv/bin/python`. The wrapper obtains container credentials in memory and checks the actual DB using SQL. The container bootstrap POSTGRES_DB may differ or be absent.
-
-Inspect help/configuration without Docker or network.
-
-```sh
-zsh cli/tests/run_approval_e2e.zsh --help
-zsh cli/tests/run_approval_e2e.zsh describe
-```
-
-After review, check the actual container/DB and launch one opt-in automatic demonstration.
-
-```sh
-zsh cli/tests/run_approval_e2e.zsh check
-zsh cli/tests/run_approval_e2e.zsh tcp --approve-db forge_task06_week4_audit_4d6f653603 --confirm-fixture-write
-```
-
-Expected automated evidence is outcome PASS, cleanup completed, approve succeeded/pass with one replacement, and reject/cancel/lost-response with zero replacements and no verification PASS. Decisions are recorded once. The report carries actual exits/statuses and per-scenario results. The 240-second scenario budget, 45-second approval phases, four-request per-run offline model cap and scoped filesystem observer remain enforced. See [the harness](tests/demo_approval.py) for exact evidence assertions.
-
-For owner Terminal verification after confirmed cleanup, start Terminal 1 with this command.
-
-```sh
-zsh cli/tests/run_approval_e2e.zsh interactive --approve-db forge_task06_week4_audit_4d6f653603 --confirm-fixture-write
-```
-
-Wait for READY and copy generated commands one at a time into Terminal 2. Inspect review before the explicitly labelled synthetic-write approval. Complete the decision within 35 seconds of READY. Wait for evidence/result commands after independent verification. Press Return in Terminal 1 to move to the independent reject fixture, then Return again after inspecting its result to stop and clean up. Phase and outer deadlines also terminate the session. Capabilities pass through private local IPC and the CLI child environment. Tokens are absent from the printed commands. Interactive routes are limited to the selected fixture. The final report requires SESSION_ENDED and cleanup completed. Record actual visual observations separately.
-
-The [CLI-05 harness](tests/demo_agent_run.py) retains describe, tcp, active-cancel, interactive and separately gated live modes. Its database identity/empty-table guards, shared advisory lock, protected read-only fixture, subprocess bounds and cleanup remain available. Its historical paid live evidence is retained in the release matrix. Reproduction of a paid test requires a separate owner decision.
-
-If cleanup is unconfirmed, retain the safe fixture identifier and failure code for review before another run. Cleanup deletes only the current fixture's rows and temporary resources. The launchers do not create/drop/migrate databases.
+`scripts/demo/run.sh` (repository root) fixes a real bug in a small demo shop repository end to end: start the server (`scripts/start.sh`) in one terminal, then run the script in another. It builds the target repository with `scripts/demo/make_demo_repo.sh` (or uses `DEMO_REPO_URL`), calls `forge solve`, and shows the verified report and patch. Modes: `--issue N`, `--all`, `--auto` (timed pauses for recording), `--fast` (no pauses; used by the tests). Run it with `--help` for details.
 
 ## Security boundaries and limitations
 
-CLI capabilities are scoped local-backend access mechanisms. Production authentication and deployment are future work. Backend grants, policy, transactions and existing fixture filesystem tools enforce the demo's allowed scope. The CLI adds no sandbox isolation. Generic shell execution, MCP, automatic approval and durable restart/resume are outside v0.1. Runtime recovery, production verification orchestration and provider accounting need further work. The owner's learning checkpoint and spent time remain unrecorded.
+The backend has no authentication or authorization: run it on loopback only and do not expose the port. The agent never touches your working tree — it works on a copy inside a throw-away Docker container without network access, and Forge re-runs the tests in a second clean container before reporting a verdict. The CLI itself adds no isolation. Durable restart/resume of an interrupted run, a queue/worker and GitHub pull-request delivery are not implemented yet.
 
-## Release verification
+## Verification of the CLI itself
 
-From the CLI worktree, run focused release tests and the complete offline suite.
+From the repository root, run the offline test suite and the dependency check. The clean-install launcher is opt-in; it builds the wheel and exercises the installed command in a fresh temporary venv.
 
 ```sh
-cli/.venv/bin/python -m pytest -q cli/tests/test_release.py
 cli/.venv/bin/python -m pytest -q cli/tests
 cli/.venv/bin/python -m pip check
+cli/.venv/bin/python cli/tests/clean_install.py
 ```
-
-Then run the clean-install launcher above, record its JSON and inspect Git status/diff. [RELEASE_V0_1.md](RELEASE_V0_1.md) records measured counts, interpreter coverage, accepted historical evidence and remaining owner handoff.

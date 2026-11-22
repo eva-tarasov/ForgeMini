@@ -12,15 +12,13 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import AgentEventModel, AgentRunModel, ApprovalModel, TaskModel, ToolCallModel
+from app.db.models import AgentEventModel, AgentRunModel, TaskModel
 from app.domain.execution import AgentRunStatus
 from app.main import create_app
 from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.tasks import TaskRepository
 from app.services.agent_runs import AgentRunCreateConflictError, AgentRunService
 from app.services.agent_service import AgentService
-from app.services.tool_calls import ToolCallService
-from app.tools.executor import ToolExecutor
 from test_task_idempotency_integration import database
 
 
@@ -49,9 +47,6 @@ def task_case(database):
             finally:
                 async with factory.begin() as session:
                     run_ids = select(AgentRunModel.id).where(AgentRunModel.task_id == task_id)
-                    call_ids = select(ToolCallModel.id).where(ToolCallModel.agent_run_id.in_(run_ids))
-                    await session.execute(delete(ApprovalModel).where(ApprovalModel.tool_call_id.in_(call_ids)))
-                    await session.execute(delete(ToolCallModel).where(ToolCallModel.agent_run_id.in_(run_ids)))
                     await session.execute(delete(AgentEventModel).where(AgentEventModel.agent_run_id.in_(run_ids)))
                     await session.execute(delete(AgentRunModel).where(AgentRunModel.task_id == task_id))
 
@@ -75,16 +70,9 @@ async def _runs(factory, task_id):
 
 async def _assert_no_side_effect_records(factory, task_id):
     runs = select(AgentRunModel.id).where(AgentRunModel.task_id == task_id)
-    calls = select(ToolCallModel.id).where(ToolCallModel.agent_run_id.in_(runs))
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(AgentEventModel).where(
             AgentEventModel.agent_run_id.in_(runs)
-        )) == 0
-        assert await session.scalar(select(func.count()).select_from(ToolCallModel).where(
-            ToolCallModel.agent_run_id.in_(runs)
-        )) == 0
-        assert await session.scalar(select(func.count()).select_from(ApprovalModel).where(
-            ApprovalModel.tool_call_id.in_(calls)
         )) == 0
 
 
@@ -93,7 +81,7 @@ def no_execution(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("Creating an AgentRun must not compose execution")
 
-    for component in (AgentService, ToolCallService, ToolExecutor, ChatOpenAI):
+    for component in (AgentService, ChatOpenAI):
         monkeypatch.setattr(component, "__init__", unexpected)
 
 

@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AgentEventModel, AgentRunModel
-from app.domain.execution import AgentRunStatus, ToolCallStatus
+from app.domain.execution import AgentRunStatus
 from app.repositories.agent_events import AgentEventRepository
 from app.repositories.agent_runs import AgentRunRepository
 from app.schemas.agent_run import (
@@ -30,19 +30,13 @@ from app.services.agent_failure import AGENT_EXECUTION_FAILED_EVENT, decode_agen
 from app.services.agent_result_codec import RESULT_SCHEMA_VERSION, decode_agent_result
 from app.services.agent_runs import AgentRunNotFoundError
 from app.services.agent_usage_codec import AGENT_USAGE_RECORDED_EVENT, AgentUsageRecord, decode_agent_usage
-from app.services.approval_contracts import ApprovalReference
-from app.services.tool_call_audit import ToolCallAudit, ToolCallErrorCode, encode_tool_call_event
-from app.services.tool_calls import ToolCallTicket
 from app.sandbox.events import AGENT_STEP_EVENT
 from app.sandbox.verification import SANDBOX_VERIFICATION_RECORDED, SandboxVerification
 from app.core.digest import metadata_digest
-from app.domain.verification import VerificationVerdict
-from app.services.verification_evidence import VERIFICATION_RECORDED, VerificationEvidence, decode_evidence
+from app.domain.verification import VERIFICATION_RECORDED, VerificationVerdict
 
 
-_TOOL_KINDS = frozenset({"tool_call_proposed", "tool_call_started", "tool_call_finished"})
-_RESULT_KINDS = (AGENT_EXECUTION_FAILED_EVENT, AGENT_USAGE_RECORDED_EVENT, VERIFICATION_RECORDED,
-                 SANDBOX_VERIFICATION_RECORDED)
+_RESULT_KINDS = (AGENT_EXECUTION_FAILED_EVENT, AGENT_USAGE_RECORDED_EVENT, SANDBOX_VERIFICATION_RECORDED)
 MAX_RESULT_EVENTS = 512
 
 
@@ -69,23 +63,17 @@ class AgentRunReadService:
             raise InvalidAgentRunReadError() from None
 
     async def read_result(self, run_id: UUID) -> AgentRunResultResponse:
-        result, _ = await self.read_validated_result(run_id)
-        return result
-
-    async def read_validated_result(
-        self, run_id: UUID, *, workspace_id: UUID | None = None,
-    ) -> tuple[AgentRunResultResponse, list[tuple[int, VerificationEvidence]]]:
-        """Validate the complete bounded snapshot before any API projects it."""
+        """Validate the complete bounded snapshot before the API projects it."""
         snapshot = await self._events.read_result_snapshot(
-            run_id, event_types=_RESULT_KINDS, limit=MAX_RESULT_EVENTS + 1, workspace_id=workspace_id,
+            run_id, event_types=_RESULT_KINDS, limit=MAX_RESULT_EVENTS + 1,
         )
         if snapshot is None:
             raise AgentRunNotFoundError(run_id)
-        run, workspace_id, events = snapshot
+        run, _, events = snapshot
         if len(events) > MAX_RESULT_EVENTS:
             raise InvalidAgentRunReadError()
         try:
-            return _validate_result(run, workspace_id, events)
+            return _validate_result(run, events)
         except (ValueError, TypeError, KeyError):
             raise InvalidAgentRunReadError() from None
 
@@ -101,44 +89,6 @@ def _uuid(value: str) -> UUID:
     if parsed is None or str(parsed) != value:
         raise ValueError("invalid_event_id")
     return parsed
-
-
-def _validate_tool_event(kind: str, payload: object) -> None:
-    body = _versioned(payload, 1)
-    audit = ToolCallAudit(
-        _uuid(body["tool_call_id"]), body["tool_name"], body["tool_version"], ToolCallStatus(body["status"]),
-        ToolCallErrorCode(body["error_code"]) if "error_code" in body else None,
-        body.get("duration_ms"),
-    )
-    if encode_tool_call_event(audit) != (kind, body):
-        raise ValueError("invalid_tool_event")
-
-
-def _validate_approval_request(run_id: UUID, payload: object) -> None:
-    body = _versioned(payload, 1)
-    reference = ApprovalReference(
-        _uuid(body["approval_id"]),
-        ToolCallTicket(
-            _uuid(body["tool_call_id"]), run_id, _uuid(body["workspace_id"]), body["tool_name"], body["tool_version"],
-        ),
-        body["patch_sha256"], body["sources_sha256"],
-    )
-    if reference.requested_payload() != body:
-        raise ValueError("invalid_approval_request")
-
-
-def _validate_approval_decision(payload: object) -> None:
-    body = _versioned(payload, 1)
-    keys = {"schema_version", "approval_id", "tool_call_id", "decision"}
-    if body["decision"] not in ("approved", "rejected"):
-        raise ValueError("invalid_approval_decision")
-    if body["decision"] == "rejected" and "error_code" in body:
-        ToolCallErrorCode(body["error_code"])
-        keys.add("error_code")
-    if body.keys() != keys:
-        raise ValueError("invalid_approval_decision")
-    _uuid(body["approval_id"])
-    _uuid(body["tool_call_id"])
 
 
 def _project_event(run_id: UUID, event: AgentEventModel) -> AgentRunPublicEvent:
@@ -158,12 +108,6 @@ def _project_event(run_id: UUID, event: AgentEventModel) -> AgentRunPublicEvent:
                                    **common)
     if kind == AGENT_EXECUTION_FAILED_EVENT:
         return RunFailureEvent(kind=kind, details=RunFailureDetails(code=decode_agent_failure(payload).code), **common)
-    if kind == VERIFICATION_RECORDED:
-        evidence = decode_evidence(payload)
-        if evidence.plan.binding.run_id != run_id:
-            raise ValueError("foreign_verification_event")
-        return RunVerificationEvent(kind=kind, details=RunVerificationDetails(verdict=evidence.verdict), **common)
-
     if kind == AGENT_STEP_EVENT:
         body = _versioned(payload, 1)
         extra = {k: body[k] for k in ("turn", "tools", "tool", "target", "ok", "exit_code", "outcome") if k in body}
@@ -173,16 +117,10 @@ def _project_event(run_id: UUID, event: AgentEventModel) -> AgentRunPublicEvent:
         return RunVerificationEvent(kind=VERIFICATION_RECORDED, details=RunVerificationDetails(
             verdict=SandboxVerification.from_payload(payload).verdict), **common)
 
-    if kind in _TOOL_KINDS:
-        _validate_tool_event(kind, payload)
-    elif kind == "approval_requested":
-        _validate_approval_request(run_id, payload)
-    elif kind == "approval_decided":
-        _validate_approval_decision(payload)
-    elif kind == AGENT_USAGE_RECORDED_EVENT:
+    if kind == AGENT_USAGE_RECORDED_EVENT:
         decode_agent_usage(run_id, payload)
     else:
-        kind = "other"
+        kind = "other"      # includes M1-era tool_call_* / approval_* / verification events of old runs
     return RunMetadataEvent(kind=kind, details=EmptyEventDetails(), **common)
 
 
@@ -196,18 +134,14 @@ def _project_usage(record: AgentUsageRecord) -> AgentRunUsageResponse:
     )
 
 
-def _validate_result(
-    run: AgentRunModel, workspace_id: UUID, events: list,
-) -> tuple[AgentRunResultResponse, list[tuple[int, VerificationEvidence]]]:
+def _validate_result(run: AgentRunModel, events: list) -> AgentRunResultResponse:
     status = AgentRunStatus(run.status)
     preliminary = None if run.final_result is None else decode_agent_result(run.final_result).status
     failure = None
     usage = None
     verdict = None
-    attempt_ids: set[UUID] = set()
-    attempts: list[tuple[int, VerificationEvidence]] = []
     result_digest = metadata_digest(run.final_result) if preliminary == "ready_for_verification" else None
-    for sequence, kind, payload in events:
+    for _sequence, kind, payload in events:
         if kind == AGENT_EXECUTION_FAILED_EVENT:
             if failure is not None:
                 raise ValueError("duplicate_execution_failure")
@@ -224,19 +158,6 @@ def _validate_result(
             ):
                 raise ValueError("inconsistent_sandbox_verification_history")
             verdict = sandbox_evidence.verdict
-        elif kind == VERIFICATION_RECORDED:
-            evidence = decode_evidence(payload)
-            binding = evidence.plan.binding
-            if (
-                (binding.run_id, binding.task_id, binding.workspace_id) != (run.id, run.task_id, workspace_id)
-                or evidence.attempt_id in attempt_ids
-                or verdict not in (None, VerificationVerdict.INCONCLUSIVE)
-                or result_digest is None or evidence.result_sha256 != result_digest
-            ):
-                raise ValueError("inconsistent_verification_history")
-            attempt_ids.add(evidence.attempt_id)
-            verdict = evidence.verdict
-            attempts.append((sequence, evidence))
 
     if (
         (status in (AgentRunStatus.VERIFYING, AgentRunStatus.SUCCEEDED) and preliminary != "ready_for_verification")
@@ -250,8 +171,7 @@ def _validate_result(
     ):
         raise ValueError("inconsistent_agent_run_result")
 
-    result = AgentRunResultResponse(
+    return AgentRunResultResponse(
         run_id=run.id, run_status=status, preliminary_status=preliminary, execution_failure_code=failure,
         verification_verdict=verdict, usage=usage,
     )
-    return result, attempts

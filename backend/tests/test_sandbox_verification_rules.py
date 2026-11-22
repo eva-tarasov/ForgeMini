@@ -4,7 +4,7 @@ from app.sandbox.changeset import Changeset, FileEntry, Snapshot
 from app.sandbox.verification import (
     CommandRun, SandboxVerification, decide, find_protected_violations, is_protected_path,
 )
-from app.services.verification_contract import VerificationVerdict as V
+from app.domain.verification import VerificationVerdict as V
 
 
 def fe(text="x"):

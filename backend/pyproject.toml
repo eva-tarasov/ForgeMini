@@ -27,3 +27,11 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+# Coverage: SQLAlchemy's async engine runs on greenlets. Without `greenlet` here coverage drops every line that follows
+# an `await` on the database (it reported ~3% too little and invented "regressions" during ADR-003/C3).
+# Reproduce the cleanup measurement:  pytest --cov=app --cov-report=json:cov.json tests   then
+#   python scripts/inventory/coverage_diff.py before.json after.json
+[tool.coverage.run]
+source = ["app"]
+concurrency = ["greenlet", "thread"]

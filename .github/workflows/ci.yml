@@ -43,12 +43,7 @@ jobs:
         run: python -m pytest -q evals/tests
       - name: CLI tests
         working-directory: cli
-        # Three demo-launcher tests hard-code the author's laptop path
-        # (/Users/.../backend/.venv); they are covered by ForgeMini E2E tests instead.
-        run: >
-          python -m pytest -q
-          --deselect "tests/test_demo_approval.py::test_launcher_identity_and_environment"
-          --deselect "tests/test_demo_approval.py::test_launcher_checks_actual_fixture_database"
+        run: python -m pytest -q
 
   integration:
     runs-on: ubuntu-latest

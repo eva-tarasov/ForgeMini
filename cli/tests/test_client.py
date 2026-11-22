@@ -407,18 +407,13 @@ def test_get_run_events_decodes_every_public_kind_and_preserves_alias():
         ("agent_result_recorded", {"preliminary_status": "ready_for_verification"}),
         ("agent_execution_failed", {"code": "provider_timeout"}),
         ("verification_recorded", {"verdict": "inconclusive"}),
-        ("tool_call_proposed", {}),
-        ("tool_call_started", {}),
-        ("tool_call_finished", {}),
-        ("approval_requested", {}),
-        ("approval_decided", {}),
         ("agent_usage_recorded", {}),
         ("other", {}),
     ]
     page = {
         "items": [public_event(index * 2, kind, details)
                   for index, (kind, details) in enumerate(kinds_and_details, 1)],
-        "next_after_sequence": 22, "has_more": False,
+        "next_after_sequence": 2 * len(kinds_and_details), "has_more": False,
     }
     calls = []
 
@@ -527,7 +522,8 @@ def test_get_run_events_rejects_inconsistent_page(sequences, next_cursor, has_mo
         {"kind": "agent_result_recorded", "details": {"preliminary_status": True}},
         {"kind": "agent_execution_failed", "details": {"code": "invalid"}},
         {"kind": "verification_recorded", "details": {"verdict": "pass", "private": SECRET}},
-        {"kind": "approval_requested", "details": None},
+        {"kind": "approval_requested", "details": {}},     # retired M1 kind: the server reports it as "other" now
+        {"kind": "tool_call_finished", "details": {}},     # same
     ],
 )
 def test_get_run_events_rejects_malformed_event(changes):
