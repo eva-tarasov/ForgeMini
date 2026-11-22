@@ -15,7 +15,6 @@ from app.services.agent_failure import (
     AGENT_EXECUTION_FAILED_EVENT,
     AgentFailure,
     AgentFailureContractError,
-    decode_agent_failure,
     encode_agent_failure,
 )
 from app.services.agent_result import AgentFinalResult
@@ -178,14 +177,6 @@ class AgentRunService:
             await self.session.rollback()
             raise
 
-    async def get_final_result(self, run_id: UUID) -> AgentFinalResult | None:
-        run = await self.runs.get(run_id)
-        if run is None:
-            raise AgentRunNotFoundError(run_id)
-        if run.final_result is None:
-            return None
-        return decode_agent_result(run.final_result)
-
     async def cancel_execution(self, run_id: UUID) -> None:
         try:
             run = await self.runs.get_for_update(run_id)
@@ -221,16 +212,6 @@ class AgentRunService:
         except BaseException:
             await self.session.rollback()
             raise
-
-    async def get_failure(self, run_id: UUID) -> AgentFailure | None:
-        if await self.runs.get(run_id) is None:
-            raise AgentRunNotFoundError(run_id)
-        events = await self.events.get_execution_failure_events(run_id)
-        if not events:
-            return None
-        if len(events) > 1:
-            raise AgentFailureContractError("duplicate_execution_failure")
-        return decode_agent_failure(events[0].payload)
 
     async def fail_execution(self, run_id: UUID, failure: AgentFailure) -> None:
         try:
@@ -269,11 +250,6 @@ class AgentRunService:
         except BaseException:
             await self.session.rollback()
             raise
-
-    async def get_usage(self, run_id: UUID) -> AgentUsageRecord | None:
-        if await self.runs.get(run_id) is None:
-            raise AgentRunNotFoundError(run_id)
-        return await self._read_usage_event(run_id)
 
     async def _read_usage_event(self, run_id: UUID) -> AgentUsageRecord | None:
         events = await self.events.get_usage_events(run_id)

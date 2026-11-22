@@ -152,18 +152,6 @@ class AgentService:
             raise AgentRunnerError("execution_deadline_exceeded")
         return result
 
-    async def get_run_result(self, run_id: UUID) -> AgentFinalResult | None:
-        async with self._session_factory() as session:
-            return await AgentRunService(session).get_final_result(run_id)
-
-    async def get_run_failure(self, run_id: UUID) -> AgentFailure | None:
-        async with self._session_factory() as session:
-            return await AgentRunService(session).get_failure(run_id)
-
-    async def get_run_usage(self, run_id: UUID) -> AgentUsageRecord | None:
-        async with self._session_factory() as session:
-            return await AgentRunService(session).get_usage(run_id)
-
     async def _persist_usage(self, snapshot: AgentUsageSnapshot) -> None:
         async with self._session_factory() as session:
             await AgentRunService(session).record_usage(AgentUsageRecord(snapshot, self._pricing))
