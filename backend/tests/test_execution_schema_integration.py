@@ -11,8 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 
 from app.core.settings import Settings
-from app.db.models import (AgentEventModel, AgentRunModel, ApprovalModel, ArtifactModel,
-                           TaskModel, ToolCallModel, WorkspaceModel)
+from app.db.models import AgentEventModel, AgentRunModel, TaskModel, WorkspaceModel
 from app.db.session import create_engine
 
 
@@ -34,16 +33,16 @@ def test_execution_schema_and_constraints():
 
                     def inspect_schema(sync_conn):
                         inspector = inspect(sync_conn)
-                        names = {"agent_runs", "agent_events", "tool_calls", "approvals", "artifacts"}
-                        assert names <= set(inspector.get_table_names())
-                        parents = {"agent_runs": ("task_id", "tasks"), "agent_events": ("agent_run_id", "agent_runs"),
-                                   "tool_calls": ("agent_run_id", "agent_runs"), "approvals": ("tool_call_id", "tool_calls"),
-                                   "artifacts": ("agent_run_id", "agent_runs")}
-                        nullable_columns = {"agent_runs": {"final_result"}, "approvals": {"decided_at"}}
+                        names = {"agent_runs", "agent_events"}
+                        tables = set(inspector.get_table_names())
+                        assert names <= tables
+                        assert not {"tool_calls", "approvals", "artifacts"} & tables      # dropped in C5 (ADR-003)
+                        parents = {"agent_runs": ("task_id", "tasks"), "agent_events": ("agent_run_id", "agent_runs")}
+                        nullable_columns = {"agent_runs": {"final_result"}}
                         for table, (column, target) in parents.items():
                             cols = inspector.get_columns(table)
                             assert {c["name"] for c in cols if c["nullable"]} == nullable_columns.get(table, set())
-                            timestamps = [c for c in cols if c["name"] in ("created_at", "requested_at", "decided_at")]
+                            timestamps = [c for c in cols if c["name"] == "created_at"]
                             assert all(isinstance(c["type"], DateTime) and c["type"].timezone for c in timestamps)
                             assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"]
                             fk = inspector.get_foreign_keys(table)[0]
@@ -52,7 +51,6 @@ def test_execution_schema_and_constraints():
                             assert any(i["column_names"] == [column] for i in inspector.get_indexes(table))
                         assert {tuple(u["column_names"]) for u in inspector.get_unique_constraints("agent_runs")} >= {("task_id", "attempt_number")}
                         assert {tuple(u["column_names"]) for u in inspector.get_unique_constraints("agent_events")} >= {("agent_run_id", "sequence")}
-                        assert not any(u["column_names"] == ["tool_call_id"] for u in inspector.get_unique_constraints("approvals"))
                         for table in names:
                             assert inspector.get_check_constraints(table)
                         payload_column = next(c for c in inspector.get_columns("agent_events") if c["name"] == "payload")
@@ -64,7 +62,7 @@ def test_execution_schema_and_constraints():
                         }
 
                     await conn.run_sync(inspect_schema)
-                    workspace, task, run, tool = uuid4(), uuid4(), uuid4(), uuid4()
+                    workspace, task, run = uuid4(), uuid4(), uuid4()
                     await conn.execute(insert(WorkspaceModel).values(id=workspace, name="synthetic"))
                     await conn.execute(insert(TaskModel).values(id=task, workspace_id=workspace, goal="synthetic", acceptance_criteria=["ok"]))
                     await conn.execute(insert(AgentRunModel).values(
@@ -77,17 +75,11 @@ def test_execution_schema_and_constraints():
                     event = uuid4()
                     payload = {"synthetic": [1, "example"]}
                     await conn.execute(insert(AgentEventModel).values(id=event, agent_run_id=run, sequence=1, event_type="created", payload=payload))
-                    await conn.execute(insert(ToolCallModel).values(id=tool, agent_run_id=run, tool_name="synthetic", status="proposed"))
-                    await conn.execute(insert(ApprovalModel), [{"id": uuid4(), "tool_call_id": tool, "status": "pending"}, {"id": uuid4(), "tool_call_id": tool, "status": "approved"}])
-                    artifact = uuid4()
-                    await conn.execute(insert(ArtifactModel).values(id=artifact, agent_run_id=run, kind="report", storage_ref="synthetic://result"))
                     row = (await conn.execute(select(AgentEventModel.payload, AgentEventModel.created_at).where(AgentEventModel.id == event))).one()
                     assert row.payload == payload and row.created_at.utcoffset() is not None
-                    for model, timestamp, key in [(AgentRunModel, AgentRunModel.created_at, run), (ToolCallModel, ToolCallModel.created_at, tool), (ArtifactModel, ArtifactModel.created_at, artifact)]:
+                    for model, timestamp, key in [(AgentRunModel, AgentRunModel.created_at, run)]:
                         value = await conn.scalar(select(timestamp).where(model.id == key))
                         assert value.utcoffset() is not None
-                    approval_time = await conn.scalar(select(ApprovalModel.requested_at).where(ApprovalModel.tool_call_id == tool).limit(1))
-                    assert approval_time.utcoffset() is not None
 
                     async def rejected(statement, state):
                         with pytest.raises(IntegrityError) as exc:
@@ -104,26 +96,17 @@ def test_execution_schema_and_constraints():
                     for value in (0, -1):
                         await rejected(insert(AgentRunModel).values(**run_values(attempt_number=value)), "23514")
                         await rejected(insert(AgentEventModel).values(**event_values(sequence=value)), "23514")
-                    await rejected(insert(AgentRunModel).values(**run_values(status="invalid")), "23514")
+                    for value in ("invalid", "waiting_approval"):                       # the M1 status is gone (C5)
+                        await rejected(insert(AgentRunModel).values(**run_values(status=value)), "23514")
                     for value in ([], "synthetic", JSONB.NULL):
                         await rejected(insert(AgentRunModel).values(**run_values(final_result=value)), "23514")
-                    await rejected(insert(ToolCallModel).values(id=uuid4(), agent_run_id=run, tool_name="x", status="invalid"), "23514")
-                    await rejected(insert(ApprovalModel).values(id=uuid4(), tool_call_id=tool, status="invalid"), "23514")
                     await rejected(insert(AgentRunModel).values(**run_values(status=None)), "23502")
                     await rejected(insert(AgentEventModel).values(**event_values(payload=null())), "23502")
-                    await rejected(insert(ToolCallModel).values(id=uuid4(), agent_run_id=run, tool_name=None, status="proposed"), "23502")
                     await rejected(insert(AgentEventModel).values(**event_values(event_type=" \t")), "23514")
-                    await rejected(insert(ToolCallModel).values(id=uuid4(), agent_run_id=run, tool_name=" ", status="proposed"), "23514")
-                    for kind, ref in [(" ", "ok"), ("ok", " ")]:
-                        await rejected(insert(ArtifactModel).values(id=uuid4(), agent_run_id=run, kind=kind, storage_ref=ref), "23514")
                     await rejected(insert(AgentRunModel).values(**run_values(task_id=uuid4())), "23503")
                     await rejected(insert(AgentEventModel).values(**event_values(agent_run_id=uuid4())), "23503")
-                    await rejected(insert(ToolCallModel).values(id=uuid4(), agent_run_id=uuid4(), tool_name="x", status="proposed"), "23503")
-                    await rejected(insert(ApprovalModel).values(id=uuid4(), tool_call_id=uuid4(), status="pending"), "23503")
-                    await rejected(insert(ArtifactModel).values(id=uuid4(), agent_run_id=uuid4(), kind="x", storage_ref="x"), "23503")
                     await rejected(delete(TaskModel).where(TaskModel.id == task), "23503")
                     await rejected(delete(AgentRunModel).where(AgentRunModel.id == run), "23503")
-                    await rejected(delete(ToolCallModel).where(ToolCallModel.id == tool), "23503")
                 finally:
                     await transaction.rollback()
         finally:

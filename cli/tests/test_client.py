@@ -177,7 +177,7 @@ def test_create_run_accepts_201_and_200_without_starting(run_body):
 
 
 def test_get_run_reads_metadata(run_body):
-    run_body.update(status="waiting_approval", attempt_number=2)
+    run_body.update(status="verifying", attempt_number=2)
 
     def handler(request):
         assert request.method == "GET"
@@ -189,6 +189,18 @@ def test_get_run_reads_metadata(run_body):
 
     assert result.model_dump(mode="json") == run_body
 
+
+
+def test_get_run_rejects_the_removed_waiting_approval_status(run_body):
+    """ADR-003 C5: the backend can no longer produce 'waiting_approval'; a response carrying it is malformed."""
+    run_body.update(status="waiting_approval")
+
+    def handler(request):
+        return httpx.Response(200, json=run_body)
+
+    with ForgeAPIClient(BASE_URL, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ForgeResponseError):
+            client.get_run(RUN_ID)
 
 @pytest.mark.parametrize("http_status", [200, 201])
 @pytest.mark.parametrize(
@@ -551,7 +563,6 @@ def test_get_run_events_rejects_malformed_page_fields(changes):
     [
         ("queued", None, None, None),
         ("running", None, None, None),
-        ("waiting_approval", None, None, None),
         ("cancelled", None, None, None),
         ("verifying", "ready_for_verification", None, "inconclusive"),
         ("verifying", "ready_for_verification", None, None),

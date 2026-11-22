@@ -135,7 +135,7 @@ def test_task_panel_numbers_criteria(render_terminal):
 
 
 @pytest.mark.parametrize("width", [80, 24])
-@pytest.mark.parametrize("status", ["waiting_approval", "cancelled"])
+@pytest.mark.parametrize("status", ["verifying", "cancelled"])
 def test_agent_run_presentation_without_color(render_terminal, width, status):
     run = AgentRunResponse(
         id=UUID(int=3),

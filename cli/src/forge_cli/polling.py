@@ -16,7 +16,7 @@ _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 class WatchOutcome:
     last_observed_status: AgentRunStatus | None
     next_after_sequence: int
-    stop_reason: Literal["terminal", "waiting_approval", "timeout", "interrupted"]
+    stop_reason: Literal["terminal", "timeout", "interrupted"]
 
 
 def watch_run(
@@ -33,7 +33,7 @@ def watch_run(
     """Observe through a caller-owned client using already validated options."""
     status: AgentRunStatus | None = None
     cursor = after_sequence
-    drain_reason: Literal["terminal", "waiting_approval"] | None = None
+    drain_reason: Literal["terminal"] | None = None
     # Requests and buffered JSON events stay bounded independently of clock progress.
     max_cycles = (timeout + interval - 1) // interval
     try:
@@ -56,8 +56,6 @@ def watch_run(
             # Remember a stop state even if the run changes while draining.
             if status in _TERMINAL_STATES:
                 drain_reason = "terminal"
-            elif status == "waiting_approval" and drain_reason is None:
-                drain_reason = "waiting_approval"
             if drain_reason is not None and not page.has_more:
                 return WatchOutcome(status, cursor, drain_reason)
             pause(min(interval, remaining))

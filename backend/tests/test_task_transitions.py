@@ -9,10 +9,8 @@ from app.domain.task_transitions import InvalidTaskTransition, validate_task_tra
 
 ALLOWED = {
     (Status.QUEUED, Status.RUNNING), (Status.QUEUED, Status.FAILED), (Status.QUEUED, Status.CANCELLED),
-    (Status.RUNNING, Status.WAITING_APPROVAL), (Status.RUNNING, Status.VERIFYING),
+    (Status.RUNNING, Status.VERIFYING),
     (Status.RUNNING, Status.FAILED), (Status.RUNNING, Status.CANCELLED),
-    (Status.WAITING_APPROVAL, Status.RUNNING), (Status.WAITING_APPROVAL, Status.FAILED),
-    (Status.WAITING_APPROVAL, Status.CANCELLED),
     (Status.VERIFYING, Status.RUNNING), (Status.VERIFYING, Status.SUCCEEDED),
     (Status.VERIFYING, Status.FAILED), (Status.VERIFYING, Status.CANCELLED),
 }

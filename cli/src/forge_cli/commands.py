@@ -243,7 +243,7 @@ def run_watch(
             on_page=on_page,
         ),
     )
-    if not options.json_output or outcome.stop_reason in ("terminal", "waiting_approval"):
+    if not options.json_output or outcome.stop_reason == "terminal":
         print_watch_summary(
             run_id, outcome, events, json_output=options.json_output, no_color=options.no_color
         )

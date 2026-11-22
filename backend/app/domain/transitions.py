@@ -14,8 +14,7 @@ class InvalidAgentRunTransition(ValueError):
 
 _ALLOWED = MappingProxyType({
     AgentRunStatus.QUEUED: frozenset({AgentRunStatus.RUNNING, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
-    AgentRunStatus.RUNNING: frozenset({AgentRunStatus.WAITING_APPROVAL, AgentRunStatus.VERIFYING, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
-    AgentRunStatus.WAITING_APPROVAL: frozenset({AgentRunStatus.RUNNING, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
+    AgentRunStatus.RUNNING: frozenset({AgentRunStatus.VERIFYING, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
     AgentRunStatus.VERIFYING: frozenset({AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
     AgentRunStatus.SUCCEEDED: frozenset(),
     AgentRunStatus.FAILED: frozenset(),

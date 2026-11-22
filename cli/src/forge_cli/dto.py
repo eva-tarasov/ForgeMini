@@ -72,7 +72,7 @@ class TaskResponse(BaseModel):
 
 
 AgentRunStatus = Literal[
-    "queued", "running", "waiting_approval", "verifying", "succeeded", "failed", "cancelled"
+    "queued", "running", "verifying", "succeeded", "failed", "cancelled"
 ]
 
 
@@ -242,7 +242,7 @@ class AgentRunResultResponse(_ReadResponse):
         if (
             (requires_preliminary and preliminary != "ready_for_verification")
             or (preliminary == "blocked" and status != "failed")
-            or (preliminary is not None and status in ("queued", "running", "waiting_approval"))
+            or (preliminary is not None and status in ("queued", "running"))
             or (self.execution_failure_code is not None and (status != "failed" or preliminary is not None))
             or ((verdict == "pass") != (status == "succeeded"))
             or (verdict == "fail" and status != "failed")
