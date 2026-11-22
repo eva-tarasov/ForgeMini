@@ -5,7 +5,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.domain.execution import AgentRunStatus
 from app.services.agent_failure import AgentFailureCode
-from app.services.verification_contract import VerificationVerdict
+from app.domain.verification import VerificationVerdict
 
 
 class AgentRunCreate(BaseModel):

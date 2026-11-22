@@ -35,8 +35,9 @@ from app.services.tool_call_audit import ToolCallAudit, ToolCallErrorCode, encod
 from app.services.tool_calls import ToolCallTicket
 from app.sandbox.events import AGENT_STEP_EVENT
 from app.sandbox.verification import SANDBOX_VERIFICATION_RECORDED, SandboxVerification
-from app.services.verification_contract import VerificationVerdict
-from app.services.verification_evidence import VERIFICATION_RECORDED, VerificationEvidence, decode_evidence, metadata_digest
+from app.core.digest import metadata_digest
+from app.domain.verification import VerificationVerdict
+from app.services.verification_evidence import VERIFICATION_RECORDED, VerificationEvidence, decode_evidence
 
 
 _TOOL_KINDS = frozenset({"tool_call_proposed", "tool_call_started", "tool_call_finished"})

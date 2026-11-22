@@ -1,0 +1,57 @@
+"""Provider-error classification used by the prototype's runner. No LangGraph in sight (ADR-003, cut 1)."""
+import subprocess
+import sys
+from pathlib import Path
+
+import httpx
+import openai
+import pytest
+
+from app.sandbox.provider_errors import classify_provider_error
+from app.services.agent_failure import AgentFailureCode
+
+URL = "https://forge-test.invalid/v1/chat/completions"
+REQUEST = httpx.Request("POST", URL)
+BACKEND = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("status,provider_code,expected", [
+    (400, None, "provider_request_rejected"),
+    (401, None, "provider_auth"),
+    (403, None, "provider_auth"),
+    (404, None, "provider_request_rejected"),
+    (408, None, "provider_timeout"),
+    (409, None, "provider_error"),
+    (422, None, "provider_request_rejected"),
+    (429, "insufficient_quota", "provider_quota_exhausted"),
+    (429, "rate_limit_exceeded", "provider_rate_limited"),
+    (429, "synthetic unknown", "provider_rate_limit_unknown"),
+    (429, None, "provider_rate_limit_unknown"),
+    (500, None, "provider_unavailable"),
+    (599, None, "provider_unavailable"),
+])
+def test_status_errors(status, provider_code, expected):
+    error = openai.APIStatusError(
+        "synthetic error", response=httpx.Response(status, request=REQUEST), body={"code": provider_code},
+    )
+    assert classify_provider_error(error) is AgentFailureCode(expected)
+
+
+@pytest.mark.parametrize("error,expected", [
+    (openai.APITimeoutError(REQUEST), "provider_timeout"),                 # subclass of APIConnectionError: must win
+    (openai.APIConnectionError(request=REQUEST), "provider_connection"),
+    (openai.APIError("synthetic error", REQUEST, body=None), "provider_error"),
+    (TimeoutError("synthetic error"), "runner_timeout"),
+    (RuntimeError("provider_timeout"), "execution_failed"),                # the MESSAGE never decides, only the type
+])
+def test_exception_types(error, expected):
+    assert classify_provider_error(error) is AgentFailureCode(expected)
+
+
+def test_sandbox_runner_does_not_import_langgraph():
+    """The cut itself: importing the prototype's runner must not drag the LangGraph graphs in (it used to)."""
+    code = ("import sys, app.sandbox.runner; "
+            "bad = sorted(m for m in sys.modules if m.startswith(('langgraph', 'app.agent_runtime'))); "
+            "print(bad); sys.exit(1 if bad else 0)")
+    done = subprocess.run([sys.executable, "-c", code], cwd=BACKEND, capture_output=True, text=True)
+    assert done.returncode == 0, f"sandbox.runner still imports: {done.stdout.strip()} {done.stderr[-300:]}"
