@@ -21,9 +21,9 @@
 | 4 | **Демо** (ветка `claude/demo`): репозиторий с багами, `forge solve --repo <git URL> --apply`, цветной вид в терминале, `scripts/demo/run.sh` | ✅ PR «Demo» (на ревью) |
 
 | 6 | **C1: инвентаризация M1 + ADR-003** (`scripts/inventory/import_graph.py`) | ✅ PR #9 (влит) |
-| 7 | **C1-поправка**: «мёртвое» ≠ «можно удалить»; ADR-003 и ROADMAP пересмотрены (слои C2–C5, новые этапы F и G) | ✅ PR «C1 correction» (на ревью) |
-| 8 | **C2: подготовительные разрезы** (шесть швов ядро→M1: 20 → 14) | ✅ PR «C2 cuts» (на ревью, стопкой после #12) |
-| 9 | **C3: слой approvals/evidence** (публичный API + CLI + сервисы + `tools/` + `permissions/` + 40 тест-файлов M1; −22 941 строка) | ✅ PR «C3 approvals layer» (на ревью, стопкой после C2) |
+| 7 | **C1-поправка**: «мёртвое» ≠ «можно удалить»; ADR-003 и ROADMAP пересмотрены (слои C2–C5, новые этапы F и G) | ✅ PR #10 (влит) |
+| 8 | **C2: подготовительные разрезы** (шесть швов ядро→M1: 20 → 14) | ✅ PR #13 (влит) |
+| 9 | **C3: слой approvals/evidence** (публичный API + CLI + сервисы + `tools/` + `permissions/` + 40 тест-файлов M1; −22 941 строка) | ✅ PR #14 (на ревью) |
 
 ## Базовая линия (для статьи: «до»)
 - Unit: 1622 passed / 481 skipped (без БД) на момент форка; после Day 1: 1669 passed (+47 тестов sandbox). Integration (PG 16 локально): 424 passed / 29 skipped.
@@ -124,7 +124,7 @@
 - **Контракт публичного API сужен намеренно (решение владельца):** хранимые события `tool_call_*`/`approval_*` и M1-evidence `verification_recorded` теперь читаются как `other` без деталей (тест `test_stored_m1_era_events_project_as_other_with_empty_details`); в OpenAPI 7 видов событий вместо 12 (публичный kind `verification_recorded` остался, но теперь несёт вердикт песочницы). **Старые строки в локальной БД:** ран, завершённый M1-эвиденсом (`succeeded` без sandbox-проверки), теперь отдаёт `AGENT_RUN_READ_FAILED` на `/result` — это fail-closed, не баг; локальную БД можно пересоздать.
 - **Проверка:** ruff чисто; unit **963 passed** / 262 skipped (было 1 761); интеграционные (`scripts/ci/integration_tests.sh`, PG 16) **265 passed**; CLI **531 passed** (было 807; без прежних `--deselect` — тесты demo-launcher с путём автора удалены); evals 46 passed.
 - **Хвосты тоже вычищены:** `cli/README.md` описывал токены и команды, которых нет, и содержал путь личный путь автора (`/Users/<имя>/...`) — переписан по реальному `forge --help`; `cli/RELEASE_V0_1.md` (запись приёмки M1 по PR #66–68) удалён, история в теге; из `integration_tests.sh` и `ci.yml` убраны переменные и `--deselect` удалённых тестов.
-- **Порядок слияния:** PR стоит стопкой — #12 → C2 → C3 (база ветки C3 — `claude/c2-cuts`).
+- **Порядок слияния и конфликты (урок для статьи):** PR стояли стопкой (#12 → #13 → #14, база каждого — предыдущая ветка). #12 и #13 влиты **squash-ом**: в `claude/main` лёг один новый коммит, а исходный коммит C2 в историю не вошёл. Ветка C3 содержала и его, и свой коммит, поэтому GitHub увидел «одни и те же файлы изменены по-разному» → 6 конфликтов (`PROGRESS.md`, `domain/verification.py`, `agent_run_reads.py`, `verification_{contract,evidence}.py`, `test_inventory_tool.py`). Решение: `git merge origin/claude/main` в ветку C3 (force-push из сессии запрещён, merge — нет); во всех конфликтах правильной оказалась сторона C3 — они возникли ровно там, где C3 удаляет то, что C2 только что переносил. Как избежать: стопку с squash-слиянием надо перебазировать (`git rebase --onto`) после каждого слияния либо сливать merge-коммитом.
 - **Остаётся (C4/C5):** `WAITING_APPROVAL` в state machine, check-constraint и CLI-polling; таблицы `tool_calls`/`approvals` и ORM-модели; M1-enum'ы в `domain/execution.py`; LangGraph — C4.
 
 ## Решения владельца после C1
