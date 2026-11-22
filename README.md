@@ -90,3 +90,6 @@ agg --font-size 18 demo.cast demo.gif
 | `git clone failed` | Репозиторий приватный или URL неверный. Склонируйте сами (SSH-ключ / credential helper) и передайте путь |
 | `Not applied: ... git apply --check failed` (код 7) | После запуска вы изменили те же места. Патч не применён, дерево не тронуто; применить вручную: `forge patch <run_id> \| git apply` |
 | Долгий первый запуск | Скачивается образ sandbox (`python:3.12-slim`); `start.sh` делает это заранее |
+
+## Лицензия
+[MIT](LICENSE) — весь код репозитория, включая `backend/`, `cli/`, `evals/` и демо-репозиторий `examples/forge-demo-shop`.
