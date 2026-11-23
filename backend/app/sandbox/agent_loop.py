@@ -34,6 +34,8 @@ Workflow:
 
 Rules:
 - Do NOT modify or delete existing tests to make them pass; fix the code under test.
+  The test configuration counts as tests too: conftest.py, pytest.ini, tox.ini and the pytest /
+  coverage / tox sections of pyproject.toml and setup.cfg. Changing them fails the verification.
 - Your answer is checked independently: after you finish, the tests are re-run in a clean container
   on your changes. Never claim success you have not seen in a test run.
 - If the task cannot be done (the code is correct and the tests/requirements are wrong or
