@@ -20,6 +20,9 @@ class WorkspaceCreate(BaseModel):
     # Docker image the agent and the verifier run in. It needs the project's dependencies pre-installed:
     # the sandbox has no network.
     image: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
+    # Optional setup phase (ADR-004): run ONCE with network before the sandbox, e.g. "pip install -r requirements.txt".
+    # Its result is frozen into a derived image; the agent and the verifier still run without network.
+    setup_command: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
     @field_validator("source_path")
     @classmethod
@@ -35,11 +38,11 @@ class WorkspaceCreate(BaseModel):
             raise ValueError("source_path must be an existing directory")
         return str(path.resolve())
 
-    @field_validator("test_command")
+    @field_validator("test_command", "setup_command")
     @classmethod
-    def _no_nul(cls, value: str | None) -> str | None:
+    def _no_nul(cls, value: str | None, info) -> str | None:
         if value is not None and "\0" in value:
-            raise ValueError("test_command must not contain NUL")
+            raise ValueError(f"{info.field_name} must not contain NUL")
         return value
 
     @field_validator("image")
@@ -56,3 +59,4 @@ class WorkspaceResponse(BaseModel):
     source_path: str | None = None
     test_command: str | None = None
     image: str | None = None
+    setup_command: str | None = None

@@ -34,6 +34,8 @@ POLICY = {
     "sandbox_error": "review_required",
     "workspace_not_configured": "review_required",
     "execution_failed": "review_required",
+    # a failed install may be a network blip or a broken requirements file: a human decides
+    "setup_failed": "review_required",
 }
 
 

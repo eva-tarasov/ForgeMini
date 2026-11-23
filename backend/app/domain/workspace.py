@@ -10,3 +10,4 @@ class Workspace:
     source_path: str | None = None
     test_command: str | None = None
     image: str | None = None
+    setup_command: str | None = None   # opt-in setup phase with network before the sandbox (ADR-004)

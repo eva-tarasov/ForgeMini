@@ -49,20 +49,20 @@ FIX_AVERAGE = [
 
 
 @asynccontextmanager
-async def world(tmp_path: Path, test_command: str):
+async def world(tmp_path: Path, test_command: str, *, source: Path = DEMO, setup: str | None = None):
     name = os.getenv("FORGE_TASK06_TEST_DB")
     if not name or not re.fullmatch(r"forge_task06_[a-z0-9_]+", name) or os.getenv("POSTGRES_DB") != name:
         pytest.fail("POSTGRES_DB and FORGE_TASK06_TEST_DB must name the same forge_task06_* database", pytrace=False)
     engine = create_engine(Settings(postgres_db=name))
     factory = create_session_factory(engine)
     project = tmp_path / "project"
-    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(source, project, ignore=shutil.ignore_patterns("__pycache__"))
     workspace_id = uuid4()
     ids: dict = {}
     try:
         async with factory() as session:
             repo = WorkspaceRepository(session)
-            await repo.add(Workspace(workspace_id, "pipeline", str(project), test_command, default_image()))
+            await repo.add(Workspace(workspace_id, "pipeline", str(project), test_command, default_image(), setup))
             await session.flush()
             task = await TaskService(session, TaskRepository(session), repo).create_task(
                 workspace_id, "fix the bug", ["tests pass"])
@@ -81,9 +81,9 @@ async def world(tmp_path: Path, test_command: str):
         await engine.dispose()
 
 
-async def execute(factory, project, store, run_id, turns, test_command):
+async def execute(factory, project, store, run_id, turns, test_command, setup=None):
     async def resolve(_req):
-        return SandboxJob(project, default_image(), test_command)
+        return SandboxJob(project, default_image(), test_command, setup)
     runner = SandboxRunner(model=ScriptedModel(turns), resolve_job=resolve, artifacts=store)
     await AgentService(factory, runner, execution_timeout_seconds=300).execute_run(run_id)
 
@@ -191,3 +191,51 @@ def test_verifying_twice_is_rejected_after_the_terminal_state(tmp_path):
             with pytest.raises(StaleAgentRunStatusError):
                 await verifier.verify(run_id)
     asyncio.run(asyncio.wait_for(body(), 600))
+
+
+# --- setup phase (ADR-004): dependencies installed WITH network, agent and Verifier still without ------------------
+def _project_with_a_dependency(root: Path) -> Path:
+    """`shop.py` imports `forgedep`, which exists ONLY after the setup command installs it into site-packages."""
+    (root / "tests").mkdir(parents=True)
+    (root / "vendor").mkdir()
+    (root / "vendor" / "forgedep.py").write_text("def threshold():\n    return 50\n")
+    (root / "shop.py").write_text("from forgedep import threshold\n\n\ndef ships_free(amount):\n"
+                                  "    return amount > threshold()\n")                      # bug: > instead of >=
+    (root / "tests" / "__init__.py").write_text("")
+    (root / "tests" / "test_shop.py").write_text(
+        "import unittest\nfrom shop import ships_free\n\n\nclass T(unittest.TestCase):\n"
+        "    def test_exactly_fifty_ships_free(self):\n        self.assertTrue(ships_free(50))\n")
+    return root
+
+
+SHOP_TEST = "python -m unittest tests.test_shop"
+INSTALL_DEP = 'cp vendor/forgedep.py "$(python -c \'import site; print(site.getsitepackages()[0])\')/" # {nonce}'
+
+
+def test_setup_phase_dependency_is_available_to_the_agent_and_to_the_verifier(tmp_path):
+    """Without the setup phase `import forgedep` fails in EVERY container, so neither the agent's green run nor the
+    Verifier's PASS is possible. A PASS here proves the derived image reached both, while both stayed offline."""
+    source = _project_with_a_dependency(tmp_path / "src")
+    setup = INSTALL_DEP.format(nonce=uuid4().hex)            # unique: no cache hit from an earlier test run
+    turns = [tool_turn("bash", {"command": SHOP_TEST}),
+             tool_turn("edit_file", {"path": "shop.py", "old_str": "amount > threshold()",
+                                     "new_str": "amount >= threshold()"}),
+             tool_turn("bash", {"command": SHOP_TEST}),
+             tool_turn("finish", {"status": "done", "summary": "threshold is inclusive"})]
+
+    async def body():
+        async with world(tmp_path, SHOP_TEST, source=source, setup=setup) as (factory, project, store, run_id, task_id):
+            await execute(factory, project, store, run_id, turns, SHOP_TEST, setup)
+            v = await SandboxVerifier(factory, store).verify(run_id)
+            run_status, task_status, events = await state(factory, run_id, task_id)
+            return v, run_status, task_status, events
+    v, run_status, task_status, _ = asyncio.run(asyncio.wait_for(body(), 900))
+    try:
+        assert v.reason == "tests_fail_before_and_pass_after", v
+        assert "ImportError" not in v.baseline.output_tail and "AssertionError" in v.baseline.output_tail
+        assert v.image.startswith("forgemini-env:")                       # evidence names the derived image
+        assert v.changed_paths == ("shop.py",)                            # no setup leftovers in the changeset
+        assert (run_status, task_status) == ("succeeded", "succeeded")
+    finally:
+        import subprocess
+        subprocess.run(["docker", "rmi", "-f", v.image], capture_output=True)

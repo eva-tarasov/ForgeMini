@@ -47,9 +47,9 @@ def test_migrated_schema_metadata():
                     assert {"workspaces", "tasks", "alembic_version"} <= set(inspector.get_table_names())
                     workspaces = {c["name"]: c for c in inspector.get_columns("workspaces")}
                     tasks = {c["name"]: c for c in inspector.get_columns("tasks")}
-                    assert set(workspaces) == {"id", "name", "source_path", "test_command", "image"}
+                    assert set(workspaces) == {"id", "name", "source_path", "test_command", "image", "setup_command"}
                     assert set(tasks) == {"id", "workspace_id", "goal", "acceptance_criteria", "status", "idempotency_key"}
-                    assert {n for n, c in workspaces.items() if c["nullable"]} == {"source_path", "test_command", "image"}  # run config is optional
+                    assert {n for n, c in workspaces.items() if c["nullable"]} == {"source_path", "test_command", "image", "setup_command"}  # run config is optional
                     assert {name for name, column in tasks.items() if column["nullable"]} == {"idempotency_key"}
                     assert isinstance(workspaces["id"]["type"], Uuid)
                     assert all(isinstance(tasks[name]["type"], Uuid) for name in ("id", "workspace_id", "idempotency_key"))
@@ -68,6 +68,7 @@ def test_migrated_schema_metadata():
                     assert fk["options"]["ondelete"] == "RESTRICT"
                     assert {c["name"] for c in inspector.get_check_constraints("workspaces")} == {
                         "ck_workspaces_name_not_blank", "ck_workspaces_run_config_not_blank",
+                        "ck_workspaces_setup_command_not_blank",
                     }
                     assert {c["name"] for c in inspector.get_check_constraints("tasks")} == {
                         "ck_tasks_goal_not_blank", "ck_tasks_acceptance_criteria_count", "ck_tasks_status"

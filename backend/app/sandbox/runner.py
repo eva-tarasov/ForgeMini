@@ -1,7 +1,8 @@
 """SandboxRunner: implements the existing AgentRunner protocol on top of the new execution layer.
 
-Flow: resolve job -> snapshot source -> start container -> agent loop -> snapshot container ->
-changeset = diff(source, container) -> save artifacts -> preliminary AgentFinalResult.
+Flow: resolve job -> snapshot source -> [setup phase: dependencies into a derived image, with network] ->
+start container (no network) -> agent loop -> snapshot container -> changeset = diff(source, container) ->
+save artifacts -> preliminary AgentFinalResult.
 
 The result is *preliminary* (`ready_for_verification` / `blocked`): the runner never says "succeeded".
 """
@@ -19,6 +20,7 @@ from app.sandbox.agent_loop import ChatModel, EventSink, LoopBudget, LoopOutcome
 from app.sandbox.artifacts import FileArtifactStore
 from app.sandbox.changeset import Snapshot, SnapshotError
 from app.sandbox.docker_sandbox import DockerSandbox, SandboxError, SandboxLimits
+from app.sandbox.environment import SetupError, prepare_environment
 from app.sandbox.provider_errors import classify_provider_error
 from app.sandbox.tools import TOOL_SCHEMAS
 from app.services.agent_failure import AgentFailureCode
@@ -36,6 +38,7 @@ class SandboxJob:
     source_dir: Path
     image: str
     test_command: str
+    setup_command: str | None = None     # opt-in setup phase with network (ADR-004)
 
 
 JobResolver = Callable[[AgentRunRequest], Awaitable[SandboxJob]]
@@ -57,7 +60,15 @@ class SandboxRunner:
         try:
             job = await self._resolve_job(request)
             base = await asyncio.to_thread(Snapshot.from_directory, job.source_dir)
-            async with await DockerSandbox.start(image=job.image, source=base, limits=self._limits) as sandbox:
+            image = job.image
+            if job.setup_command:
+                await _note(emit, "setup", {"command": job.setup_command, "state": "started"})
+                env = await prepare_environment(base_image=job.image, source=base, setup_command=job.setup_command,
+                                                limits=self._limits)
+                image = env.image
+                await _note(emit, "setup", {"command": job.setup_command, "image": env.image,
+                                            "state": "built" if env.built else "reused"})
+            async with await DockerSandbox.start(image=image, source=base, limits=self._limits) as sandbox:
                 outcome = await run_agent_loop(
                     self._model.bind_tools(TOOL_SCHEMAS), sandbox, goal=request.goal,
                     test_command=job.test_command, budget=self._budget, emit=emit,
@@ -67,6 +78,11 @@ class SandboxRunner:
             raise
         except asyncio.CancelledError:
             raise
+        except SetupError as exc:
+            # The useful part of a failed install is its END (the error), so report the tail, not the head.
+            reason = "timed out" if exc.timed_out else f"exit code {exc.exit_code}"
+            await _report(emit, f"setup failed ({reason}): …{exc.output_tail[-450:]}")
+            raise AgentRunnerError(AgentFailureCode.SETUP_FAILED.value) from exc
         except (SandboxError, SnapshotError) as exc:
             await _report(emit, f"{type(exc).__name__}: {exc}")
             raise AgentRunnerError(AgentFailureCode.SANDBOX_ERROR.value) from exc
@@ -94,6 +110,11 @@ class SandboxRunner:
         return AgentFinalResult(summary=outcome.summary or reason, status="blocked",
                                 relevant_components=paths, assumptions=(), observations=(),
                                 blocked_reason=reason)
+
+
+async def _note(emit: EventSink | None, kind: str, data: dict[str, Any]) -> None:
+    if emit is not None:
+        await emit(kind, data)
 
 
 async def _report(emit: EventSink | None, detail: str) -> None:

@@ -65,7 +65,7 @@ class SolveView:
         self._test = ""                                 # the task's test command, set by banner()
 
     # -- before the run -------------------------------------------------------------------------
-    def banner(self, *, repo_label: str, commit: str | None, goal: str, test: str) -> None:
+    def banner(self, *, repo_label: str, commit: str | None, goal: str, test: str, setup: str | None = None) -> None:
         self._test = " ".join(test.split())
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", justify="right")
@@ -73,6 +73,8 @@ class SolveView:
         grid.add_row("repository", _t(repo_label + (f"  @ {commit}" if commit else ""), 300))
         grid.add_row("task", _t(goal, 500))
         grid.add_row("tests", _t(test, 300, "yellow"))
+        if setup:
+            grid.add_row("setup", _t(setup + "   (with network, before the sandbox)", 300, "yellow"))
         self.console.print(Panel(grid, title=Text("ForgeMini", style="bold"),
                                  subtitle=Text("agent in a sandbox without network · verified by an independent re-run",
                                                style="dim"), border_style="cyan"))
@@ -107,6 +109,8 @@ class SolveView:
         elif d.step == "finish":
             claim = "claims it is done" if d.outcome == "claimed_done" else "gives up: cannot fix"
             self.console.print(Text(f"  ■ agent {claim}", style="bold " + ("green" if d.outcome == "claimed_done" else "yellow")))
+        elif d.step == "setup":
+            self.console.print(_t("  ⚙ " + d.summary, 220, "cyan"))
         elif d.step in ("budget_exhausted", "error", "other"):
             self.console.print(_t("  ! " + d.summary, 220, "yellow"))
 

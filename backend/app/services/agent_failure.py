@@ -26,6 +26,7 @@ class AgentFailureCode(StrEnum):
     INVALID_RUNNER_RESULT = "invalid_runner_result"
     SANDBOX_ERROR = "sandbox_error"
     WORKSPACE_NOT_CONFIGURED = "workspace_not_configured"
+    SETUP_FAILED = "setup_failed"                  # the user's --setup command failed (ADR-004)
     EXECUTION_FAILED = "execution_failed"
 
 

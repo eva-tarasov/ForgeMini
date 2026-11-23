@@ -33,6 +33,7 @@ class WorkspaceCreate(BaseModel):
     source_path: Annotated[str, StringConstraints(min_length=1, max_length=1000)] | None = None
     test_command: Annotated[str, StringConstraints(min_length=1, max_length=1000)] | None = None
     image: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = None
+    setup_command: Annotated[str, StringConstraints(min_length=1, max_length=1000)] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_config(self, handler):
@@ -46,6 +47,7 @@ class WorkspaceResponse(BaseModel):
     source_path: str | None = None
     test_command: str | None = None
     image: str | None = None
+    setup_command: str | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_config(self, handler):
@@ -119,6 +121,7 @@ AgentFailureCode = Literal[
     "provider_auth", "provider_request_rejected", "provider_unavailable", "provider_error",
     "graph_budget_exceeded", "graph_execution_failed", "structured_output_invalid",
     "invalid_runner_result", "sandbox_error", "workspace_not_configured", "execution_failed",
+    "setup_failed",
 ]
 
 
@@ -150,7 +153,7 @@ class EmptyEventDetails(_ReadResponse):
 
 
 class RunStepDetails(_ReadResponse):
-    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "other"]
+    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "setup", "other"]
     summary: Annotated[str, Field(max_length=600)]
     # Structured twin of `summary`; absent on events written by older servers.
     turn: int | None = None

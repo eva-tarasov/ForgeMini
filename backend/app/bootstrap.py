@@ -114,7 +114,7 @@ def create_forge_app(
                 ws = await WorkspaceRepository(session).get(task.workspace_id) if task else None
             if ws is None or not ws.source_path or not ws.test_command:
                 raise AgentRunnerError("workspace_not_configured")
-            return SandboxJob(Path(ws.source_path), ws.image or default_image(), ws.test_command)
+            return SandboxJob(Path(ws.source_path), ws.image or default_image(), ws.test_command, ws.setup_command)
 
         return SandboxRunner(
             model=model, resolve_job=resolve_job, artifacts=artifacts, limits=run_limits,

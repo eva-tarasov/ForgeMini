@@ -101,24 +101,27 @@ class SolveResult:
     patch: str | None = None        # filled only when the caller asked for it (the rich view shows the diff)
 
 
-def ensure_workspace(client: ForgeAPIClient, *, repo: Path, test: str, image: str | None, name: str | None):
+def ensure_workspace(client: ForgeAPIClient, *, repo: Path, test: str, image: str | None, name: str | None,
+                     setup: str | None = None):
     """Reuse a workspace with identical configuration instead of piling up duplicates."""
     source = str(repo)
     for existing in client.list_workspaces():
-        if existing.source_path == source and existing.test_command == test and existing.image == image:
+        if (existing.source_path == source and existing.test_command == test and existing.image == image
+                and existing.setup_command == setup):
             return existing
     return client.create_workspace(WorkspaceCreate(
-        name=(name or repo.name or "project")[:100], source_path=source, test_command=test, image=image))
+        name=(name or repo.name or "project")[:100], source_path=source, test_command=test, image=image,
+        setup_command=setup))
 
 
 def solve(
     client: ForgeAPIClient, *, repo: Path, goal: str, test: str, image: str | None, name: str | None,
-    timeout: int, interval: int, emit: Callable[[str], None], watch: bool = True,
+    timeout: int, setup: str | None = None, interval: int, emit: Callable[[str], None], watch: bool = True,
     on_event: Callable[[object], None] | None = None, with_patch: bool = False,
     on_started: Callable[[], None] | None = None,
 ) -> SolveResult:
     """`on_event` (if given) receives each public event instead of the plain text line."""
-    workspace = ensure_workspace(client, repo=repo, test=test, image=image, name=name)
+    workspace = ensure_workspace(client, repo=repo, test=test, image=image, name=name, setup=setup)
     task = client.create_task(TaskCreate(
         workspace_id=workspace.id, goal=goal, acceptance_criteria=[_criterion(test)]))
     run = client.create_run(task.id)
@@ -195,6 +198,8 @@ _PROVIDER_HINTS = {
     "provider_error": "OpenAI returned an error. See the server log (terminal 1) for details.",
     "sandbox_error": "The Docker sandbox failed. Is Docker running? See the server log (terminal 1).",
     "workspace_not_configured": "The workspace has no source path / test command (create it via forge solve).",
+    "setup_failed": "The --setup command failed (its output is above). The agent never started; fix the command "
+                    "or the project's dependencies and run again.",
 }
 
 

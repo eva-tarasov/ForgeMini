@@ -27,7 +27,7 @@ ForgeMini — рабочий прототип «Forge»: даём репозит
 5. После каждого PR обновляй `PROGRESS.md` (коротко: статус + решения + открытые вопросы).
 
 ## Карта кода
-- `backend/app/` — FastAPI-монолит: `domain/` (state machines Task/AgentRun), `services/`, `repositories/`, `api/`, `sandbox/` (Docker-песочница, цикл агента, Verifier), `db/`.
+- `backend/app/` — FastAPI-монолит: `domain/` (state machines Task/AgentRun), `services/`, `repositories/`, `api/`, `sandbox/` (Docker-песочница, setup-фаза `environment.py`, цикл агента, Verifier), `db/`.
 - `backend/alembic/` — миграции. `cli/` — `forge-cli` (Typer, ходит только по HTTP).
 - Унаследованный код M1 удалён целиком (ADR-003, C1–C5): слой approvals/evidence, fixture-инструменты, path-permissions, LangGraph/`agent_runtime/`, таблицы `tool_calls`/`approvals`/`artifacts`, статус `waiting_approval`. Из LangChain остались только `langchain-core` (типы сообщений) и `langchain-openai` (модель). Храповик `test_inventory_tool.py` не даст вернуть импорт ядро→M1.
 - Ядро: domain/state machines, репозитории, `AgentService.execute_run`, учёт стоимости, public API, CLI.
