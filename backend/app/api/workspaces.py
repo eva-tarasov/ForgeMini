@@ -14,7 +14,8 @@ router = APIRouter()
 def _response(workspace: Workspace) -> WorkspaceResponse:
     return WorkspaceResponse(
         id=workspace.id, name=workspace.name, source_path=workspace.source_path,
-        test_command=workspace.test_command, image=workspace.image)
+        test_command=workspace.test_command, image=workspace.image,
+        setup_command=workspace.setup_command)
 
 
 def get_workspace_service(session: Annotated[AsyncSession, Depends(get_session)]) -> WorkspaceService:
@@ -32,7 +33,7 @@ async def create_workspace(
 ) -> WorkspaceResponse:
     created = await service.create_workspace(
         workspace.name, source_path=workspace.source_path, test_command=workspace.test_command,
-        image=workspace.image)
+        image=workspace.image, setup_command=workspace.setup_command)
     return _response(created)
 
 

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from app.core.settings import Settings
 
@@ -22,6 +24,8 @@ DB = os.getenv("FORGE_MIGRATION_TEST_DB")
 pytestmark = pytest.mark.skipif(not DB, reason="set FORGE_MIGRATION_TEST_DB to opt in")
 BACKEND = Path(__file__).resolve().parents[1]
 BEFORE, C5 = "a7c3e91d4b20", "c5a1f0d2e7b9"
+# Later migrations exist on top of C5: the test steps exactly through C5 and returns the DB to the real head.
+HEAD = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini"))).get_current_head()
 M1_TABLES = {"tool_calls", "approvals", "artifacts"}
 IDS = ("00000000-0000-4000-8000-00000000000" + d for d in "123")
 
@@ -63,13 +67,13 @@ def _stuck_rows():
 def test_upgrade_refuses_paused_m1_rows_then_drops_tables_and_round_trips():
     if not re.fullmatch(r"forge_migration_[a-z0-9_]+", DB or ""):
         pytest.fail("FORGE_MIGRATION_TEST_DB must name a dedicated forge_migration_* database", pytrace=False)
-    assert _state() == (C5, set())                                     # head: M1 tables are gone
+    assert _state() == (HEAD, set())                                   # head: M1 tables are gone
 
     assert _alembic("downgrade", BEFORE).returncode == 0
     assert _state() == (BEFORE, M1_TABLES)                              # downgrade restores them
     workspace, task, run = _stuck_rows()
     try:
-        refused = _alembic("upgrade", "head")
+        refused = _alembic("upgrade", C5)
         assert refused.returncode != 0
         assert "refusing to migrate" in refused.stderr and "'agent_runs': 1, 'tasks': 1" in refused.stderr
         assert _state() == (BEFORE, M1_TABLES)                          # transactional DDL: nothing half-applied
@@ -77,7 +81,7 @@ def test_upgrade_refuses_paused_m1_rows_then_drops_tables_and_round_trips():
 
         _sql("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", run)
         _sql("UPDATE tasks SET status = 'cancelled' WHERE id = $1", task)
-        assert _alembic("upgrade", "head").returncode == 0
+        assert _alembic("upgrade", C5).returncode == 0
         assert _state() == (C5, set())
         with pytest.raises(asyncpg.CheckViolationError):               # the status is now impossible
             _sql("UPDATE tasks SET status = 'waiting_approval' WHERE id = $1", task)
@@ -87,8 +91,9 @@ def test_upgrade_refuses_paused_m1_rows_then_drops_tables_and_round_trips():
         if _state()[0] != C5:
             _sql("DELETE FROM agent_runs WHERE id = $1", run)
             _sql("DELETE FROM tasks WHERE id = $1", task)
-            _alembic("upgrade", "head")
+            _alembic("upgrade", C5)
         _sql("DELETE FROM agent_runs WHERE id = $1", run)
         _sql("DELETE FROM tasks WHERE id = $1", task)
         _sql("DELETE FROM workspaces WHERE id = $1", workspace)
-    assert _state() == (C5, set())
+        _alembic("upgrade", "head")
+    assert _state() == (HEAD, set())

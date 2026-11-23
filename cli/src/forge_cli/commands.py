@@ -260,6 +260,10 @@ def solve(
     goal: Annotated[str, typer.Option("--goal", help="What to fix or build, up to 500 characters.")],
     test: Annotated[str, typer.Option("--test", help="Shell command that exits 0 when the project is correct.")],
     image: Annotated[str | None, typer.Option("--image", help="Docker image (default python:3.12-slim).")] = None,
+    setup: Annotated[str | None, typer.Option(
+        "--setup", help="Install dependencies first, WITH network, e.g. \"pip install -r requirements.txt\". "
+                        "Runs the repository's own code with internet access: use only for code you trust. "
+                        "The agent and the verifier still run without network.")] = None,
     name: Annotated[str | None, typer.Option("--name", help="Workspace name (default: directory name).")] = None,
     timeout: Annotated[int, typer.Option(min=10, max=7200, help="Seconds to wait for the run.")] = 900,
     interval: Annotated[int, typer.Option(min=1, max=30, help="Seconds between polls.")] = 2,
@@ -280,7 +284,7 @@ def solve(
     console, rich_layout = stdout_console(no_color=options.no_color)
     view = SolveView(console) if rich_layout and not options.json_output else None
     if view is not None:
-        view.banner(repo_label=source.label, commit=source.commit, goal=goal, test=test)
+        view.banner(repo_label=source.label, commit=source.commit, goal=goal, test=test, setup=setup)
     elif source.cloned_from:
         typer.echo(f"cloned {source.cloned_from} -> {source.path}", err=options.json_output)
 
@@ -299,7 +303,7 @@ def solve(
                 )
             raise
         return run_solve(
-            client, repo=repo_path, goal=goal, test=test, image=image, name=name, timeout=timeout,
+            client, repo=repo_path, goal=goal, test=test, image=image, setup=setup, name=name, timeout=timeout,
             interval=interval, watch=not no_watch,
             emit=(view.note if view else lambda line: typer.echo(sanitize(line, 700), err=options.json_output)),
             on_event=view.event if view else None, with_patch=view is not None or apply,

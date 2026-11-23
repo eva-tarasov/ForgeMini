@@ -122,3 +122,45 @@ def test_no_container_is_left_behind(tmp_path):
     left = subprocess.run(["docker", "ps", "-aq", "--filter", "label=forge.sandbox=1"],
                           capture_output=True, text=True).stdout.strip()
     assert left == ""
+
+
+# --- setup phase (ADR-004) ----------------------------------------------------------------------------------------
+def _runner_with_setup(tmp_path, turns, setup, events):
+    async def resolve(_req):
+        return SandboxJob(DEMO, default_image(), AVG_TEST, setup)
+
+    def emit_factory(_req):
+        async def emit(kind, data):
+            events.append((kind, data))
+        return emit
+    store = FileArtifactStore(tmp_path / "artifacts")
+    return SandboxRunner(model=ScriptedModel(turns), resolve_job=resolve, artifacts=store,
+                         emit_factory=emit_factory), store
+
+
+def test_setup_phase_runs_before_the_agent_and_is_reported(tmp_path):
+    import subprocess
+    events: list = []
+    setup = f"echo deps-installed  # {uuid4().hex}"
+    runner, _ = _runner_with_setup(tmp_path, FIX_AVERAGE, setup, events)
+    res = run_it(runner, request())
+    assert res.status == "ready_for_verification"
+    setup_events = [d for k, d in events if k == "setup"]
+    assert [d["state"] for d in setup_events] == ["started", "built"]
+    assert events[0][0] == "setup" and events[1][0] == "setup"                 # before the first model turn
+    subprocess.run(["docker", "rmi", "-f", setup_events[1]["image"]], capture_output=True)
+
+
+def test_failed_setup_stops_the_run_with_setup_failed_and_the_error_tail(tmp_path):
+    from app.services.agent_runner import AgentRunnerError
+    events: list = []
+    setup = f"echo 'ERROR: Could not find a version that satisfies nope==9' >&2; exit 1  # {uuid4().hex}"
+    runner, store = _runner_with_setup(tmp_path, FIX_AVERAGE, setup, events)
+    req = request()
+    with pytest.raises(AgentRunnerError) as info:
+        run_it(runner, req)
+    assert info.value.reason == "setup_failed"
+    errors = [d["detail"] for k, d in events if k == "error"]
+    assert len(errors) == 1 and "exit code 1" in errors[0] and "nope==9" in errors[0]
+    assert not any(k == "model_response" for k, _ in events)                   # the agent never started
+    assert not store.has_run(req.run_id)

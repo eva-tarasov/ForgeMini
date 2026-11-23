@@ -11,15 +11,15 @@ from app.domain.task import Task, TaskStatus
 def test_workspace_metadata():
     table = WorkspaceModel.__table__
     assert Base.metadata.tables["workspaces"] is table
-    assert set(table.columns.keys()) == {"id", "name", "source_path", "test_command", "image"}
-    assert all(table.c[n].nullable for n in ("source_path", "test_command", "image"))
+    assert set(table.columns.keys()) == {"id", "name", "source_path", "test_command", "image", "setup_command"}
+    assert all(table.c[n].nullable for n in ("source_path", "test_command", "image", "setup_command"))
     assert isinstance(table.c.id.type, Uuid)
     assert table.c.id.primary_key
     assert isinstance(table.c.name.type, String)
     assert table.c.name.type.length == 100
     assert not table.c.name.nullable
     assert {c.name for c in table.constraints if isinstance(c, CheckConstraint)} == {
-        "ck_workspaces_name_not_blank", "ck_workspaces_run_config_not_blank",
+        "ck_workspaces_name_not_blank", "ck_workspaces_run_config_not_blank", "ck_workspaces_setup_command_not_blank",
     }
 
 

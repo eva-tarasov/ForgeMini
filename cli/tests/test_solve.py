@@ -562,3 +562,38 @@ WORDS = "The requested threshold of 40.00 contradicts the uneditable shipping te
 ])
 def test_why_it_stopped_never_repeats_what_the_agent_said(summary, reason, shown):
     assert stop_reason_text(SimpleNamespace(agent_summary=summary, blocked_reason=reason)) == shown
+
+
+# --- --setup (ADR-004) ---------------------------------------------------------------------------------------------
+def test_setup_command_is_stored_in_the_workspace(server, tmp_path):
+    result = runner.invoke(app, solve_args(tmp_path, "--setup", "pip install -r requirements.txt"))
+    assert result.exit_code == 0, result.output
+    assert server.bodies["POST /workspaces"]["setup_command"] == "pip install -r requirements.txt"
+
+
+def test_without_setup_the_request_body_is_unchanged(server, tmp_path):
+    runner.invoke(app, solve_args(tmp_path))
+    assert "setup_command" not in server.bodies["POST /workspaces"]          # old servers keep working
+
+
+def test_workspace_with_a_different_setup_is_not_reused(server, tmp_path):
+    # Reusing it would silently run the agent WITHOUT the dependencies the user asked for (or with stale ones).
+    server.workspaces.append({"id": WS, "name": "x", "source_path": str(tmp_path.resolve()),
+                              "test_command": "python -m pytest -q", "image": None, "setup_command": None})
+    runner.invoke(app, solve_args(tmp_path, "--setup", "pip install ."))
+    assert "POST /workspaces" in server.calls
+    server.calls.clear()
+    runner.invoke(app, solve_args(tmp_path, "--setup", "pip install ."))
+    assert "POST /workspaces" not in server.calls                            # identical setup: reused
+
+
+def test_rich_view_shows_the_setup_phase_in_the_banner_and_as_steps(server, tmp_path, monkeypatch):
+    server.events = [_step(1, step="setup", summary="setup: installing dependencies (with network)… $ pip install ."),
+                     _step(2, step="setup", summary="setup: dependencies installed $ pip install ."),
+                     *[{**e, "sequence": e["sequence"] + 2} for e in _rich_events()]]
+    console, buf = _tty_console(monkeypatch)
+    result = runner.invoke(app, solve_args(tmp_path, "--setup", "pip install ."))
+    assert result.exit_code == 0, result.output
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+    assert "setup" in plain and "(with network, before the sandbox)" in plain       # banner
+    assert "⚙ setup: installing dependencies" in plain and "⚙ setup: dependencies installed" in plain

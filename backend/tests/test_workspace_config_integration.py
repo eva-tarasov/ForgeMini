@@ -1,4 +1,4 @@
-"""Opt-in PostgreSQL check of the workspace run-config columns (migration a7c3e91d4b20)."""
+"""Opt-in PostgreSQL check of the workspace run-config columns (migrations a7c3e91d4b20, d4e8b2a6f1c3)."""
 
 import asyncio
 import os
@@ -35,16 +35,22 @@ def test_run_config_roundtrip_and_legacy_rows_and_blank_rejection():
         try:
             async with factory() as session:
                 repo = WorkspaceRepository(session)
-                await repo.add(Workspace(full, "cfg", "/src/app", "pytest -q", "python:3.12-slim"))
+                await repo.add(Workspace(full, "cfg", "/src/app", "pytest -q", "python:3.12-slim",
+                                         "pip install -r requirements.txt"))
                 await repo.add(Workspace(legacy, "legacy"))          # no config: must still be valid
                 await session.commit()
             async with factory() as session:
                 repo = WorkspaceRepository(session)
-                assert await repo.get(full) == Workspace(full, "cfg", "/src/app", "pytest -q", "python:3.12-slim")
-                assert await repo.get(legacy) == Workspace(legacy, "legacy", None, None, None)
+                assert await repo.get(full) == Workspace(full, "cfg", "/src/app", "pytest -q", "python:3.12-slim",
+                                                         "pip install -r requirements.txt")
+                assert await repo.get(legacy) == Workspace(legacy, "legacy", None, None, None, None)
             # the DB itself (not only the API schema) refuses whitespace-only config
             async with factory() as session:
                 session.add(WorkspaceModel(id=uuid4(), name="bad", test_command="   "))
+                with pytest.raises(IntegrityError):
+                    await session.commit()
+            async with factory() as session:
+                session.add(WorkspaceModel(id=uuid4(), name="bad", setup_command=" \t "))
                 with pytest.raises(IntegrityError):
                     await session.commit()
         finally:

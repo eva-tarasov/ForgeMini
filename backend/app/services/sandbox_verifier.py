@@ -25,6 +25,7 @@ from app.repositories.workspaces import WorkspaceRepository
 from app.sandbox.artifacts import FileArtifactStore
 from app.sandbox.changeset import Changeset, Snapshot, SnapshotError
 from app.sandbox.docker_sandbox import DockerSandbox, SandboxError, SandboxLimits, default_image
+from app.sandbox.environment import SetupError, prepare_environment
 from app.sandbox.verification import (
     SANDBOX_VERIFICATION_RECORDED, CommandRun, SandboxVerification, decide, find_protected_violations,
 )
@@ -125,9 +126,19 @@ class SandboxVerifier:
         patched = baseline = None
         try:
             if not violations and not changeset.is_empty:
+                setup_command = getattr(workspace, "setup_command", None)
+                if setup_command:
+                    # Same base image + command + source as the agent's run => same content-addressed image,
+                    # normally a cache hit. The evidence records that derived image, not the base one.
+                    image = (await prepare_environment(base_image=image, source=base, setup_command=setup_command,
+                                                       limits=self._limits)).image
                 patched = await self._run_tests(image, changeset.apply_to(base), workspace.test_command)
                 if patched.passed:    # only worth proving the "was red before" half if it can matter
                     baseline = await self._run_tests(image, base, workspace.test_command)
+        except SetupError as exc:
+            reason = "timed out" if exc.timed_out else f"exit code {exc.exit_code}"
+            return _inconclusive(f"setup_failed ({reason}): {exc.output_tail[-300:]}", workspace, image, changeset,
+                                 violations)
         except SandboxError as exc:
             return _inconclusive(f"verification_infrastructure_error: {exc}", workspace, image, changeset,
                                  violations)

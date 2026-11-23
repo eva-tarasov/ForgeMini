@@ -17,7 +17,7 @@ from app.services.agent_runner import AgentRunRequest
 
 AGENT_STEP_EVENT = "agent_step"
 MAX_SUMMARY_CHARS = 600
-_STEP_KINDS = ("model_response", "tool_result", "finish", "budget_exhausted", "error")
+_STEP_KINDS = ("model_response", "tool_result", "finish", "budget_exhausted", "error", "setup")
 
 
 def _squeeze(text: str, head: int, tail: int) -> str:
@@ -62,6 +62,10 @@ def step_payload(kind: str, data: dict[str, Any]) -> dict[str, Any]:
         summary = f"finish[{data.get('status')}]: {data.get('summary')}"
     elif kind == "error":
         summary = f"run error: {data.get('detail')}"
+    elif kind == "setup":
+        state = {"started": "installing dependencies (with network)…", "built": "dependencies installed",
+                 "reused": "dependencies reused from an earlier identical setup"}.get(str(data.get("state")), "")
+        summary = f"setup: {state} $ {_squeeze(str(data.get('command')), 160, 0)}"
     else:
         summary = f"stopped: {kind} (steps={data.get('steps')})"
     return {"schema_version": 1, "step": kind if kind in _STEP_KINDS else "other",
