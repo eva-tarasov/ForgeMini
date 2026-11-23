@@ -11,11 +11,13 @@ Verdict semantics (the point of the whole product):
 """
 from __future__ import annotations
 
+import configparser
 import posixpath
+import tomllib
 from dataclasses import dataclass
 from typing import Any
 
-from app.sandbox.changeset import Changeset, Snapshot
+from app.sandbox.changeset import Changeset, FileEntry, Snapshot
 from app.domain.verification import VerificationVerdict
 
 SCHEMA_VERSION = 1
@@ -24,7 +26,17 @@ OUTPUT_TAIL_CHARS = 4_000
 
 _TEST_DIRS = frozenset({"tests", "test", "__tests__", "spec", "specs"})
 # Files that can silently disable or reconfigure tests wherever they appear.
-_TEST_CONFIG_NAMES = frozenset({"conftest.py", "pytest.ini", "tox.ini", ".coveragerc", "noxfile.py"})
+_TEST_CONFIG_NAMES = frozenset({
+    "conftest.py", "pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml",
+    "tox.ini", ".coveragerc", "noxfile.py",
+})
+# General-purpose files that ALSO hold test settings. The agent may legitimately edit them (a dependency,
+# metadata, lint config), so they are not protected as a whole: only their test sections are compared.
+# Why it matters: `[tool.pytest.ini_options] addopts = "--deselect tests/test_x.py::test_bug"` turns a red
+# suite green without touching a single test file, and the Verifier would call that PASS.
+_MIXED_CONFIG_NAMES = frozenset({"pyproject.toml", "setup.cfg"})
+_PYPROJECT_TEST_TABLES = ("pytest", "coverage", "tox")             # [tool.<name>...]
+_SETUP_CFG_TEST_SECTIONS = ("tool:pytest", "coverage:", "tox:")    # section name or prefix
 
 
 def is_protected_path(path: str) -> bool:
@@ -39,8 +51,41 @@ def is_protected_path(path: str) -> bool:
     return name.startswith("test_") or stem.endswith("_test") or ".test." in name or ".spec." in name
 
 
+def _test_settings(name: str, data: bytes) -> dict[str, Any]:
+    """The test-related settings of a pyproject.toml / setup.cfg. Raises ValueError if it cannot be parsed."""
+    text = data.decode("utf-8")                                   # UnicodeDecodeError is a ValueError
+    if name == "pyproject.toml":
+        tool = tomllib.loads(text).get("tool", {})                # TOMLDecodeError is a ValueError
+        if not isinstance(tool, dict):
+            return {"tool": tool}
+        return {key: tool[key] for key in _PYPROJECT_TEST_TABLES if key in tool}
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:                             # not a ValueError subclass
+        raise ValueError(str(exc)) from exc
+    return {section: dict(parser[section]) for section in parser.sections()
+            if section == _SETUP_CFG_TEST_SECTIONS[0] or section.startswith(_SETUP_CFG_TEST_SECTIONS[1:])}
+
+
+def _test_settings_changed(path: str, before: FileEntry | None, after: FileEntry | None) -> bool:
+    """True if the change to a mixed config file touches its test settings.
+
+    Fail-closed: a file that cannot be parsed after (or before) the change counts as changed, because
+    then nobody can prove the test settings stayed the same.
+    """
+    name = posixpath.basename(path)
+    try:
+        old = _test_settings(name, before.data) if before is not None else {}
+        new = _test_settings(name, after.data) if after is not None else {}
+    except ValueError:
+        return True
+    return old != new
+
+
 def find_protected_violations(base: Snapshot, changeset: Changeset) -> tuple[str, ...]:
-    """Protected files the agent modified or deleted, or test-config files it created.
+    """Protected files the agent modified or deleted, test-config files it created, and changes to the
+    test sections of pyproject.toml / setup.cfg.
 
     Adding a NEW ordinary test file is allowed (it cannot make an existing test pass), but a new
     conftest.py / pytest.ini is not: those can skip or rewrite the user's tests.
@@ -53,6 +98,10 @@ def find_protected_violations(base: Snapshot, changeset: Changeset) -> tuple[str
         if not is_protected_path(path):
             continue
         if path in base.files or posixpath.basename(path) in _TEST_CONFIG_NAMES:
+            bad.add(path)
+    for path in (*changeset.written, *changeset.deleted):
+        if posixpath.basename(path) in _MIXED_CONFIG_NAMES and _test_settings_changed(
+                path, base.files.get(path), changeset.written.get(path)):
             bad.add(path)
     return tuple(sorted(bad))
 

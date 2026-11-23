@@ -85,3 +85,66 @@ def test_from_payload_rejects_garbage():
         SandboxVerification.from_payload({"schema_version": 2})
     with pytest.raises(ValueError):
         SandboxVerification.from_payload("nope")
+
+
+# --- test settings inside pyproject.toml / setup.cfg ---------------------------------------------------------------
+# These files are not test files, and the agent may legitimately edit them (a dependency, metadata, lint config).
+# But their pytest / coverage / tox sections decide WHICH tests run, so a change there is a protected change.
+PYPROJECT = '[project]\nname = "shop"\ndependencies = []\n\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
+SETUP_CFG = "[metadata]\nname = shop\n\n[tool:pytest]\ntestpaths = tests\n"
+
+
+def _violations(before: dict[str, str], written: dict[str, str], deleted: tuple[str, ...] = ()):
+    base = Snapshot({p: fe(t) for p, t in before.items()})
+    return find_protected_violations(base, Changeset(written={p: fe(t) for p, t in written.items()}, deleted=deleted))
+
+
+@pytest.mark.parametrize("new_text", [
+    # the bypass this guards against: deselect the failing test, the rest stays green
+    PYPROJECT + 'addopts = "--deselect tests/test_shipping.py::test_threshold"\n',
+    PYPROJECT.replace('testpaths = ["tests"]', 'testpaths = ["docs"]'),               # collect nothing useful
+    PYPROJECT + '\n[tool.coverage.report]\nfail_under = 0\n',                          # lower a coverage gate
+    PYPROJECT.replace('[tool.pytest.ini_options]\ntestpaths = ["tests"]\n', ""),      # drop the section
+], ids=["addopts-deselect", "testpaths", "coverage-gate", "section-removed"])
+def test_changing_pytest_settings_in_pyproject_is_a_violation(new_text):
+    assert _violations({"pyproject.toml": PYPROJECT}, {"pyproject.toml": new_text}) == ("pyproject.toml",)
+
+
+def test_other_pyproject_edits_are_allowed():
+    edited = PYPROJECT.replace("dependencies = []", 'dependencies = ["requests"]') + "\n[tool.ruff]\nline-length = 100\n"
+    assert _violations({"pyproject.toml": PYPROJECT}, {"pyproject.toml": edited}) == ()
+
+
+def test_reformatting_the_pytest_section_without_changing_values_is_allowed():
+    # compared as parsed values, not text: comments and spacing are not a change
+    reformatted = PYPROJECT.replace('testpaths = ["tests"]', 'testpaths = [ "tests" ]   # where tests live')
+    assert _violations({"pyproject.toml": PYPROJECT}, {"pyproject.toml": reformatted}) == ()
+
+
+def test_new_or_deleted_pyproject_counts_only_if_it_carries_test_settings():
+    assert _violations({}, {"pkg/pyproject.toml": PYPROJECT}) == ("pkg/pyproject.toml",)
+    assert _violations({}, {"pyproject.toml": '[project]\nname = "x"\n'}) == ()
+    assert _violations({"pyproject.toml": PYPROJECT}, {}, deleted=("pyproject.toml",)) == ("pyproject.toml",)
+    assert _violations({"pyproject.toml": '[project]\nname = "x"\n'}, {}, deleted=("pyproject.toml",)) == ()
+
+
+def test_unparsable_config_after_the_change_is_a_violation():
+    # fail-closed: if the file cannot be read, nobody can prove the test settings are intact
+    assert _violations({"pyproject.toml": PYPROJECT}, {"pyproject.toml": PYPROJECT + "[tool.pytest\n"}) \
+        == ("pyproject.toml",)
+    assert _violations({"setup.cfg": SETUP_CFG}, {"setup.cfg": SETUP_CFG + "[tool:pytest]\nx = 1\n"}) \
+        == ("setup.cfg",)                                                    # duplicate section
+
+
+def test_setup_cfg_test_sections_are_protected_and_the_rest_is_not():
+    assert _violations({"setup.cfg": SETUP_CFG},
+                       {"setup.cfg": SETUP_CFG + "addopts = -k 'not threshold'\n"}) == ("setup.cfg",)
+    assert _violations({"setup.cfg": SETUP_CFG},
+                       {"setup.cfg": SETUP_CFG + "\n[coverage:report]\nfail_under = 0\n"}) == ("setup.cfg",)
+    assert _violations({"setup.cfg": SETUP_CFG},
+                       {"setup.cfg": SETUP_CFG.replace("name = shop", "name = shop2")}) == ()
+
+
+@pytest.mark.parametrize("name", [".pytest.ini", "pytest.toml", ".pytest.toml"])
+def test_newer_pytest_config_files_are_protected(name):
+    assert _violations({}, {name: "[pytest]\naddopts = -k nothing\n"}) == (name,)
