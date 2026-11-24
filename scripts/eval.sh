@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mini-evals runner.   scripts/eval.sh list | run [--runs N] [--tasks a,b] [--model NAME] [--yes] | report FILE.json
+# Mini-evals runner.   scripts/eval.sh list | run [--runs N] [--tasks a,b] [--model NAME] [--yes] | report FILE.json | compare A.json B.json...
 # Needs the server running (scripts/start.sh in another terminal) and the venv with forge-cli installed.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

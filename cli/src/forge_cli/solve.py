@@ -131,8 +131,9 @@ def solve(
     except ForgeAPIError as exc:
         if exc.status_code == 503:
             raise SolveStartError(
-                "The server cannot start runs. Most likely OPENAI_API_KEY / FORGE_MODEL_NAME are not set "
-                "in the server's environment (.env), or Docker is not available. See the server log.") from None
+                "The server cannot start runs. Most likely the model settings in the server's .env are incomplete "
+                "(FORGE_MODEL_NAME, FORGE_MODEL_API_KEY / OPENAI_API_KEY; `curl localhost:8000/model` names the "
+                "missing one), or Docker is not available. See the server log.") from None
         raise
 
     if on_started is not None:
@@ -187,15 +188,21 @@ def _event_line(event) -> str | None:
 
 # What to do next depends on WHY the run failed: a provider problem is not a problem with the task.
 _PROVIDER_HINTS = {
-    "provider_auth": "OpenAI rejected the API key. Check OPENAI_API_KEY in .env (scripts/setup.sh), then restart the server.",
-    "provider_connection": "The server could not reach OpenAI. Check your internet connection / proxy / VPN.",
-    "provider_timeout": "OpenAI did not answer in time. Try again; raise FORGE_MODEL_TIMEOUT_SECONDS in .env if it repeats.",
-    "provider_rate_limited": "OpenAI rate limit hit. Wait a minute and try again.",
-    "provider_rate_limit_unknown": "OpenAI rate limit hit. Wait a minute and try again.",
-    "provider_quota_exhausted": "OpenAI quota/billing is exhausted for this key. Check your OpenAI account.",
-    "provider_request_rejected": "OpenAI rejected the request. Most often FORGE_MODEL_NAME is wrong or not available to your key.",
-    "provider_unavailable": "OpenAI is temporarily unavailable. Try again later.",
-    "provider_error": "OpenAI returned an error. See the server log (terminal 1) for details.",
+    # The CLI does not know which provider the server uses (FORGE_MODEL_PROVIDER), so hints name the setting, and
+    # add the local-Ollama cause where it is the usual one.
+    "provider_auth": "The model provider rejected the API key. Check FORGE_MODEL_API_KEY (or OPENAI_API_KEY for OpenAI) "
+                     "in .env, then restart the server.",
+    "provider_connection": "The server could not reach the model provider. Ollama: is `ollama serve` running? "
+                           "Cloud: check your internet connection / proxy / VPN and FORGE_MODEL_BASE_URL.",
+    "provider_timeout": "The model did not answer in time. Try again; raise FORGE_MODEL_TIMEOUT_SECONDS in .env if it "
+                        "repeats (a local model on a laptop is often just slow).",
+    "provider_rate_limited": "Rate limit of the model provider hit. Wait a minute and try again.",
+    "provider_rate_limit_unknown": "Rate limit of the model provider hit. Wait a minute and try again.",
+    "provider_quota_exhausted": "Quota/billing is exhausted for this key. Check your account at the model provider.",
+    "provider_request_rejected": "The model provider rejected the request. Most often FORGE_MODEL_NAME is wrong or not "
+                                 "available to your key (Ollama: download it first, `ollama pull <model>`).",
+    "provider_unavailable": "The model provider is temporarily unavailable. Try again later.",
+    "provider_error": "The model provider returned an error. See the server log (terminal 1) for details.",
     "sandbox_error": "The Docker sandbox failed. Is Docker running? See the server log (terminal 1).",
     "workspace_not_configured": "The workspace has no source path / test command (create it via forge solve).",
     "setup_failed": "The --setup command failed (its output is above). The agent never started; fix the command "

@@ -22,6 +22,7 @@ class Attempt:
     input_tokens: int = 0
     output_tokens: int = 0
     seconds: float = 0.0
+    cost_usd: float | None = None      # Forge's estimate from the server's tariff; None = not priced / incomplete
     run_id: str = ""
     agent_summary: str = ""
     detail: str = ""                   # failure code / error text for infra_error, blocked reason otherwise
