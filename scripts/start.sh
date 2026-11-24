@@ -41,16 +41,27 @@ cfg()    { local cur="${!1:-}"; if [[ -n "$cur" ]]; then printf '%s' "$cur"; els
 PG_PASSWORD="$(cfg POSTGRES_PASSWORD)"
 PG_HOST="$(cfg POSTGRES_HOST)"; PG_HOST="${PG_HOST:-127.0.0.1}"
 PG_PORT="$(cfg POSTGRES_PORT)"; PG_PORT="${PG_PORT:-55432}"
-API_KEY="$(cfg OPENAI_API_KEY)"; MODEL_NAME="$(cfg FORGE_MODEL_NAME)"
 IMAGE="$(cfg FORGE_SANDBOX_IMAGE)"; IMAGE="${IMAGE:-python:3.12-slim}"
 [[ -n "$PG_PASSWORD" && "$PG_PASSWORD" != CHANGE_ME* ]] || fail \
   "POSTGRES_PASSWORD in .env is empty or still the placeholder." \
   "Run the one-time setup, it generates a password for you:  scripts/setup.sh"
 ok ".env: postgres settings"
-if [[ -z "$API_KEY" || "$API_KEY" == YOUR_* || -z "$MODEL_NAME" || "$MODEL_NAME" == YOUR_* ]]; then
-  echo "! OPENAI_API_KEY / FORGE_MODEL_NAME are not set in .env: the server will start, but starting a run will answer 503." >&2
+# Model settings: ask the backend itself (one source of truth for provider presets and key rules), never print the key.
+if model_line="$(cd backend && "$PY" - <<'PYEOF' 2>&1
+from app.bootstrap import ForgeMiniSettings, model_connection
+from app.sandbox.model_provider import ModelConfigError
+try:
+    conn = model_connection(ForgeMiniSettings())
+except ModelConfigError as exc:
+    print(exc)
+    raise SystemExit(1)
+print(f"{conn.provider} / {conn.model}" + (f" @ {conn.public()['base_url']}" if conn.base_url else ""))
+PYEOF
+)"; then
+  ok "model: $model_line"
 else
-  ok ".env: model settings present"
+  echo "! model settings: $model_line" >&2
+  echo "  The server will start, but starting a run will answer 503 until this is fixed in .env." >&2
 fi
 
 # 4. Docker daemon (the sandbox needs it) and PostgreSQL.

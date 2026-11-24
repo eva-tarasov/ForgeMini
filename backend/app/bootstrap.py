@@ -5,7 +5,7 @@ and nothing could run outside test harnesses. Run this instead:
 
     uvicorn app.bootstrap:create_forge_app --factory --host 127.0.0.1 --port 8000
 
-Settings come from the environment / project-root .env (the OpenAI key lives ONLY there).
+Settings come from the environment / project-root .env (model API keys live ONLY there).
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from app.sandbox.agent_loop import LoopBudget
 from app.sandbox.artifacts import FileArtifactStore
 from app.sandbox.docker_sandbox import SandboxLimits, default_image
 from app.sandbox.events import make_emit_factory
+from app.sandbox.model_provider import ModelConfigError, ModelConnection, resolve_connection
 from app.sandbox.runner import SandboxJob, SandboxRunner, ToolCallingModel
 from app.services.agent_cost import AgentPricing, ModelTariff
 from app.services.agent_runner import AgentRunnerError, AgentRunRequest
@@ -47,8 +48,14 @@ ModelFactory = Callable[[], ToolCallingModel]
 class ForgeMiniSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_ENV, env_file_encoding="utf-8", extra="ignore",
                                       hide_input_in_errors=True)
-    openai_api_key: SecretStr | None = None
+    # Which model (see sandbox/model_provider.py): openai | moonshot (Kimi) | zai (GLM) | ollama | openai_compatible.
+    forge_model_provider: str = "openai"
     forge_model_name: str | None = None
+    forge_model_base_url: str | None = None          # default per provider; required for openai_compatible
+    forge_model_api_key: SecretStr | None = None     # explicit override; usually the provider's own key below
+    openai_api_key: SecretStr | None = None
+    moonshot_api_key: SecretStr | None = None        # Kimi
+    zai_api_key: SecretStr | None = None             # GLM
     forge_model_timeout_seconds: float = Field(default=120.0, gt=0)     # one LLM call (M1 default was 15 s)
     forge_run_timeout_seconds: float = Field(default=900.0, gt=0)       # whole agent run (M1 was hard-wired to 60 s)
     forge_verify_timeout_seconds: float = Field(default=300.0, gt=0)    # one test-command run in the verifier
@@ -65,14 +72,32 @@ class ForgeMiniSettings(BaseSettings):
     forge_price_version: str = "env"                                    # free label, e.g. the date you copied it
 
 
+def model_connection(cfg: ForgeMiniSettings) -> ModelConnection:
+    def secret(value: SecretStr | None) -> str | None:
+        return value.get_secret_value() if value is not None else None
+    return resolve_connection(provider=cfg.forge_model_provider, model=cfg.forge_model_name,
+                              base_url=cfg.forge_model_base_url, api_key=secret(cfg.forge_model_api_key),
+                              provider_keys={"OPENAI_API_KEY": secret(cfg.openai_api_key),
+                                             "MOONSHOT_API_KEY": secret(cfg.moonshot_api_key),
+                                             "ZAI_API_KEY": secret(cfg.zai_api_key)})
+
+
 def model_pricing(cfg: ForgeMiniSettings) -> AgentPricing:
     """One tariff for every call of the sandbox loop. Invalid values fail at startup, not in the middle of a run."""
     if cfg.forge_price_input_usd_per_million is None or cfg.forge_price_output_usd_per_million is None:
+        if cfg.forge_model_provider == "ollama" and cfg.forge_model_name:
+            # A local model costs electricity, not tokens. An explicit $0 tariff says exactly that; leaving it
+            # unpriced would print "not priced", which reads as "we do not know" when we actually do.
+            zero = Decimal("0")
+            local = ModelTariff(provider="ollama", model=cfg.forge_model_name, tariff_version="local-no-token-price",
+                                input_usd_per_million=zero, output_usd_per_million=zero,
+                                cached_input_usd_per_million=zero)
+            return AgentPricing(research=local, finalization=local)
         return AgentPricing()
     if not cfg.forge_model_name:
         raise ValueError("FORGE_PRICE_* is set but FORGE_MODEL_NAME is not: the tariff must name its model")
     tariff = ModelTariff(
-        provider="openai", model=cfg.forge_model_name, tariff_version=cfg.forge_price_version,
+        provider=cfg.forge_model_provider, model=cfg.forge_model_name, tariff_version=cfg.forge_price_version,
         input_usd_per_million=cfg.forge_price_input_usd_per_million,
         output_usd_per_million=cfg.forge_price_output_usd_per_million,
         cached_input_usd_per_million=cfg.forge_price_cached_input_usd_per_million,
@@ -81,14 +106,24 @@ def model_pricing(cfg: ForgeMiniSettings) -> AgentPricing:
 
 
 def openai_model_factory(cfg: ForgeMiniSettings) -> ModelFactory:
+    """Builds the chat model for every run. Name kept: every provider goes through the OpenAI-compatible client."""
     def build() -> ToolCallingModel:
-        if cfg.openai_api_key is None or not cfg.forge_model_name:
-            raise RunnerConfigurationError(
-                "OPENAI_API_KEY and FORGE_MODEL_NAME must be set in the server environment (.env)")
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=cfg.forge_model_name, api_key=cfg.openai_api_key,
-                          timeout=cfg.forge_model_timeout_seconds, max_retries=2)   # type: ignore[return-value]
+        try:
+            conn = model_connection(cfg)
+        except ModelConfigError as exc:
+            raise RunnerConfigurationError(str(exc)) from None      # -> 503 with the fix-it message
+        return build_chat_model(conn, timeout=cfg.forge_model_timeout_seconds)
     return build
+
+
+def build_chat_model(conn: ModelConnection, *, timeout: float) -> ToolCallingModel:
+    from langchain_openai import ChatOpenAI
+    kwargs: dict = {"model": conn.model, "api_key": conn.api_key, "timeout": timeout, "max_retries": 2}
+    if conn.base_url:
+        kwargs["base_url"] = conn.base_url
+    if conn.chat_completions_only:
+        kwargs["use_responses_api"] = False     # POST {base_url}/chat/completions, never /responses
+    return ChatOpenAI(**kwargs)                 # type: ignore[return-value]
 
 
 def create_forge_app(
@@ -148,4 +183,13 @@ def create_forge_app(
     app = create_app(settings=db_settings, session_factory=session_factory, execution_binding=binding)
     app.state.artifact_store = artifacts
     app.include_router(sandbox_runs_router)
+
+    @app.get("/model", tags=["runner"])
+    def model_info() -> dict:
+        """Which model runs will use: evals label their results with it instead of a hand-typed name."""
+        try:
+            return {"configured": True, **model_connection(cfg).public()}
+        except ModelConfigError as exc:
+            return {"configured": False, "provider": cfg.forge_model_provider, "model": cfg.forge_model_name,
+                    "base_url": None, "error": str(exc)}
     return app

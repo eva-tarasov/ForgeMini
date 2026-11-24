@@ -84,6 +84,8 @@ def run_attempt(client: ForgeAPIClient, task: EvalTask, attempt_no: int, *, sour
         if report.usage is not None:
             base.steps, base.tool_calls = report.usage.steps, report.usage.tool_calls
             base.input_tokens, base.output_tokens = report.usage.input_tokens, report.usage.output_tokens
+            if report.usage.cost_status == "estimated" and report.usage.known_cost_usd is not None:
+                base.cost_usd = float(report.usage.known_cost_usd)     # display only; the server keeps the Decimal
         base.agent_summary = (report.agent_summary or "")[:400]
         base.detail = (report.failure_code or report.blocked_reason or "")[:300]
     else:

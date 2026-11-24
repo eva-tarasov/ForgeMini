@@ -247,7 +247,8 @@ def test_unreachable_server_gives_actionable_message_and_creates_nothing(monkeyp
 
 
 @pytest.mark.parametrize("code,expected", [
-    ("provider_auth", "OPENAI_API_KEY"),
+    ("provider_auth", "FORGE_MODEL_API_KEY"),
+    ("provider_connection", "ollama serve"),
     ("provider_connection", "internet connection"),
     ("provider_request_rejected", "FORGE_MODEL_NAME"),
     ("provider_quota_exhausted", "billing"),
@@ -433,7 +434,7 @@ def test_rich_view_tells_what_to_do_when_the_provider_failed(server, tmp_path, m
     result = runner.invoke(app, solve_args(tmp_path))
     plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
     assert result.exit_code == 1 and "NOT VERIFIED (failed)" in plain
-    assert "What to do: OpenAI rejected the API key" in plain and "forge run events" in plain
+    assert "What to do: The model provider rejected the API key" in plain and "forge run events" in plain
 
 
 # --- run cost line (usage wired to the kernel collector; prices come from the server .env) -------------------------

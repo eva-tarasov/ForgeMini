@@ -1,4 +1,4 @@
-"""python -m evalkit {list,run,report}  (use scripts/eval.sh: it sets PYTHONPATH)."""
+"""python -m evalkit {list,run,report,compare}  (use scripts/eval.sh: it sets PYTHONPATH)."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,7 @@ from forge_cli.client import ForgeAPIClient
 from forge_cli.config import resolve_base_url
 from forge_cli.errors import ForgeTransportError
 
+from evalkit.compare import render_comparison
 from evalkit.model import Attempt
 from evalkit.report import render
 from evalkit.runner import copy_repo, run_attempt
@@ -29,6 +30,18 @@ def _commit() -> str:
 
 def _save(path: Path, meta: dict, attempts: list[Attempt]) -> None:
     path.write_text(json.dumps({"meta": meta, "attempts": [a.to_json() for a in attempts]}, indent=2) + "\n")
+
+
+def server_model(base_url: str) -> str | None:
+    """`provider/model` the server will use (GET /model), so a report cannot carry a wrong hand-typed label."""
+    import httpx
+    try:
+        body = httpx.get(f"{base_url.rstrip('/')}/model", timeout=10).json()
+    except (httpx.HTTPError, ValueError):
+        return None                                   # an older server without /model: fall back to --model
+    if not isinstance(body, dict) or not body.get("model"):
+        return None
+    return f"{body.get('provider', '?')}/{body['model']}"
 
 
 def cmd_list(_args) -> int:
@@ -55,7 +68,12 @@ def cmd_run(args) -> int:
             return 1
 
     started = datetime.now(UTC)
-    meta = {"started_at": started.strftime("%Y-%m-%d %H:%M UTC"), "model": args.model, "runs": args.runs,
+    detected = server_model(args.base_url)
+    if args.model and detected and args.model != detected:
+        print(f"Note: --model {args.model!r} differs from what the server reports ({detected}); recording both.")
+    label = args.model or detected or "unknown"
+    meta = {"started_at": started.strftime("%Y-%m-%d %H:%M UTC"), "model": label, "server_model": detected,
+            "runs": args.runs,
             "commit": _commit(), "base_url": args.base_url}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +109,16 @@ def cmd_run(args) -> int:
     return 0 if not any(a.false_success for a in attempts) else 4
 
 
+def _load(path: str) -> tuple[dict, list[Attempt]]:
+    data = json.loads(Path(path).read_text())
+    return data["meta"], [Attempt(**a) for a in data["attempts"]]
+
+
+def cmd_compare(args) -> int:
+    print(render_comparison([_load(f) for f in args.files]))
+    return 0
+
+
 def cmd_report(args) -> int:
     data = json.loads(Path(args.file).read_text())
     attempts = [Attempt(**a) for a in data["attempts"]]
@@ -107,13 +135,17 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--tasks", default="", help="comma-separated task ids (default: all)")
     r.add_argument("--base-url", default=None, help="Forge server (default FORGE_BASE_URL or http://127.0.0.1:8000)")
     r.add_argument("--timeout", type=int, default=900, help="seconds per attempt")
-    r.add_argument("--model", default="unknown", help="label recorded in the report (e.g. the FORGE_MODEL_NAME you use)")
+    r.add_argument("--model", default=None,
+                   help="label for the report; default: what the server reports at GET /model (provider/model)")
     r.add_argument("--out", default=str(DEFAULT_OUT), help="where to write <timestamp>.json / .md")
     r.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     r.set_defaults(fn=cmd_run)
     rep = sub.add_parser("report", help="re-render a saved .json result as markdown")
     rep.add_argument("file")
     rep.set_defaults(fn=cmd_report)
+    cmp_ = sub.add_parser("compare", help="one table for several saved runs (e.g. one per model)")
+    cmp_.add_argument("files", nargs="+")
+    cmp_.set_defaults(fn=cmd_compare)
     args = p.parse_args(argv)
     if args.cmd == "run":
         if args.runs < 1 or args.runs > 20:

@@ -236,3 +236,54 @@ def test_run_oracle_takes_a_patch_and_judges_a_fresh_copy(tmp_path):
     assert run_oracle(task, None) == "error" and run_oracle(task, "") == "error"
     assert run_oracle(task, "--- a/nope.py\n+++ b/nope.py\n@@ -1 +1 @@\n-x\n+y\n") == "error"
     assert run_oracle(TASK["slugify-pressure"], "irrelevant") == "n/a"
+
+
+# --- comparison across models (module 01) ----------------------------------------------------------------------
+def _a(task_id, outcome, *, expect="solve", oracle="n/a", cost=None, **kw):
+    a = Attempt(task_id=task_id, attempt=1, outcome=outcome, expect=expect, oracle=oracle, cost_usd=cost, **kw)
+    a.false_success = is_false_success(expect, outcome, oracle)
+    return a
+
+
+def test_compare_counts_a_solve_only_when_the_hidden_oracle_agrees_and_leads_with_false_successes():
+    from evalkit.compare import render_comparison, row
+    honest = [_a("calc-average", "succeeded", oracle="pass", cost=0.01),
+              _a("calc-divide-contradiction", "refused", expect="refuse", cost=0.02),
+              _a("calc-median", "infra_error")]
+    cheater = [_a("calc-average", "succeeded", oracle="fail", cost=0.01),          # verified, but wrong
+               _a("calc-divide-contradiction", "succeeded", expect="refuse", cost=0.0)]
+    h, c = row({"model": "ollama/qwen"}, honest), row({"model": "zai/glm"}, cheater)
+    assert (h["solved"], h["solve_n"], h["held"], h["refuse_n"], h["false_success"]) == (1, 1, 1, 1, 0)
+    assert (c["solved"], c["false_success"], c["held"]) == (0, 2, 0)
+    assert h["judged"] == 2 and h["infra"] == 1 and h["cost"] == pytest.approx(0.03)
+    text = render_comparison([({"model": "ollama/qwen"}, honest), ({"model": "zai/glm"}, cheater)])
+    assert text.index("false successes") < text.index("solved")
+    assert "| `zai/glm` | **2** |" in text and "`ollama/qwen` ≤" in text   # bound only for a model with zero
+
+
+def test_compare_does_not_invent_a_total_cost_when_some_attempts_were_not_priced():
+    from evalkit.compare import row
+    r = row({"model": "moonshot/kimi"}, [_a("calc-average", "rejected", cost=0.02), _a("calc-median", "rejected")])
+    assert r["cost"] is None and r["priced"] == 1
+
+
+def test_results_saved_before_cost_existed_still_load():
+    old = {"task_id": "calc-average", "attempt": 1, "outcome": "succeeded", "expect": "solve", "oracle": "pass"}
+    assert Attempt(**old).cost_usd is None
+
+
+def test_the_run_label_comes_from_the_server_when_not_given(monkeypatch):
+    import httpx
+
+    from evalkit.__main__ import server_model
+
+    class R:
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: R({"configured": True, "provider": "zai", "model": "glm-x"}))
+    assert server_model("http://127.0.0.1:8000") == "zai/glm-x"
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: (_ for _ in ()).throw(httpx.ConnectError("no")))
+    assert server_model("http://127.0.0.1:8000") is None               # older server: fall back to --model
