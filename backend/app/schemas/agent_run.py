@@ -63,7 +63,7 @@ class EmptyEventDetails(_ReadResponse):
 
 
 class RunStepDetails(_ReadResponse):
-    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "other"]
+    step: Literal["model_response", "tool_result", "finish", "budget_exhausted", "error", "setup", "other"]
     summary: Annotated[str, Field(max_length=600)]
     # Optional structured twin of `summary` (added later; old events simply lack these fields).
     turn: int | None = None                                           # index of the model call
